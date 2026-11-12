@@ -48,6 +48,9 @@
   import ChoicePicker from './ChoicePicker.svelte';
   import ConnectionDialog from './ConnectionDialog.svelte';
   import AccountUsage from './AccountUsage.svelte';
+  import PoolUsage from './PoolUsage.svelte';
+  import { poolUsage, type PoolReading } from '$lib/account-balance';
+  import { clock } from '$lib/clock';
   import { snapshotFor, usageKey, type UsageSnapshot } from '$lib/usage';
   import type { Presence } from '$lib/sync';
   import {
@@ -90,6 +93,7 @@
     sendSignInCode,
     running,
     highlight = '',
+    usedTogether,
   }: {
     workspace: Workspace;
     installation: Installation | undefined;
@@ -123,7 +127,11 @@
     running: boolean;
     /** The connection this visit was opened for, shown and marked until it is connected. */
     highlight?: string;
+    /** The usage of an agent's accounts on a computer that count for what they used together,
+     * as Settings → New chats shows it, or none where the agent has a single account there. */
+    usedTogether?: (environmentIds: readonly string[], provider: ProviderId) => PoolReading[];
   } = $props();
+  const uid = $props.id();
   let provider = $state<ProviderId>('claude');
   let name = $state('');
   let linkedAccountId = $state('');
@@ -995,6 +1003,11 @@
                         (s) => s.provider === id && s.environmentId === cliEnvironment.id,
                       )
                     : undefined}
+                  {@const together =
+                    usedTogether?.(
+                      environments.map((e) => e.id),
+                      id,
+                    ) ?? []}
                   <article
                     class="connection-card provider-group"
                     aria-label={providers[id].name + ' connections'}
@@ -1068,6 +1081,13 @@
                           </div>{/if}
                       {/if}
                     </div>
+                    {#if poolUsage(id, together, clock.now).length}
+                      {@const label = `${uid}-${computer.id}-${id}-overall`}
+                      <section class="overall-usage" aria-labelledby={label}>
+                        <span class="overall-label" id={label}>Overall usage</span>
+                        <PoolUsage provider={id} readings={together} columns />
+                      </section>
+                    {/if}
                     {#each accounts as account (account.id)}
                       {@render accountCard(account, computer.id)}
                     {:else}{#if local && computer.wsl}
@@ -1816,6 +1836,27 @@
   .fleet-account {
     border-top: 1px solid var(--border);
     padding: 14px 16px 16px;
+  }
+  /* What the agent's accounts on the computer used together, its bars lined up with each
+     account's below. */
+  .overall-usage {
+    display: grid;
+    grid-template-columns: minmax(160px, 0.7fr) minmax(0, 2fr);
+    align-items: start;
+    gap: 24px;
+    padding: 14px 16px 16px;
+    border-top: 1px solid var(--border);
+  }
+  .overall-label {
+    color: var(--text-secondary);
+    font-size: var(--text-base);
+    font-weight: 600;
+  }
+  @media (max-width: 1000px) {
+    .overall-usage {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 12px;
+    }
   }
   .provider-group > .fleet-account:last-child {
     border-radius: 0 0 calc(var(--radius-xl) - 1px) calc(var(--radius-xl) - 1px);

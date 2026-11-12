@@ -263,14 +263,86 @@ test('an account whose check finishes while the picker is open gets its bars', a
   await page.getByRole('combobox', { name: 'Agent', exact: true }).click();
   const claude = page.getByRole('option', { name: 'Claude', exact: true });
   await expect(claude.locator('.option-detail')).toHaveText('Checking availability…');
-  await expect(claude.locator('.quota-bars')).toHaveCount(0);
-  await expect(claude.locator('.option-aside')).toBeHidden();
+  // It is read as soon as its check answers, so its limits wait in their places meanwhile.
+  await expect(claude.locator('.quota-bar')).toHaveText(['5-hourChecking…', 'WeeklyChecking…']);
   await page.evaluate(() => {
     const state = window as any;
     state.holdCli = [];
     for (const request of state.pendingCli.splice(0)) request.resolve();
   });
   await expect(claude.locator('.quota-bar')).toHaveText(['5-hour70% used', 'Weekly25% used']);
+});
+
+test('the Agent picker keeps its width while it reads its accounts', async ({ page }) => {
+  await prepare(page);
+  // Readings a test holds from the start of the app, across reloads.
+  await page.addInitScript(() => {
+    const hold = localStorage.getItem('test-hold-usage');
+    if (hold) (window as any).holdUsage = JSON.parse(hold);
+  });
+  await page.goto('/');
+  const second = await addAccount(page, 'Second Claude');
+  const login = await connectionNamed(page, 'Claude CLI login');
+  const others = [await connectionOf(page, 'codex'), await connectionOf(page, 'gemini')];
+  // Plans without a 5-hour limit, as the user's are, Claude's CLI running Fable by default: the
+  // limits an account may have before its first reading are not the ones it has.
+  await page.evaluate(
+    ({ claude, others }) => {
+      const own = (id: string, value: object) =>
+        localStorage.setItem(`test-usage-percent-${id}`, JSON.stringify(value));
+      for (const id of claude) own(id, { omit: ['5-hour'], model: 'claude-fable-5-2' });
+      for (const id of others) own(id, { omit: ['5-hour'] });
+    },
+    { claude: [second, login], others },
+  );
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await chooseTestFolder(page);
+  const agent = page.getByRole('combobox', { name: 'Agent', exact: true });
+  const list = page.getByRole('listbox');
+  // The list's width, and the kind and place of each account's bars.
+  const layout = () =>
+    page.locator('.picker-popover').evaluate((popover) => ({
+      width: Math.round(popover.getBoundingClientRect().width),
+      bars: [...popover.querySelectorAll<HTMLElement>('[role="option"]')].flatMap((option) =>
+        [...option.querySelectorAll<HTMLElement>('.quota-bar')].map((bar) => ({
+          account: option.querySelector('.option-name')!.textContent,
+          slot: bar.dataset.slot,
+          left: Math.round(bar.getBoundingClientRect().left),
+        })),
+      ),
+    }));
+  const values = () => list.locator('.quota-bar strong').allTextContents();
+
+  await agent.click();
+  await expect(
+    page.getByRole('option', { name: 'Claude · Second Claude', exact: true }).locator('.quota-bar'),
+  ).toHaveText(['Weekly25% used', 'Fable weekly50% used']);
+  await expect(
+    page.getByRole('option', { name: 'Codex', exact: true }).locator('.quota-bar'),
+  ).toHaveText(['Weekly25% used']);
+  await expect.poll(values).not.toContain('Checking…');
+  const read = await layout();
+  expect(new Set(read.bars.map((bar) => bar.slot))).toEqual(new Set(['weekly', 'fable-weekly']));
+  await agent.press('Escape');
+
+  // The next start of the app reads every account again: until the readings arrive, each
+  // account's bars wait in the places its last reading filled, and nothing moves once they do.
+  await page.evaluate(() =>
+    localStorage.setItem('test-hold-usage', JSON.stringify(['claude', 'codex', 'gemini'])),
+  );
+  await page.reload();
+  await chooseTestFolder(page);
+  await agent.click();
+  await expect.poll(values).toEqual(read.bars.map(() => 'Checking…'));
+  expect(await layout()).toEqual(read);
+  await page.locator('.picker-popover').screenshot({ path: 'artifacts/agent-usage-waiting.png' });
+  await page.evaluate(() => {
+    const state = window as any;
+    state.holdUsage = [];
+    for (const release of state.heldUsage?.splice(0) ?? []) release();
+  });
+  await expect.poll(values).not.toContain('Checking…');
+  expect(await layout()).toEqual(read);
 });
 
 test('a narrow Agent picker puts each account’s bars below its name', async ({ page }) => {

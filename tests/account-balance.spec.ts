@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 import { mockDesktop } from './desktop-helper';
 import { chooseTestFolder } from './folder-helper';
 
@@ -577,5 +577,70 @@ test('Settings shows what the accounts balanced on a computer used together', as
   await expect(used('Weekly')).toHaveAttribute(
     'aria-valuetext',
     '50% used, recommended 99.4%, average of 1 account',
+  );
+});
+
+test('Connections shows what an agent’s accounts on a computer used together', async ({ page }) => {
+  await prepare(page);
+  const second = await addAccount(page, 'Claude', 'Second Claude');
+  const login = await connectionOf(page, 'Claude CLI login');
+  // An hour before every reset, as above: the 5-hour guide is 80% and the weekly one 99.4%.
+  await setUsage(page, login, { '5-hour': 95, Weekly: 50 });
+  await setUsage(page, second, { '5-hour': 85, Weekly: 30 });
+  // Opened again, Connections reads its accounts again.
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  const card = (agentName: string) =>
+    page
+      .getByRole('article', { name: 'Desktop computer', exact: true })
+      .getByRole('article', { name: `${agentName} connections`, exact: true });
+  const overall = card('Claude').getByRole('region', { name: 'Overall usage', exact: true });
+  const used = (label: string) =>
+    overall.getByRole('progressbar', { name: `${label} limit used`, exact: true });
+  // As Settings shows it for the accounts balanced there.
+  await expect(used('5-hour')).toHaveAttribute(
+    'aria-valuetext',
+    '90% used, recommended 80%, average of 2 accounts',
+  );
+  await expect(used('Weekly')).toHaveAttribute(
+    'aria-valuetext',
+    '40% used, recommended 99.4%, average of 2 accounts',
+  );
+  await expect(overall.getByRole('img', { name: 'Ahead of pace' })).toBeVisible();
+  await expect(overall.getByRole('img', { name: 'Below pace' })).toBeVisible();
+  // An agent with a single account there has nothing to add up.
+  await expect(card('Codex').getByRole('region', { name: 'Overall usage' })).toHaveCount(0);
+  // Its bars line up with each account's own below.
+  const left = (locator: Locator) =>
+    locator.evaluate((element) => Math.round(element.getBoundingClientRect().left));
+  const own = page.getByRole('region', { name: 'Usage for Second Claude', exact: true });
+  expect(await left(overall.locator('.pool-limit').nth(1))).toBe(
+    await left(own.locator('.account-limit').nth(1)),
+  );
+  await card('Claude').screenshot({ path: 'artifacts/connections-overall-usage.png' });
+  // On a phone they go below their label, within the card.
+  await page.setViewportSize({ width: 390, height: 844 });
+  const box = (locator: Locator) =>
+    locator.evaluate((element) => {
+      const { top, bottom, right } = element.getBoundingClientRect();
+      return { top, bottom, right };
+    });
+  const label = await box(overall.locator('.overall-label'));
+  const bars = await box(overall.locator('.pool-limits'));
+  expect(bars.top).toBeGreaterThanOrEqual(label.bottom);
+  expect(bars.right).toBeLessThanOrEqual((await box(card('Claude'))).right);
+  await overall.screenshot({ path: 'artifacts/connections-overall-usage-narrow.png' });
+  await page.setViewportSize({ width: 1380, height: 900 });
+
+  // An account Settings leaves out of balancing counts no more here than there.
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const option = page.getByRole('checkbox', { name: 'Start on the least used account' });
+  await option.setChecked(true);
+  await expect(option).toBeEnabled();
+  await include(page, 'Second Claude', false);
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await expect(used('5-hour')).toHaveAttribute(
+    'aria-valuetext',
+    '95% used, recommended 80%, average of 1 account',
   );
 });

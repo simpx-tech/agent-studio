@@ -222,11 +222,17 @@ const reported = (window: LimitWindow) => window.usedPercent != null;
  * dropped the 5-hour limit from some plans, and most Codex accounts report none. Only while a
  * first reading of the account is under way or due (`checking`), and none it has lists all its
  * limits, do the limits it may have wait in their places, unmeasured.
+ *
+ * An account view (no model) may pass the kinds of limit the account showed after its last
+ * reading on this device (`expected`, `src/lib/shown-limits.ts`): only those then wait, and
+ * Fable weekly shows while no reading says which model the account's CLI runs by default, so a
+ * list of accounts keeps its columns while it loads.
  */
 export function visibleLimits(
   snapshot: UsageSnapshot | undefined,
   settings: ChatSettings,
   checking = false,
+  expected?: readonly LimitSlot[],
 ): LimitWindow[] {
   let windows = snapshot?.windows ?? [];
   if (settings.provider === 'codex') {
@@ -238,15 +244,20 @@ export function visibleLimits(
     );
     windows = scoped.length ? scoped : windows.filter((w) => w.bucket === 'codex');
   }
-  const expected = [
+  const fable =
+    isFable(settings, snapshot) ||
+    (settings.provider === 'claude' &&
+      !settings.model &&
+      !snapshot?.context?.model &&
+      !!expected?.includes('fable-weekly'));
+  const kinds = [
     { id: 'five-hour', label: '5-hour', minutes: 300, model: null },
     { id: 'weekly', label: 'Weekly', minutes: 10080, model: null },
-    ...(isFable(settings, snapshot)
-      ? [{ id: 'fable-weekly', label: 'Fable weekly', minutes: 10080, model: 'fable' }]
-      : []),
-  ];
+    { id: 'fable-weekly', label: 'Fable weekly', minutes: 10080, model: 'fable' },
+  ] as const;
   const waiting = checking && (!snapshot || !!snapshot.partial);
-  return expected.flatMap((e): LimitWindow[] => {
+  return kinds.flatMap((e): LimitWindow[] => {
+    if (e.id === 'fable-weekly' && !fable) return [];
     const window = windows.find(
       (w) =>
         reported(w) &&
@@ -254,7 +265,7 @@ export function visibleLimits(
         (e.model ? w.model?.toLowerCase() === e.model : !w.model || settings.provider === 'codex'),
     );
     if (window) return [window];
-    return waiting
+    return waiting && (!expected || expected.includes(e.id))
       ? [
           {
             id: e.id,

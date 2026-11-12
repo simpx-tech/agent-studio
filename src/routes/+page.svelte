@@ -329,7 +329,9 @@
     balanceGroups,
     balancedAccount,
     excludedConnections,
+    type PoolReading,
   } from '$lib/account-balance';
+  import { expectedLimits, rememberShownLimits } from '$lib/shown-limits';
   import AccountMark from '$lib/components/AccountMark.svelte';
   import {
     registerInstallation,
@@ -1473,18 +1475,48 @@
       });
   });
   // An account's latest usage reading, whether a reading of it is under way or due, and whether
-  // it can be read now (`ready`), without which its last reading is only what it was.
+  // it can be read now (`ready`), without which its last reading is only what it was. An account
+  // on this computer whose check has not answered yet (`awaiting`) is read once it does, so its
+  // first reading is due too. Until one arrives, its bars wait in the places its last reading
+  // here filled (`expected`).
   function usageReading(provider: ProviderId, connectionId: string) {
     const settings = { provider, model: '', connectionId };
     const key = usageKey(settings);
     const snapshot = snapshotFor(usageSnapshots, settings);
     const ready = canQueryConnection(connectionId, provider);
+    const awaiting = !ready && !snapshot && awaitingCheck(connectionId);
     return {
       snapshot,
       ready,
-      loading: !!usageLoading[key] || (ready && !snapshot && !usageErrors[key]),
-      failed: !!usageErrors[key] || !ready,
+      awaiting,
+      loading: !!usageLoading[key] || ((ready || awaiting) && !snapshot && !usageErrors[key]),
+      failed: !!usageErrors[key] || (!ready && !awaiting),
+      expected: expectedLimits(provider, connectionId),
     };
+  }
+  // An account on this computer that its first check has not answered for yet.
+  function awaitingCheck(connectionId: string | undefined) {
+    const connection = workspace.fleet.connections.find((c) => c.id === connectionId);
+    return (
+      !!connection &&
+      desktop() &&
+      executionHost(workspace.fleet, connection.environmentId) === installation?.id &&
+      !connectionStatuses[connection.id]
+    );
+  }
+  // The kinds of limit an account's bars showed after a reading of all its limits, which they
+  // wait in the next time it is listed before its first reading here.
+  function rememberLimitsShown(provider: ProviderId, connectionId: string) {
+    const snapshot = snapshotFor(usageSnapshots, { provider, model: '', connectionId });
+    if (!snapshot || snapshot.partial) return;
+    rememberShownLimits(
+      provider,
+      connectionId,
+      visibleLimits(snapshot, { provider, model: '', reasoning: '', instructions: '' }).map(
+        limitSlot,
+      ),
+      new Set(workspace.fleet.connections.map((c) => c.id)),
+    );
   }
   // A listed account's 5-hour and weekly usage, as the bars below the composer show it: while
   // its first reading loads, and afterwards as last reported when it can no longer be read. An
@@ -1492,8 +1524,10 @@
   function listedUsage(id: string) {
     const option = agentOptions.find((option) => option.id === id);
     if (!option?.connectionId || option.attention) return undefined;
-    const { ready, ...reading } = usageReading(option.provider, option.connectionId);
-    return reading.snapshot || ready ? { provider: option.provider, ...reading } : undefined;
+    const { ready, awaiting, ...reading } = usageReading(option.provider, option.connectionId);
+    return reading.snapshot || ready || awaiting
+      ? { provider: option.provider, ...reading }
+      : undefined;
   }
   // The kinds of limit those bars show, each in its own column, so every account's bars sit in
   // one row and the accounts line up: those that any listed account shows.
@@ -1509,7 +1543,12 @@
         reasoning: '',
         instructions: '',
       };
-      for (const window of visibleLimits(usage.snapshot, settings, usage.loading && !usage.failed))
+      for (const window of visibleLimits(
+        usage.snapshot,
+        settings,
+        usage.loading && !usage.failed,
+        usage.expected,
+      ))
         shown.add(limitSlot(window));
     }
     return limitSlots.filter((slot) => shown.has(slot));
@@ -1694,6 +1733,21 @@
     }
     return agents;
   });
+  // What an agent's accounts on a computer used together, for Connections, as Settings shows it
+  // for the accounts balancing chooses between there: those Settings did not leave out, where
+  // the agent has several accounts. Connections reads them with its other accounts.
+  function usedTogether(environmentIds: readonly string[], provider: ProviderId): PoolReading[] {
+    const connections = workspace.fleet.connections.filter(
+      (c) =>
+        environmentIds.includes(c.environmentId) &&
+        workspace.fleet.accounts.find((a) => a.id === c.accountId)?.provider === provider,
+    );
+    if (connections.length < 2) return [];
+    const excluded = excludedConnections(workspace.preferences, workspace.fleet);
+    return connections.flatMap((c) =>
+      takesPart(c.id, excluded) ? [usageReading(provider, c.id)] : [],
+    );
+  }
   // While Settings shows them, the accounts balancing chooses between are read as Connections
   // reads its accounts: as it opens, every minute and on returning to the window.
   function balancedUsageTargets() {
@@ -1777,13 +1831,7 @@
     const { provider, connectionId } = selectedSettings;
     if (usageLoading[selectedUsageKey] || canQueryConnection(connectionId, provider)) return true;
     // An account here is read as soon as its check answers.
-    const connection = workspace.fleet.connections.find((c) => c.id === connectionId);
-    return (
-      !!connection &&
-      desktop() &&
-      executionHost(workspace.fleet, connection.environmentId) === installation?.id &&
-      !connectionStatuses[connection.id]
-    );
+    return awaitingCheck(connectionId);
   });
   const accountUsageTargets = $derived.by(() =>
     workspace.fleet.connections.flatMap((connection) => {
@@ -4674,6 +4722,8 @@
       snapshot.live = snapshotFor(usageSnapshots, settings)?.live;
       usageSnapshots[key] = { ...snapshot, connectionId: settings.connectionId };
       usageErrors[key] = '';
+      if (!settings.model && settings.connectionId)
+        rememberLimitsShown(settings.provider, settings.connectionId);
     } catch (e) {
       if (current()) usageErrors[key] = String(e);
       // Reading usage renews an expired login first, so a failure can mean it lapsed.
@@ -8877,6 +8927,7 @@
           {sendSignInCode}
           running={localRunning}
           highlight={connectionsHighlight}
+          {usedTogether}
         />
       {/key}
       </div>

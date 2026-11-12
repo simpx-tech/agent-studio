@@ -11,7 +11,7 @@ import {
 } from './account-balance';
 import type { Message } from './domain';
 import type { Fleet } from './fleet';
-import type { LimitWindow, UsageSnapshot } from './usage';
+import type { LimitSlot, LimitWindow, UsageSnapshot } from './usage';
 
 const now = Date.parse('2026-10-13T12:00:00Z');
 const seconds = (ms: number) => Math.floor(ms / 1000);
@@ -554,6 +554,26 @@ describe('what the accounts balanced on a computer used together', () => {
     expect(pool([{ loading: true, failed: true }])).toEqual([]);
     expect(pool([{ ...current(claude(40, 40)), failed: true }])).toEqual([]);
     expect(pool([])).toEqual([]);
+  });
+
+  it('waits in the places the accounts’ bars showed here before', () => {
+    const shown = (expected: LimitSlot[]): PoolReading => ({
+      loading: true,
+      failed: false,
+      expected,
+    });
+    const ids = (limits: ReturnType<typeof pool>) => limits.map((limit) => limit.id);
+    expect(ids(pool([shown(['weekly', 'fable-weekly']), shown(['weekly'])]))).toEqual([
+      'weekly',
+      'fable-weekly',
+    ]);
+    expect(ids(pool([shown(['weekly'])], 'codex'))).toEqual(['weekly']);
+    expect(pool([shown([])])).toEqual([]);
+    // An account never shown here may have any of them.
+    expect(ids(pool([shown(['weekly']), { loading: true, failed: false }]))).toEqual([
+      'five-hour',
+      'weekly',
+    ]);
   });
 });
 

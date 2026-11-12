@@ -308,6 +308,36 @@ describe('usage and context semantics', () => {
     ]);
     expect(values(visibleLimits(live, sonnet))).toEqual([['5-hour', 40]]);
   });
+  it('lets an account view wait in the places its last reading here filled', () => {
+    const view = { ...settings, provider: 'claude' as const, model: '' };
+    const values = (windows: LimitWindow[]) => windows.map((w) => [w.label, w.usedPercent]);
+    const shown = ['weekly', 'fable-weekly'] as const;
+    // A plan without a 5-hour limit whose CLI runs Fable by default: only its own limits wait.
+    expect(values(visibleLimits(undefined, view, true, shown))).toEqual([
+      ['Weekly', null],
+      ['Fable weekly', null],
+    ]);
+    expect(visibleLimits(undefined, view, true, [])).toEqual([]);
+    expect(values(visibleLimits(undefined, { ...view, provider: 'codex' }, true, shown))).toEqual([
+      ['Weekly', null],
+    ]);
+    expect(visibleLimits(undefined, view, false, shown)).toEqual([]);
+    // A reading that does not say which model the CLI runs by default, as another model's,
+    // keeps Fable weekly as the last one here showed it; one naming another default does not.
+    const [, weekly, fable] = snapshot.windows;
+    const other = { ...snapshot, windows: [weekly, fable] };
+    expect(values(visibleLimits(other, view, false, shown))).toEqual([
+      ['Weekly', 31],
+      ['Fable weekly', 62],
+    ]);
+    expect(values(visibleLimits(other, view))).toEqual([['Weekly', 31]]);
+    const opus = { ...other, context: { model: 'claude-opus-5', tokens: 1, source: 'Fixture' } };
+    expect(values(visibleLimits(opus, view, false, shown))).toEqual([['Weekly', 31]]);
+    // A chat's bars follow the chat's model.
+    expect(values(visibleLimits(other, { ...view, model: 'sonnet' }, false, shown))).toEqual([
+      ['Weekly', 31],
+    ]);
+  });
   it('fills an account’s newer live updates in from its complete reading', () => {
     const settings = { provider: 'claude' as const, model: '', connectionId: 'one' };
     const reading = { ...snapshot, connectionId: 'one', windows: snapshot.windows.slice(0, 2) };

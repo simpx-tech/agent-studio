@@ -25,13 +25,15 @@
 
   // An account's 5-hour and weekly limits as the compact bars below the composer draw them,
   // for a list of accounts such as the Agent picker: only those its reading reports, waiting as
-  // Checking… while its first reading loads. They sit in one row, each kind of limit in its
-  // column of the list (`columns`), so the accounts line up.
+  // Checking… while its first reading loads, in the places its last reading here filled. They
+  // sit in one row, each kind of limit in its column of the list (`columns`), so the accounts
+  // line up.
   let {
     provider,
     snapshot,
     loading = false,
     failed = false,
+    expected,
     columns,
   }: {
     provider: ProviderId;
@@ -39,6 +41,8 @@
     loading?: boolean;
     /** No current reading can be had, so what is shown was only the last reported. */
     failed?: boolean;
+    /** The kinds of limit the account's bars showed after its last reading on this device. */
+    expected?: readonly LimitSlot[];
     /** The kinds of limit the list shows, in its columns' order; without them, the account's
      * own fill the row. */
     columns?: readonly LimitSlot[];
@@ -50,6 +54,7 @@
       snapshot,
       { provider, model: '', reasoning: '', instructions: '' },
       loading && !failed,
+      expected,
     ).map((window) => {
       const pace = quotaPace(window, snapshot, now, failed);
       const stale = !!snapshot && (failed || isStale(snapshot, window, now));

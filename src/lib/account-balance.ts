@@ -178,6 +178,8 @@ export type PoolReading = {
   loading: boolean;
   /** It cannot be read now, so its last reading is only what it was. */
   failed: boolean;
+  /** The kinds of limit its bars showed after its last reading on this device, when they did. */
+  expected?: readonly LimitSlot[];
 };
 
 /**
@@ -212,7 +214,8 @@ const poolLabels: Record<LimitSlot, string> = {
  * even use of each account would have used by now. Only current readings count, as only they
  * have a guide; an account without one, or whose reading lists only some of its limits, is
  * `unread` in every limit it may have. Until the first readings arrive, the limits the accounts
- * may have wait unmeasured.
+ * may have wait unmeasured: those their bars showed after their last readings on this device,
+ * when every account waiting has shown its own here.
  */
 export function poolUsage(
   provider: ProviderId,
@@ -259,9 +262,12 @@ export function poolUsage(
       },
     ];
   });
-  if (limits.length || !readings.some((reading) => reading.loading && !reading.failed))
-    return limits;
-  return visibleLimits(undefined, settings, true).map((window): PoolLimit => ({
+  const waiting = readings.filter((reading) => reading.loading && !reading.failed);
+  if (limits.length || !waiting.length) return limits;
+  const expected = waiting.every((reading) => reading.expected)
+    ? limitSlots.filter((slot) => waiting.some((reading) => reading.expected?.includes(slot)))
+    : undefined;
+  return visibleLimits(undefined, settings, true, expected).map((window): PoolLimit => ({
     id: limitSlot(window),
     label: poolLabels[limitSlot(window)],
     counted: 0,
