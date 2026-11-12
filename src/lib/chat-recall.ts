@@ -2,11 +2,11 @@ import { getContext, setContext, untrack } from 'svelte';
 
 // What a window recalls of each chat it showed (requested 2026-11-03: "keep the scroll of both
 // the chat and artifact saved per session/chat when going to other chats so it doesn't reset to
-// bottom/top"): where the reader was reading, what they opened in it and where its side panels
-// were scrolled, so that a chat shown again looks as it was left. Each part of a chat keeps its
-// own under a scope that names it within the chat, such as a reply's id. Kept in the window's
-// memory by conversation, never saved, synced or exported; deleting a chat or changing workspace
-// drops it.
+// bottom/top"): where the reader was reading, what they opened in it, where its side panels were
+// scrolled and what they began to answer in its question and MCP forms (requested 2026-11-12), so
+// that a chat shown again looks as it was left. Each part of a chat keeps its own under a scope
+// that names it within the chat, such as a reply's id. Kept in the window's memory by
+// conversation, never saved, synced or exported; deleting a chat or changing workspace drops it.
 
 /** What a window recalls of one chat: each scope's values, by name. */
 export type ChatRecall = Map<string, Map<string, unknown>>;

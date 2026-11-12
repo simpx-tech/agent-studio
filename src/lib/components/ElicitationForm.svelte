@@ -2,6 +2,7 @@
   import { untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { manageElicitation, openLink } from '$lib/transport';
+  import { recall } from '$lib/chat-recall';
   import {
     elicitationRequestSchema,
     formContent,
@@ -18,11 +19,20 @@
   }: { receipt: ElicitationReceipt; runId?: string; connectionId?: string; running: boolean } =
     $props();
   const values = new SvelteMap<string, unknown>();
+  // What the reader entered and whether they opened its page, as the chat recalls them
+  // (`src/lib/chat-recall.ts`), so a request begun is as they left it when the chat is shown again
+  // after another chat, Connections or Settings.
+  const remembered = recall(() => `elicitation/${receipt.id}`);
+  function enter(key: string, value: unknown) {
+    if (value === undefined) values.delete(key);
+    else values.set(key, value);
+    remembered.set('values', [...values]);
+  }
   let request = $state<ElicitationRequest>();
   let busy = $state(false),
     loading = $state(false),
-    sent = $state(false),
-    opened = $state(false),
+    sent = $state(remembered.get<boolean>('sent') ?? false),
+    opened = $state(remembered.get<boolean>('opened') ?? false),
     error = $state('');
   let reload = $state(0);
   const active = $derived(
@@ -70,7 +80,9 @@
           )
             throw new Error('This MCP request has changed.');
           request = result;
-          if (!refresh)
+          const entered = remembered.get<[string, unknown][]>('values');
+          if (entered) for (const [key, value] of entered) values.set(key, value);
+          else if (!refresh)
             for (const field of result.fields)
               if (field.default != null) values.set(field.key, field.default);
           error = '';
@@ -109,6 +121,9 @@
         sent = true;
         values.clear();
         request = undefined;
+        // A response sent stays sent until its receipt says so, also when shown again.
+        remembered.set('values', undefined);
+        remembered.set('sent', true);
       }
     } catch (e) {
       if (active && runId === run && receipt.id === id) error = String(e).replace(/^Error: /, '');
@@ -121,6 +136,7 @@
     try {
       await openLink(request.url);
       opened = true;
+      remembered.set('opened', true);
       error = '';
     } catch {
       error = 'Could not open the page. Try again.';
@@ -162,7 +178,7 @@
                       ) ?? false}
                       onchange={(e) => {
                         const old = (values.get(field.key) as string[] | undefined) ?? [];
-                        values.set(
+                        enter(
                           field.key,
                           e.currentTarget.checked
                             ? [...old, option.value]
@@ -184,7 +200,7 @@
                   placeholder="Choose an answer"
                   fallbackToFirst={false}
                   disabled={busy}
-                  onchange={(v) => values.set(field.key, v === 'true')}
+                  onchange={(v) => enter(field.key, v === 'true')}
                 />
               {:else if field.options.length}
                 <ChoicePicker
@@ -195,7 +211,7 @@
                   placeholder="Choose an answer"
                   fallbackToFirst={false}
                   disabled={busy}
-                  onchange={(v) => values.set(field.key, v)}
+                  onchange={(v) => enter(field.key, v)}
                 />
               {:else if field.kind === 'number' || field.kind === 'integer'}
                 <input
@@ -206,14 +222,14 @@
                   step={field.kind === 'integer' ? 1 : 'any'}
                   required={field.required}
                   value={String(values.get(field.key) ?? '')}
-                  oninput={(e) => values.set(field.key, e.currentTarget.value)}
+                  oninput={(e) => enter(field.key, e.currentTarget.value)}
                 />
               {:else}
                 <input
                   aria-label={field.title}
                   type={field.format === 'email' ? 'email' : 'text'}
                   value={String(values.get(field.key) ?? '')}
-                  oninput={(e) => values.set(field.key, e.currentTarget.value)}
+                  oninput={(e) => enter(field.key, e.currentTarget.value)}
                   autocomplete="off"
                 />
               {/if}
@@ -223,7 +239,7 @@
               {#if !field.required && values.has(field.key)}<button
                   type="button"
                   class="text-button"
-                  onclick={() => values.delete(field.key)}>Clear {field.title}</button
+                  onclick={() => enter(field.key, undefined)}>Clear {field.title}</button
                 >{/if}
             </fieldset>
           {/each}

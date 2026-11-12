@@ -465,6 +465,85 @@ for (const mobile of [false, true])
     });
   });
 
+test('an answer begun is still there when its chat is shown again', async ({ page }) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await chooseTestFolder(page);
+  await page.getByLabel('Message', { exact: true }).fill('Ask for my preferences');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await page.waitForFunction(() => typeof (window as any).emitCapability === 'function');
+  await page.evaluate(() => {
+    const w = window as any;
+    w.testQuestion = {
+      id: crypto.randomUUID(),
+      revision: 1,
+      status: 'pending',
+      questions: [
+        {
+          id: 'format',
+          header: 'Format',
+          question: 'Choose a format',
+          multiSelect: false,
+          options: [
+            { label: 'Brief', description: '' },
+            { label: 'Detailed', description: '' },
+          ],
+        },
+        {
+          id: 'sections',
+          header: 'Sections',
+          question: 'Which sections?',
+          multiSelect: true,
+          options: [
+            { label: 'Intro', description: '' },
+            { label: 'Examples', description: '' },
+          ],
+        },
+      ],
+    };
+    w.emitCapability({ kind: 'question', question: w.testQuestion });
+  });
+  const form = page.getByRole('region', { name: 'Agent questions' });
+  await form.getByRole('radio', { name: 'Detailed' }).check();
+  await form.getByRole('button', { name: 'Next', exact: true }).click();
+  await form.getByRole('checkbox', { name: 'Intro' }).check();
+  await form.getByLabel('Your answer: Which sections?').fill('Closing thoughts');
+  const row = page.locator('.conversation-item', { hasText: 'Ask for my preferences' });
+  const showChat = async () => {
+    await row.focus();
+    await page.keyboard.press('Enter');
+    await expect(row).toHaveAttribute('aria-current', 'page');
+  };
+  // Another chat, then Settings: each time the chat returns with the answer and its step.
+  await page.getByRole('button', { name: 'New conversation', exact: true }).first().click();
+  await expect(form).toHaveCount(0);
+  await showChat();
+  await expect(form.getByText('Question 2 of 2')).toBeVisible();
+  await expect(form.getByRole('checkbox', { name: 'Intro' })).toBeChecked();
+  await expect(form.getByRole('checkbox', { name: 'Examples' })).not.toBeChecked();
+  await expect(form.getByLabel('Your answer: Which sections?')).toHaveValue('Closing thoughts');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await expect(form).toHaveCount(0);
+  await showChat();
+  await form.getByRole('button', { name: 'Back', exact: true }).click();
+  await expect(form.getByRole('radio', { name: 'Detailed' })).toBeChecked();
+  await form.getByRole('button', { name: 'Next', exact: true }).click();
+  expect(await page.evaluate(() => (window as any).answersSent ?? [])).toEqual([]);
+  await form.getByRole('button', { name: 'Send answers' }).click();
+  await expect(form).toHaveCount(0);
+  const answers = await page.evaluate(() => (window as any).answersSent);
+  expect(answers).toHaveLength(1);
+  expect(answers[0].answer.answers).toEqual([
+    { id: 'format', values: ['Detailed'] },
+    { id: 'sections', values: ['Intro', 'Closing thoughts'] },
+  ]);
+  // A form sent does not come back with its chat.
+  await page.getByRole('button', { name: 'New conversation', exact: true }).first().click();
+  await showChat();
+  await expect(page.getByText('Waiting for you', { exact: true })).toHaveCount(0);
+  await expect(form).toHaveCount(0);
+});
+
 test('explicit skip resumes the tool and cancelled runs cannot accept old answers', async ({
   page,
 }) => {

@@ -158,6 +158,64 @@ test('MCP form preserves draft, validates typed answers, and stores only the rec
     /Confirm your booking|private-fixture|Vegetarian|"Ada"/,
   );
 });
+// Leaves the MCP request's chat for a new chat or Settings, then shows it again from its row.
+async function showAgain(page: Page, through: 'New conversation' | 'Settings') {
+  await page.getByRole('button', { name: through, exact: true }).first().click();
+  await expect(page.getByRole('region', { name: 'MCP request' })).toHaveCount(0);
+  const row = page.locator('.conversation-item', { hasText: 'Run an MCP tool' });
+  await row.focus();
+  await page.keyboard.press('Enter');
+  await expect(row).toHaveAttribute('aria-current', 'page');
+}
+test('an MCP form begun is still filled in when its chat is shown again', async ({ page }) => {
+  const form = await start(page);
+  await form.getByLabel('Name', { exact: true }).fill('Ada');
+  await form.getByLabel('Guests', { exact: true }).fill('3');
+  await form.getByRole('checkbox', { name: 'Tea', exact: true }).check();
+  await showAgain(page, 'New conversation');
+  await expect(form.getByLabel('Name', { exact: true })).toHaveValue('Ada');
+  await expect(form.getByLabel('Guests', { exact: true })).toHaveValue('3');
+  await expect(form.getByRole('checkbox', { name: 'Tea', exact: true })).toBeChecked();
+  // An optional answer cleared stays cleared.
+  await form.getByRole('button', { name: 'Clear Extras', exact: true }).click();
+  await showAgain(page, 'Settings');
+  await expect(form.getByLabel('Name', { exact: true })).toHaveValue('Ada');
+  await expect(form.getByRole('checkbox', { name: 'Tea', exact: true })).not.toBeChecked();
+  await form.getByRole('combobox', { name: 'Window seat', exact: true }).click();
+  await page.getByRole('option', { name: 'Yes', exact: true }).click();
+  await form.getByRole('combobox', { name: 'Meal', exact: true }).click();
+  await page.getByRole('option', { name: 'Standard', exact: true }).click();
+  expect(await page.evaluate(() => (window as any).elicitationAnswers)).toEqual([]);
+  await form.getByRole('button', { name: 'Send answers', exact: true }).click();
+  await expect(form).toHaveCount(0);
+  const answers = await page.evaluate(() => (window as any).elicitationAnswers);
+  expect(answers[0].input.content).toEqual({
+    Name: 'Ada',
+    Guests: 3,
+    'Window seat': true,
+    Meal: 'standard',
+  });
+  await showAgain(page, 'New conversation');
+  await expect(form).toHaveCount(0);
+  await expect(page.getByText('Booking server · MCP request accepted')).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem('test-workspace'))).not.toMatch(/"Ada"/);
+});
+test('an MCP page opened stays opened when its chat is shown again', async ({ page }) => {
+  const form = await start(page, 'url');
+  const proceed = form.getByRole('button', { name: 'Continue', exact: true });
+  await showAgain(page, 'New conversation');
+  await expect(proceed).toBeDisabled();
+  await form.getByRole('button', { name: 'Open page', exact: true }).click();
+  await expect(proceed).toBeEnabled();
+  await showAgain(page, 'Settings');
+  await expect(proceed).toBeEnabled();
+  expect(await page.evaluate(() => (window as any).openedPages)).toHaveLength(1);
+  await proceed.click();
+  await expect(form).toHaveCount(0);
+  expect((await page.evaluate(() => (window as any).elicitationAnswers))[0].input).toMatchObject({
+    action: 'accept',
+  });
+});
 test('MCP URL opens only on click and requires a separate response on a narrow screen', async ({
   page,
 }) => {

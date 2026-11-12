@@ -3,6 +3,7 @@
   import { Check, MessageCircleQuestionMark } from '@lucide/svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { answerQuestion } from '$lib/transport';
+  import { recall } from '$lib/chat-recall';
   import type { QuestionRequest, QuestionAnswer } from '$lib/questions';
   import { validAnswer } from '$lib/questions';
   let {
@@ -25,12 +26,24 @@
      */
     writing?: boolean;
   } = $props();
-  const selected = new SvelteMap<string, string[]>();
-  const custom = new SvelteMap<string, string>();
+  // What the reader chose and wrote, and the question they were on, as the chat recalls them
+  // (`src/lib/chat-recall.ts`), so an answer begun is still there when the chat is shown again
+  // after another chat, Connections or Settings. A question still being written takes no answer.
+  const remembered = recall(() => (writing ? undefined : `question/${request.id}`));
+  const left = remembered.get<{
+    selected: [string, string[]][];
+    custom: [string, string][];
+    step: number;
+  }>('answer');
+  const selected = new SvelteMap<string, string[]>(left?.selected);
+  const custom = new SvelteMap<string, string>(left?.custom);
   let busy = $state(false);
-  let sent = $state(false);
+  let sent = $state(remembered.get<boolean>('sent') ?? false);
   let error = $state('');
-  let step = $state(0);
+  let step = $state(left?.step ?? 0);
+  function keep() {
+    remembered.set('answer', { selected: [...selected], custom: [...custom], step });
+  }
   let questionHeading: HTMLLegendElement | undefined = $state();
   // A question still being written may have no text yet.
   const current = $derived(
@@ -68,6 +81,7 @@
   async function goToStep(next: number) {
     if (!active || writing || busy || next < 0 || next >= request.questions.length) return;
     step = next;
+    keep();
     await tick();
     questionHeading?.focus();
   }
@@ -81,6 +95,7 @@
         : [label],
     );
     if (!multiple) custom.set(id, '');
+    keep();
   }
   async function submit(skipped = false) {
     if (!active || writing || busy || (!runId && !send) || (!skipped && !lastStep)) return;
@@ -92,6 +107,9 @@
       if (send) await send(response);
       else await answerQuestion(runId!, response, connectionId);
       sent = true;
+      // A form sent stays hidden until its question reads answered, also when shown again.
+      remembered.set('answer', undefined);
+      remembered.set('sent', true);
     } catch (e) {
       error = String(e).replace(/^Error: /, '');
     } finally {
@@ -178,6 +196,7 @@
                 oninput={(e) => {
                   custom.set(q.id, e.currentTarget.value);
                   if (!q.multiSelect && e.currentTarget.value.trim()) selected.set(q.id, []);
+                  keep();
                 }}></textarea>
             </label>
           </fieldset>
