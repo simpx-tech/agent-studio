@@ -70,12 +70,29 @@ vi.mock('@tauri-apps/api/core', () => ({
   isTauri: () => true,
   Channel: class {},
 }));
+// How much one call to the app carries of a saved file (src/lib/saved-parts.ts), which the tests
+// of files read and written in parts make small.
+const parts = vi.hoisted(() => ({ budget: undefined as number | undefined }));
+vi.mock('./saved-parts', async (original) => {
+  const actual = await original<typeof import('./saved-parts')>();
+  return {
+    ...actual,
+    chatChunks: (chats: Iterable<Conversation>, options?: { keep?: boolean }) =>
+      actual.chatChunks(chats, { ...options, budget: parts.budget }),
+    readChats: (
+      chats: [string, number][],
+      read: (ids: string[]) => Promise<unknown>,
+      take: (list: unknown[]) => unknown,
+    ) => actual.readChats(chats, read, take, parts.budget),
+  };
+});
 // Views of a model are drawn with WebGL in a real window; here the drawing is counted.
 const scene = vi.hoisted(() => ({ renderModelViews: vi.fn() }));
 vi.mock('./model-scene', () => ({ renderModelViews: scene.renderModelViews }));
 
 beforeEach(() => {
   vi.resetModules();
+  parts.budget = undefined;
   native.invoke.mockReset();
   vi.unstubAllGlobals();
 });
@@ -3268,4 +3285,148 @@ it('discards a late native administration key after the connection changes', asy
   stopWatching();
   await transport.resumeRelay();
   expect(connectionChanges).toEqual([true, false]);
+});
+
+it('reads its checkpoint a few conversations at a time where the app hands it over opened', async () => {
+  const { transport, workspace, local, polls, marks, checkpoint } = await incrementalRelay();
+  const [first, second] = workspace.conversations;
+  first.title = 'Renamed here';
+  local.changes++;
+  marks.mark(first.id);
+  later();
+  expect((await polls(1)).state).toContain('save_sync_state');
+  await transport.disconnectRelay();
+  // The app opens the file: everything but the conversations, then those a list at a time.
+  parts.budget = 1;
+  const original = native.invoke.getMockImplementation()!;
+  const reads: string[][] = [];
+  const closed: number[] = [];
+  native.invoke.mockImplementation(async (command, args) => {
+    const { base, ...rest } = checkpoint() as { base: SharedWorkspace };
+    const { conversations, ...meta } = base;
+    if (command === 'open_sync_state')
+      return {
+        parts: {
+          rest: { ...rest, base: meta },
+          chats: conversations.map((c) => [c.id, JSON.stringify(c).length]),
+          read: 7,
+        },
+      };
+    if (command === 'read_sync_state_chats') {
+      expect(args.read).toBe(7);
+      reads.push(args.ids);
+      const list = args.ids.map((id: string) => conversations.find((c) => c.id === id));
+      return new TextEncoder().encode(JSON.stringify(list));
+    }
+    if (command === 'close_sync_state') return void closed.push(args.read);
+    if (command === 'load_sync_state') throw new Error('The checkpoint was read whole.');
+    return original(command, args);
+  });
+  expect(await transport.resumeRelay()).toBe(true);
+  expect(reads).toEqual([[first.id], [second.id]]);
+  await vi.waitFor(() => expect(closed).toEqual([7]));
+  // It resumes from that baseline: nothing to download, nothing to send.
+  expect((await polls(1)).state).toEqual(['GET v1/state/revision']);
+  await transport.disconnectRelay();
+  // A checkpoint of another relay is read no further than its head.
+  reads.length = 0;
+  const other = native.invoke.getMockImplementation()!;
+  native.invoke.mockImplementation(async (command, args) => {
+    const answer = await other(command, args);
+    return command === 'open_sync_state'
+      ? { parts: { ...answer.parts, rest: { ...answer.parts.rest, url: 'https://other.example' } } }
+      : answer;
+  });
+  expect(await transport.resumeRelay()).toBe(true);
+  expect(reads).toEqual([]);
+  expect(closed).toEqual([7, 7]);
+  await transport.disconnectRelay();
+});
+
+it('sends a checkpoint’s conversations ahead of the write that names them, once one call cannot carry them', async () => {
+  const { transport, workspace, local, polls, marks, checkpoint } = await incrementalRelay();
+  const [first, second] = workspace.conversations;
+  parts.budget = 1;
+  // The app's side: what a write sent ahead joins what its last call carries.
+  const original = native.invoke.getMockImplementation()!;
+  const ahead: { save: string; upsert: Conversation[] }[] = [];
+  const writes: { order?: string[]; upsert?: Conversation[]; staged?: string; value: any }[] = [];
+  let refuse = 0;
+  native.invoke.mockImplementation(async (command, args) => {
+    if (command === 'stage_sync_state_chats') return void ahead.push(args);
+    if (command !== 'save_sync_state') return original(command, args);
+    writes.push(args);
+    if (refuse-- > 0) throw 'The whole sync checkpoint is needed to save this change.';
+    const sent = ahead.filter((a) => a.save === args.staged).flatMap((a) => a.upsert);
+    return original(command, { ...args, upsert: [...sent, ...(args.upsert ?? [])] });
+  });
+  const titles = () =>
+    (checkpoint() as { base: SharedWorkspace }).base.conversations.map((c) => c.title);
+  // One conversation changed: one call carries it, as before.
+  first.title = 'Renamed here';
+  local.changes++;
+  marks.mark(first.id);
+  later();
+  expect((await polls(1)).state).toContain('save_sync_state');
+  expect(ahead).toEqual([]);
+  expect(writes.at(-1)!.upsert?.map((c) => c.id)).toEqual([first.id]);
+  // Both changed: each goes ahead in a call of its own, under the name the write then gives.
+  first.title = 'Renamed again';
+  second.title = 'Renamed too';
+  local.changes++;
+  marks.mark(first.id);
+  marks.mark(second.id);
+  later();
+  expect((await polls(1)).state).toContain('save_sync_state');
+  expect(ahead.map((a) => a.upsert.map((c) => c.id))).toEqual([[first.id], [second.id]]);
+  expect(writes.at(-1)).toMatchObject({
+    order: [first.id, second.id],
+    upsert: [],
+    staged: ahead[0].save,
+  });
+  expect(ahead[1].save).toBe(ahead[0].save);
+  expect(writes.at(-1)!.value.base.conversations).toBeUndefined();
+  expect(titles()).toEqual(['Renamed again', 'Renamed too']);
+  // An app that cannot complete a write from its file gets everything, the same way.
+  ahead.length = 0;
+  refuse = 1;
+  second.title = 'Renamed once more';
+  local.changes++;
+  marks.mark(second.id);
+  later();
+  expect((await polls(1)).state).toContain('save_sync_state');
+  expect(ahead.map((a) => a.upsert.map((c) => c.id))).toEqual([[first.id], [second.id]]);
+  expect(writes.at(-1)!.staged).toBe(ahead[0].save);
+  expect(titles()).toEqual(['Renamed again', 'Renamed once more']);
+  await transport.disconnectRelay();
+});
+
+it('writes the checkpoint for the conversations a poll changed, not every one it looked at', async () => {
+  // A window that has just started looks at every conversation with its first poll.
+  const { transport, workspace, local, polls, marks, checkpointWrites } = await incrementalRelay({
+    saved: (base) => ({
+      url: 'https://relay.example.com',
+      instanceId: 'same-relay',
+      base,
+      revisions: {
+        revision: 5,
+        metaRevision: 5,
+        chats: Object.fromEntries(base.conversations.map((c) => [c.id, 5])),
+      },
+    }),
+    started: true,
+    prepare: (workspace) => {
+      workspace.conversations[1].title = 'Renamed before the start';
+    },
+  });
+  const [first, second] = workspace.conversations;
+  const write = checkpointWrites.at(-1)!;
+  expect(write.order).toEqual([first.id, second.id]);
+  expect(write.upsert?.map((c) => c.id)).toEqual([second.id]);
+  // And nothing at all once nothing moved.
+  local.changes++;
+  marks.mark(first.id);
+  later();
+  expect((await polls(1)).state).not.toContain('save_sync_state');
+  await transport.disconnectRelay();
 });

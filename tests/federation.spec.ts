@@ -248,6 +248,9 @@ async function host(
               localStorage.getItem('fixture-wsl') ?? '{"distributions":[],"warning":null}',
             );
           }
+          // This fixture's app hands its files over whole, as apps did before they opened them
+          // for the page to read in parts: it answers nothing when asked to open one.
+          if (command === 'open_workspace' || command === 'open_sync_state') return null;
           if (command === 'load_workspace')
             return JSON.parse(localStorage.getItem('fixture-workspace') ?? 'null');
           if (command === 'save_workspace' || command === 'save_workspace_patch') {

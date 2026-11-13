@@ -183,6 +183,23 @@ fn each_image(conversations: &mut Value, visit: &mut impl FnMut(&mut Value)) {
         );
     }
 }
+/// Whether a saved conversation, as its JSON text, holds an image inline: one saved before the
+/// image store, which reading its file whole moves there. Text that cannot be read counts, for
+/// that read to judge.
+pub fn holds_inline(conversation: &str) -> bool {
+    // Every inline image has this field; text a conversation quotes has its quotes escaped.
+    if !conversation.contains("\"data\"") {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<Value>(conversation) else {
+        return true;
+    };
+    let mut found = false;
+    each_image(&mut Value::Array(vec![value]), &mut |image| {
+        found |= image.get("data").is_some_and(Value::is_string);
+    });
+    found
+}
 /// The reference a message keeps for an image of these bytes.
 fn reference(image: &Value, stored: &Stored) -> Value {
     serde_json::json!({

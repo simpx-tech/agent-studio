@@ -137,6 +137,8 @@ import {
   onlyRepliesMoved,
   sameShared,
   sharedChatSchema,
+  sharedMetaSchema,
+  sharedOf,
   sharedSchema,
   sharedWorkspace,
   type MergeOptions,
@@ -159,6 +161,15 @@ import {
 } from './incremental-sync';
 import type { ChangeSet } from './change-marks';
 import { chatList, joinBytes, jsonWith } from './chat-bytes';
+import { detached } from './detached';
+import {
+  aheadArguments,
+  chatChunks,
+  fileMoved,
+  readChats,
+  sendAhead,
+  type Opened,
+} from './saved-parts';
 import { jsonEqual } from './json-equal';
 import {
   holdsWork,
@@ -1535,32 +1546,57 @@ async function acceptRelay(url: string, generation: number, restoring = false) {
     if (generation === relayGeneration) notifyRelayConnection(true);
     return generation === relayGeneration;
   }
-  const checkpoint = await invoke<{
-    url: string;
-    instanceId: string;
-    base: SharedWorkspace;
-    revisions?: unknown;
-  } | null>('load_sync_state');
-  if (generation !== relayGeneration) return false;
-  if (restoring && checkpoint?.url === url && checkpoint.instanceId !== instanceId)
-    throw new Error(relayReplaced);
-  const resumed = checkpoint?.url === url && checkpoint.instanceId === instanceId;
-  const nextBaseline = resumed ? sharedSchema.parse(checkpoint.base) : emptyShared();
-  if (generation !== relayGeneration) return false;
-  // The checkpoint's copy of each conversation this computer still holds as it was then gives
-  // way to the copy it syncs and saves, so the page keeps one of each.
-  if (
-    resumed &&
-    !(await shareBaseline(
-      nextBaseline.conversations,
-      (id) => runtime?.chat(id),
-      () => generation === relayGeneration,
-    ))
-  )
-    return false;
+  const current = () => generation === relayGeneration;
+  // The checkpoint holds every conversation, so the app hands it over opened: everything else
+  // first, then the conversations a few megabytes at a time (src/lib/saved-parts.ts). An app
+  // that only knows the whole file answers nothing, and a file it cannot take apart comes whole.
+  const opened = await invoke<Opened | null>('open_sync_state');
+  const parts = opened && 'parts' in opened ? opened.parts : undefined;
+  const whole = opened && 'whole' in opened ? opened.whole : undefined;
+  const checkpoint = (
+    parts ? parts.rest : opened ? whole : await invoke('load_sync_state')
+  ) as { url: string; instanceId: string; base: unknown; revisions?: unknown } | null;
+  let nextBaseline = emptyShared();
+  let resumed = false;
+  try {
+    if (!current()) return false;
+    if (restoring && checkpoint?.url === url && checkpoint.instanceId !== instanceId)
+      throw new Error(relayReplaced);
+    resumed = checkpoint?.url === url && checkpoint.instanceId === instanceId;
+    // The checkpoint's copy of each conversation this computer still holds as it was then gives
+    // way to the copy it syncs and saves, so the page keeps one of each.
+    const share = (conversations: Conversation[]) =>
+      shareBaseline(conversations, (id) => runtime?.chat(id), current);
+    if (resumed && parts) {
+      const conversations: Conversation[] = [];
+      const read = await readChats(
+        parts.chats,
+        (ids) => invoke('read_sync_state_chats', { read: parts.read, ids }),
+        async (list) => {
+          // Each list is checked and shared as it arrives, so the page never holds a second
+          // copy of every conversation, as it did while it read the checkpoint whole.
+          const some = z.array(sharedChatSchema).parse(list);
+          if (!(await share(some))) return false;
+          for (const conversation of some) conversations.push(conversation);
+        },
+      );
+      if (!read) return false;
+      nextBaseline = sharedOf(sharedMetaSchema.parse(checkpoint!.base), conversations);
+    } else if (resumed) {
+      nextBaseline = sharedSchema.parse(checkpoint!.base);
+      if (!current() || !(await share(nextBaseline.conversations))) return false;
+    }
+  } catch (error) {
+    // A newer connection opened the checkpoint meanwhile, which ended this one's reading.
+    if (!current() && String(error).includes(fileMoved)) return false;
+    throw error;
+  } finally {
+    if (parts) void invoke('close_sync_state', { read: parts.read }).catch(() => {});
+  }
+  if (!current()) return false;
   resetBaseline(
     nextBaseline,
-    resumed ? checkpointRevisions(checkpoint.revisions) : undefined,
+    resumed ? checkpointRevisions(checkpoint!.revisions) : undefined,
     resumed,
   );
   relayInstance = instanceId;
@@ -1963,13 +1999,21 @@ async function syncIncremental(
       ...plan.mergedMeta,
       conversations: nextBaselineChats(baseline.conversations, involved, result),
     };
+    // Of the conversations this poll looked at, those the baseline now holds otherwise. The
+    // first poll after a start looks at every one, and the checkpoint is written for those.
+    const before = new Map(baseline.conversations.map((c) => [c.id, c]));
+    const moved = involved.filter((id) => {
+      const was = before.get(id);
+      const now = result.get(id);
+      return !was || !now || (was !== now && !jsonEqual(was, now));
+    });
     await saveCheckpoint(
       generation,
       next,
       current.revision,
       { chats: current.chats, metaRevision: current.metaRevision },
       structural,
-      involved,
+      moved,
     );
     if (generation !== relayGeneration) return null;
     baseline = next;
@@ -2112,30 +2156,59 @@ async function writeCheckpoint(checkpoint: {
   // Changes that arrive while this write runs belong to the next one.
   checkpointStale = new Set();
   try {
+    const { conversations, ...meta } = checkpoint.base;
+    const head = { value: { ...checkpoint, base: meta }, order: conversations.map((c) => c.id) };
     if (stale && !callsUsePostMessage()) {
-      const { conversations, ...meta } = checkpoint.base;
-      const order = conversations.map((c) => c.id);
-      const upsert = conversations.filter((c) => stale.has(c.id));
       try {
-        await invoke(
-          'save_sync_state',
-          joinBytes(
-            jsonWith({ value: { ...checkpoint, base: meta }, order }, [
-              ['upsert', chatList(upsert)],
-            ]),
-          ),
+        await sendCheckpoint(
+          head,
+          conversations.filter((c) => stale.has(c.id)),
+          true,
         );
         return;
       } catch (error) {
         if (!String(error).includes(needsWholeCheckpoint)) throw error;
       }
     }
-    await invoke('save_sync_state', { value: checkpoint });
+    // Everything. One call carries a small checkpoint as it always did.
+    if (!(await sendCheckpoint(head, conversations, false)))
+      await invoke('save_sync_state', { value: checkpoint });
   } catch (error) {
     // Nothing is known about the file after a write that failed.
     checkpointStale = undefined;
     throw error;
   }
+}
+/**
+ * Sends a checkpoint write: `head`, the checkpoint without its conversations with the order of
+ * them all, and `chats`, those to write anew. More than one call can carry goes ahead a few
+ * megabytes at a time, under a name the write then gives (src/lib/saved-parts.ts). `patch` says
+ * the file completes the write, whose conversations are then written from the bytes their parts
+ * keep; without it, returns `false` when one call carries everything, for the caller to send.
+ */
+async function sendCheckpoint(
+  head: { value: Record<string, unknown>; order: string[] },
+  chats: Conversation[],
+  patch: boolean,
+): Promise<boolean> {
+  const save = crypto.randomUUID();
+  const sent = await sendAhead(chatChunks(chats, { keep: patch }), (chunk) =>
+    invoke('stage_sync_state_chats', aheadArguments(save, chunk, callsUsePostMessage())),
+  );
+  if (sent.ahead)
+    await invoke(
+      'save_sync_state',
+      callsUsePostMessage()
+        ? { ...head, upsert: [], staged: save }
+        : joinBytes(jsonWith({ ...head, staged: save }, [['upsert', ['[]']]])),
+    );
+  else if (!patch) return false;
+  else
+    await invoke(
+      'save_sync_state',
+      joinBytes(jsonWith(head, [['upsert', sent.only?.list ?? ['[]']]])),
+    );
+  return true;
 }
 // Settles when the poll under way ends, so a change that must go out at once can follow it.
 let pollDone: Promise<void> = Promise.resolve();
@@ -3418,22 +3491,58 @@ export async function loadWorkspace(
   installation?: Installation,
   // Replies this computer still runs, which a reloaded window follows again.
   live: LiveRun[] = [],
+  // Receives `unsaved`, the conversations restoring changed over the file, when this computer's
+  // app holds that file's conversations for the first save to complete from. That save then
+  // sends those, with whatever else the start changes, instead of every conversation.
+  loaded?: { unsaved?: Set<string> },
 ): Promise<Workspace> {
-  const value = desktop() ? await invoke<unknown>('load_workspace') : null;
-  if (!value) return initialWorkspace();
+  const saved = desktop() ? await readSavedWorkspace() : undefined;
+  if (!saved?.value) return initialWorkspace();
   const following = new Set(live.map((run) => run.runId));
+  const changed = new Set<string>();
   // A restarted server interrupts only the replies it ran; other computers' replies run on. A
   // reply that runs on here through a reload of the window is no interrupted one either.
-  return restoreWorkspace(
-    value,
-    installation?.server || following.size
+  const workspace = restoreWorkspace(saved.value, {
+    changed,
+    ...(installation?.server || following.size
       ? {
           runsHere: (c, m, fleet) =>
             !(m.runId && following.has(m.runId)) &&
             (!installation?.server || runsOn(fleet, c, m, installation.id)),
         }
-      : undefined,
-  );
+      : {}),
+  });
+  if (loaded && saved.held) loaded.unsaved = changed;
+  return workspace;
+}
+/**
+ * The workspace file as this computer's app holds it. The app hands it over opened: everything
+ * but its conversations, which are then read a few megabytes at a time
+ * (src/lib/saved-parts.ts). An app that only knows the whole file answers nothing, and a file it
+ * cannot take apart comes whole. `held` says the app keeps the conversations it handed over,
+ * as it keeps those of its last write, for the saves that follow to complete from.
+ */
+async function readSavedWorkspace(): Promise<{ value: unknown; held: boolean }> {
+  for (let attempt = 0; ; attempt++) {
+    const opened = await invoke<Opened | null>('open_workspace');
+    if (!opened) return { value: await invoke<unknown>('load_workspace'), held: false };
+    if ('whole' in opened) return { value: opened.whole, held: false };
+    const { rest, chats, read } = opened.parts;
+    const conversations: unknown[] = [];
+    try {
+      await readChats(
+        chats,
+        (ids) => invoke('read_workspace_chats', { read, ids }),
+        (list) => {
+          for (const conversation of list) conversations.push(conversation);
+        },
+      );
+      return { value: { ...rest, conversations }, held: true };
+    } catch (error) {
+      // A save an earlier page left under way replaced the file between two reads.
+      if (attempt >= 4 || !String(error).includes(fileMoved)) throw error;
+    }
+  }
 }
 /**
  * The app session this desktop process opened when it started; page reloads keep it, and a page
@@ -3452,6 +3561,42 @@ export async function appSession(): Promise<
 }
 /** The desktop host asks for the whole workspace when it cannot complete a patch. */
 const needsWholeWorkspace = 'The whole workspace is needed to save this change.';
+/**
+ * Sends a save to this computer's app: the workspace without its conversations, the order of
+ * them all, and `chats`, detached copies of those to write anew. More than one call can carry
+ * goes ahead a few megabytes at a time, under a name the save then gives
+ * (src/lib/saved-parts.ts); one call carries a small save as it always did, a `whole` one as the
+ * workspace itself. `keep` writes the conversations from the bytes their parts keep.
+ */
+async function sendWorkspace(
+  index: Record<string, unknown>,
+  order: string[],
+  chats: Iterable<Conversation>,
+  { keep = false, whole = false }: { keep?: boolean; whole?: boolean },
+): Promise<void> {
+  const save = crypto.randomUUID();
+  const sent = await sendAhead(chatChunks(chats, { keep }), (chunk) =>
+    invoke('stage_workspace_chats', aheadArguments(save, chunk, callsUsePostMessage())),
+  );
+  if (sent.ahead)
+    await invoke(
+      'save_workspace_patch',
+      callsUsePostMessage()
+        ? { index, upsert: [], order, staged: save }
+        : joinBytes(jsonWith({ index, order, staged: save }, [['upsert', ['[]']]])),
+    );
+  else if (whole)
+    await invoke('save_workspace', {
+      workspace: { ...index, conversations: sent.only?.chats ?? [] },
+    });
+  else if (callsUsePostMessage())
+    await invoke('save_workspace_patch', { index, upsert: sent.only?.chats ?? [], order });
+  else
+    await invoke(
+      'save_workspace_patch',
+      joinBytes(jsonWith({ index, order }, [['upsert', sent.only?.list ?? ['[]']]])),
+    );
+}
 export async function saveWorkspace(
   workspace: Workspace,
   scope = workspaceStorageScope(),
@@ -3463,23 +3608,29 @@ export async function saveWorkspace(
   // what changed is written anew: a streamed reply saves its conversation every few seconds, and
   // writing a 9.8 MB one as text each time held the page for 70 ms or more.
   copies?: Conversation[],
+  // A detached copy of a live conversation, for the ones a save sends without `copies`: every
+  // conversation, when none is named or the host asks for them all. Writing live conversations
+  // as text made each of them reactive (src/lib/detached.ts).
+  copy: (conversation: Conversation) => Conversation = detached,
 ): Promise<void> {
   if (desktop()) {
-    if (changed) {
-      const { conversations, ...index } = workspace;
-      const order = conversations.map((c) => c.id);
+    const { conversations, ...index } = workspace;
+    const order = conversations.map((c) => c.id);
+    let whole = !changed;
+    if (changed)
       try {
-        if (copies && !callsUsePostMessage())
-          await invoke(
-            'save_workspace_patch',
-            joinBytes(jsonWith({ index, order }, [['upsert', chatList(copies)]])),
-          );
-        else await invoke('save_workspace_patch', { index, upsert: changed, order });
+        await sendWorkspace(index, order, copies ?? changed.map(copy), { keep: !!copies });
       } catch (e) {
-        if (String(e).includes(needsWholeWorkspace)) await invoke('save_workspace', { workspace });
-        else throw e;
+        if (!String(e).includes(needsWholeWorkspace)) throw e;
+        whole = true;
       }
-    } else await invoke('save_workspace', { workspace });
+    if (whole) {
+      // Each copy is made as its turn to be sent comes.
+      const all = (function* () {
+        for (const conversation of conversations) yield copy(conversation);
+      })();
+      await sendWorkspace(index, order, all, { whole: true });
+    }
     notifyDesktop(workspace);
   } else {
     // A queued save from a former session must never be written to the new user's cache.

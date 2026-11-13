@@ -30,7 +30,7 @@ test('templates remain unavailable until the saved workspace has loaded', async 
     const bridge = (window as any).__TAURI_INTERNALS__;
     const invoke = bridge.invoke;
     bridge.invoke = async (command: string, args: unknown) => {
-      if (command === 'load_workspace')
+      if (command === 'open_workspace')
         await new Promise<void>((resolve) => {
           (window as any).releaseTemplateLoad = resolve;
         });

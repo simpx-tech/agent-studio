@@ -558,15 +558,18 @@ export const endedWithoutRun = (message: Pick<Message, 'error'>) =>
  * so they read as interrupted, unless this device follows runs other computers report (the
  * Viewer), or names the replies that stopped (`runsHere`: a server's restart leaves the replies
  * of other computers running, and a reload of the window those its computer still runs).
+ * `changed` receives the id of each conversation this changes over what a version 3 file holds.
  */
 export function restoreWorkspace(
   value: unknown,
   {
     followsRuns = false,
     runsHere,
+    changed,
   }: {
     followsRuns?: boolean;
     runsHere?: (conversation: Conversation, message: Message, fleet: Fleet) => boolean;
+    changed?: Set<string>;
   } = {},
 ): Workspace {
   const oldSchema = z.object({
@@ -611,13 +614,17 @@ export function restoreWorkspace(
     data = workspaceSchema.parse({ ...old, version: 3, fleet: emptyFleet() });
   } else data = workspaceSchema.parse(value);
   for (const c of data.conversations) {
-    if (c.titleStatus === 'pending') c.titleStatus = 'fallback';
+    if (c.titleStatus === 'pending') {
+      c.titleStatus = 'fallback';
+      changed?.add(c.id);
+    }
     if (!followsRuns)
       for (const m of c.messages)
         if (m.status === 'running' && (!runsHere || runsHere(c, m, data.fleet))) {
           m.status = 'cancelled';
           m.error = interruptedReplyError;
           delete m.backgroundWait;
+          changed?.add(c.id);
         }
   }
   return data;

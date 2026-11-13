@@ -164,3 +164,27 @@ it('counts what a sync took as changed until it settles, and resumes from what w
   expect(marks.pending()).toEqual({ chats: new Set(['x']), meta: true });
   expect(marks.takeUnsynced()).toEqual({ chats: new Set(['x']), meta: true });
 });
+
+it('saves what a start changed over the file its app holds, and syncs everything once', () => {
+  const marks = createChangeMarks();
+  // Nothing is known at the start: the first save would send every conversation.
+  expect(marks.takeUnsaved()).toBeUndefined();
+  const started = createChangeMarks();
+  started.saved(['a', 'b']);
+  expect(started.unsaved()).toBe(true);
+  expect(started.takeUnsaved()).toEqual(new Set(['a', 'b']));
+  // The first sync still compares every conversation.
+  expect(started.pending().chats).toBeUndefined();
+  expect(started.takeUnsynced()).toEqual({ chats: undefined, meta: true });
+  // A start that changed nothing still saves the rest of the workspace.
+  const unchanged = createChangeMarks();
+  unchanged.saved([]);
+  expect(unchanged.unsaved()).toBe(true);
+  expect(unchanged.takeUnsaved()).toEqual(new Set());
+  expect(unchanged.unsaved()).toBe(false);
+  // Changes made meanwhile join them.
+  const busy = createChangeMarks();
+  busy.saved(['a']);
+  busy.chat('c');
+  expect(busy.takeUnsaved()).toEqual(new Set(['a', 'c']));
+});

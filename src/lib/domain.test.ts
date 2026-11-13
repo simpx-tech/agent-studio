@@ -36,6 +36,22 @@ describe('portable conversation state', () => {
     expect(restored.conversations[0].messages[0].blocks[0].text).toBe('Partial');
     expect(restored.conversations[0].titleStatus).toBe('fallback');
     expect(restored.conversations[0].title).toBe('Test');
+    // It names the conversations it changed, for a first save that sends those alone.
+    const untouched = { ...workspace.conversations[0], id: crypto.randomUUID() };
+    untouched.titleStatus = 'generated';
+    untouched.messages = untouched.messages.map((m) => ({ ...m, status: 'complete' as const }));
+    const pending = { ...untouched, id: crypto.randomUUID(), titleStatus: 'pending' as const };
+    workspace.conversations.push(untouched, pending);
+    const changed = new Set<string>();
+    restoreWorkspace(workspace, { changed });
+    expect([...changed]).toEqual([workspace.conversations[0].id, pending.id]);
+    // A device that follows runs leaves replies running, and names nothing for them.
+    changed.clear();
+    restoreWorkspace({ ...workspace, conversations: [workspace.conversations[0]] }, { followsRuns: true, changed });
+    expect([...changed]).toEqual([workspace.conversations[0].id]);
+    changed.clear();
+    restoreWorkspace({ ...workspace, conversations: [untouched] }, { changed });
+    expect(changed.size).toBe(0);
   });
   it('only passes user messages and completed assistant messages to a provider', () => {
     const c: Conversation = {

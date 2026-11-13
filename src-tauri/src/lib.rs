@@ -23,6 +23,7 @@ mod native_instructions;
 mod notifications;
 mod page_guard;
 mod page_preview;
+mod parts;
 mod plugins;
 mod pool;
 mod profiles;
@@ -74,7 +75,15 @@ struct StorageState {
     /// and each save copied them all and encoded the file into one 256 MiB buffer, which is what
     /// Windows refused when the app closed (docs/DIAGNOSTICS.md). Cleared whenever the file is
     /// written another way, or a write fails.
-    saved: Option<std::collections::HashMap<String, Box<serde_json::value::RawValue>>>,
+    saved: Option<parts::Chats>,
+    /// Counts the writes of `workspace.json`, so a window reading its conversations a few at a
+    /// time (parts.rs) learns that the file changed between two of its reads.
+    written: u64,
+    /// The conversations a save sent ahead of its last call.
+    staged: parts::Staged,
+    /// The sync checkpoint's conversations while a window reads them, and those a write of it
+    /// sent ahead.
+    checkpoint: sync_state::Held,
 }
 
 #[tauri::command]
@@ -778,6 +787,62 @@ async fn load_sync_state(app: tauri::AppHandle) -> Result<Option<serde_json::Val
         .await
         .map_err(|_| "Cannot read sync checkpoint")?
 }
+/// Opens the sync checkpoint for the window to read: everything but its conversations, which
+/// the window then reads a few at a time (parts.rs), or the whole file where it cannot be taken
+/// apart.
+#[tauri::command]
+async fn open_sync_state(app: tauri::AppHandle) -> Result<parts::Opened, String> {
+    tauri::async_runtime::spawn_blocking(move || match with_sync_state(&app, sync_state::open)? {
+        Some(opened) => Ok(opened),
+        None => read_sync_state(&app).map(parts::Opened::Whole),
+    })
+    .await
+    .map_err(|_| "Cannot read sync checkpoint")?
+}
+/// Some of the conversations of the checkpoint a window opened, as the bytes of their JSON list.
+#[tauri::command]
+async fn read_sync_state_chats(
+    app: tauri::AppHandle,
+    read: u64,
+    ids: Vec<String>,
+) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        with_sync_state(&app, |_, held| held.read(read, &ids))
+    })
+    .await
+    .map_err(|_| "Cannot read sync checkpoint")?
+    .map(tauri::ipc::Response::new)
+}
+/// The window read what it needed of the checkpoint it opened.
+#[tauri::command]
+async fn close_sync_state(app: tauri::AppHandle, read: u64) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        with_sync_state(&app, |_, held| {
+            held.close(read);
+            Ok(())
+        })
+    })
+    .await
+    .map_err(|_| "Cannot read sync checkpoint")?
+}
+/// Conversations of a checkpoint write, sent ahead of the `save_sync_state` that names them.
+#[tauri::command]
+async fn stage_sync_state_chats(
+    app: tauri::AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
+    let sent = sent::Sent::of(request.body());
+    tauri::async_runtime::spawn_blocking(move || {
+        let ahead = sent.read().map_err(|_| "Invalid sync checkpoint")?;
+        with_sync_state(&app, |_, held| {
+            held.staged
+                .add(ahead)
+                .map_err(|()| "Invalid sync checkpoint".into())
+        })
+    })
+    .await
+    .map_err(|_| "Cannot save sync checkpoint")?
+}
 fn read_sync_state(app: &tauri::AppHandle) -> Result<Option<serde_json::Value>, String> {
     let path = app
         .path()
@@ -795,7 +860,7 @@ fn read_sync_state(app: &tauri::AppHandle) -> Result<Option<serde_json::Value>, 
                 .and_then(|base| base.get_mut("conversations"))
             {
                 if chat_images::store_inline(&root, conversations) {
-                    write_sync_state(app, |root| sync_state::write(root, &value))?;
+                    with_sync_state(app, |root, _| sync_state::write(root, &value))?;
                 }
             }
             Ok(Some(value))
@@ -806,7 +871,7 @@ fn read_sync_state(app: &tauri::AppHandle) -> Result<Option<serde_json::Value>, 
 }
 /// Saves the sync checkpoint: `value` whole, or `value` without its conversations beside the
 /// `upsert` of those that changed and the `order` of them all, which sync_state.rs completes
-/// from the file.
+/// from those sent ahead under the name `staged` gives and from the file.
 #[tauri::command]
 async fn save_sync_state(
     app: tauri::AppHandle,
@@ -814,23 +879,25 @@ async fn save_sync_state(
 ) -> Result<(), String> {
     let sent = sent::Sent::of(request.body());
     tauri::async_runtime::spawn_blocking(move || {
-        write_sync_state(&app, |root| sync_state::save(root, sent))
+        with_sync_state(&app, |root, held| {
+            sync_state::save(root, sent, &mut held.staged)
+        })
     })
     .await
     .map_err(|_| "Cannot save sync checkpoint")?
 }
-/// Writes the checkpoint under the storage lock, in this app's data folder.
-fn write_sync_state(
+/// Reads or writes the checkpoint under the storage lock, in this app's data folder.
+fn with_sync_state<T>(
     app: &tauri::AppHandle,
-    write: impl FnOnce(&std::path::Path) -> Result<(), String>,
-) -> Result<(), String> {
+    work: impl FnOnce(&std::path::Path, &mut sync_state::Held) -> Result<T, String>,
+) -> Result<T, String> {
     let storage = app.state::<Storage>();
-    let _lock = storage.0.lock().map_err(|_| "Storage lock failed")?;
+    let mut state = storage.0.lock().map_err(|_| "Storage lock failed")?;
     let root = app
         .path()
         .app_local_data_dir()
         .map_err(|_| "Cannot locate app data")?;
-    write(&root)
+    work(&root, &mut state.checkpoint)
 }
 
 #[tauri::command]
@@ -883,6 +950,112 @@ fn read_workspace(app: &tauri::AppHandle) -> Result<Option<serde_json::Value>, S
         Err(_) => Err("Cannot read the saved workspace. Check your app data permissions.".into()),
     }
 }
+const CANNOT_READ_WORKSPACE: &str =
+    "Cannot read the saved workspace. Check your app data permissions.";
+/// Opens the saved workspace for the window to read: everything but its conversations, which
+/// the window then reads a few at a time (parts.rs) and which stay here for the saves that
+/// follow to complete from, or the whole file where it cannot be taken apart.
+#[tauri::command]
+async fn open_workspace(app: tauri::AppHandle) -> Result<parts::Opened, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = app
+            .path()
+            .app_local_data_dir()
+            .map_err(|_| "Cannot locate app data")?;
+        let opened = {
+            let storage = app.state::<Storage>();
+            let mut state = storage.0.lock().map_err(|_| "Storage lock failed")?;
+            workspace_parts(&root, &mut state)?
+        };
+        match opened {
+            Some(opened) => Ok(opened),
+            None => read_workspace(&app).map(parts::Opened::Whole),
+        }
+    })
+    .await
+    .map_err(|_| CANNOT_READ_WORKSPACE)?
+}
+/// The saved workspace without its conversations, which are kept as the last write's are.
+/// `None` for a file to read whole: one that is not a version 3 workspace, whose conversations
+/// cannot be told apart by id, or that holds images to move into the image store.
+fn workspace_parts(
+    root: &std::path::Path,
+    state: &mut StorageState,
+) -> Result<Option<parts::Opened>, String> {
+    let bytes = match std::fs::read(root.join("workspace.json")) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Some(parts::Opened::Whole(None)))
+        }
+        Err(_) => return Err(CANNOT_READ_WORKSPACE.into()),
+    };
+    let Ok(file) = serde_json::from_slice::<parts::Split>(&bytes) else {
+        return Ok(None);
+    };
+    drop(bytes);
+    if file.rest.get("version").and_then(serde_json::Value::as_i64) != Some(3)
+        || file
+            .conversations
+            .iter()
+            .any(|conversation| chat_images::holds_inline(conversation.get()))
+    {
+        return Ok(None);
+    }
+    let Some((chats, kept)) = parts::named(file.conversations) else {
+        return Ok(None);
+    };
+    state.saved = Some(kept);
+    Ok(Some(parts::Opened::Parts {
+        rest: serde_json::Value::Object(file.rest),
+        chats,
+        read: state.written,
+    }))
+}
+/// Some of the conversations of the workspace a window opened, as the bytes of their JSON list.
+/// Fails with `parts::MOVED` once the file was written since, so the window opens it again.
+#[tauri::command]
+async fn read_workspace_chats(
+    app: tauri::AppHandle,
+    read: u64,
+    ids: Vec<String>,
+) -> Result<tauri::ipc::Response, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let storage = app.state::<Storage>();
+        let state = storage.0.lock().map_err(|_| "Storage lock failed")?;
+        workspace_chats(&state, read, &ids)
+    })
+    .await
+    .map_err(|_| CANNOT_READ_WORKSPACE)?
+    .map(tauri::ipc::Response::new)
+}
+fn workspace_chats(state: &StorageState, read: u64, ids: &[String]) -> Result<Vec<u8>, String> {
+    match &state.saved {
+        Some(saved) if state.written == read => parts::list(saved, ids),
+        _ => Err(parts::MOVED.into()),
+    }
+}
+/// Conversations of a save, sent ahead of the `save_workspace_patch` that names them.
+#[tauri::command]
+async fn stage_workspace_chats(
+    app: tauri::AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> Result<(), String> {
+    let sent = sent::Sent::of(request.body());
+    tauri::async_runtime::spawn_blocking(move || {
+        let ahead: parts::Ahead = sent.read().map_err(|_| "Invalid workspace")?;
+        for conversation in &ahead.upsert {
+            readable(conversation)?;
+        }
+        let storage = app.state::<Storage>();
+        let mut state = storage.0.lock().map_err(|_| "Storage lock failed")?;
+        state
+            .staged
+            .add(ahead)
+            .map_err(|()| "Invalid workspace".into())
+    })
+    .await
+    .map_err(|_| "Cannot save the workspace")?
+}
 #[tauri::command]
 async fn save_workspace(app: tauri::AppHandle, workspace: serde_json::Value) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
@@ -899,6 +1072,8 @@ pub const NEEDS_WHOLE_WORKSPACE: &str = "The whole workspace is needed to save t
 /// Saves a workspace assembled from the conversations that changed and the last write. `order`
 /// names every conversation the workspace holds, so additions, removals and reordering all
 /// arrive; a conversation that is neither sent nor already saved fails instead of being dropped.
+/// A save of many conversations sends them ahead, a few megabytes a call
+/// (`stage_workspace_chats`), and names them here with `staged`.
 /// The window sends `index`, `upsert` and `order` as bytes (sent.rs): a streamed reply saves its
 /// conversation every few seconds, and a long one is megabytes.
 #[tauri::command]
@@ -911,6 +1086,8 @@ async fn save_workspace_patch(
         index: serde_json::Value,
         upsert: Vec<Box<serde_json::value::RawValue>>,
         order: Vec<String>,
+        #[serde(default)]
+        staged: Option<String>,
     }
     let sent = sent::Sent::of(request.body());
     tauri::async_runtime::spawn_blocking(move || {
@@ -918,13 +1095,19 @@ async fn save_workspace_patch(
             index,
             upsert,
             order,
+            staged,
         } = sent.read().map_err(|_| "Invalid workspace")?;
         for conversation in &upsert {
             readable(conversation)?;
         }
         let storage = app.state::<Storage>();
         let mut state = storage.0.lock().map_err(|_| "Storage lock failed")?;
-        let workspace = patched_workspace(&mut state, index, upsert, order)?;
+        // Sent ahead by this save, or by one that never finished and is forgotten here.
+        let ahead = state
+            .staged
+            .take(staged.as_deref())
+            .ok_or(NEEDS_WHOLE_WORKSPACE)?;
+        let workspace = patched_workspace(&mut state, index, upsert, ahead, order)?;
         write_workspace(&app, &mut state, workspace)
     })
     .await
@@ -1071,29 +1254,21 @@ fn readable(conversation: &serde_json::value::RawValue) -> Result<(), String> {
         .map(|_| ())
         .map_err(|_| "Invalid workspace".into())
 }
-/// A conversation's id, read without building the conversation.
-fn conversation_id(conversation: &serde_json::value::RawValue) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct Named<'a> {
-        #[serde(borrow)]
-        id: std::borrow::Cow<'a, str>,
-    }
-    serde_json::from_str::<Named>(conversation.get())
-        .ok()
-        .map(|named| named.id.into_owned())
-}
 /// The workspace a patch describes: its index, and the conversations `order` names, each the
-/// one sent or else the one the last write kept, moved rather than copied.
+/// one sent, with this call or `ahead` of it, or else the one the last write kept, moved rather
+/// than copied.
 fn patched_workspace(
     state: &mut StorageState,
     index: serde_json::Value,
     upsert: Vec<Box<serde_json::value::RawValue>>,
+    ahead: parts::Chats,
     order: Vec<String>,
 ) -> Result<WorkspaceFile, String> {
     let index = workspace_index(index)?;
-    let mut sent = std::collections::HashMap::with_capacity(upsert.len());
+    let mut sent = ahead;
+    sent.reserve(upsert.len());
     for conversation in upsert {
-        let id = conversation_id(&conversation).ok_or("Invalid workspace")?;
+        let id = parts::id(&conversation).ok_or("Invalid workspace")?;
         sent.insert(id, conversation);
     }
     // Checked before the last write's conversations move, which a refusal keeps.
@@ -1144,6 +1319,7 @@ fn write_workspace_file(
 ) -> Result<(), String> {
     // Until this write ends, the conversations kept no longer describe the file.
     state.saved = None;
+    state.written += 1;
     std::fs::create_dir_all(root).map_err(|_| "Cannot create app data directory")?;
     let mut file =
         tempfile::NamedTempFile::new_in(root).map_err(|_| "Cannot prepare workspace save")?;
@@ -1541,6 +1717,7 @@ async fn undo(
             let mut saved = storage.0.lock().map_err(|_| "Storage lock failed")?;
             // This writes the file directly, so a later patch cannot build on the last write.
             saved.saved = None;
+            saved.written += 1;
             let mut workspace: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(root.join("workspace.json")).map_err(
                     |_| "Files were undone, but their status could not be saved. Retry Undo.",
@@ -2174,6 +2351,10 @@ pub fn run() {
             relay_disconnect,
             relay_request,
             load_sync_state,
+            open_sync_state,
+            read_sync_state_chats,
+            close_sync_state,
+            stage_sync_state_chats,
             save_sync_state,
             detect_providers,
             list_models,
@@ -2199,6 +2380,9 @@ pub fn run() {
             read_tool_output_model_views,
             store_tool_output_model_views,
             load_workspace,
+            open_workspace,
+            read_workspace_chats,
+            stage_workspace_chats,
             save_workspace,
             save_workspace_patch,
             store_chat_image,
@@ -2295,6 +2479,7 @@ mod workspace_patch_tests {
         StorageState {
             current: true,
             saved: Some(whole(chats).kept()),
+            ..Default::default()
         }
     }
     /// What a workspace writes.
@@ -2313,6 +2498,7 @@ mod workspace_patch_tests {
             state,
             index,
             upsert.into_iter().map(text).collect(),
+            Default::default(),
             order.iter().map(|id| id.to_string()).collect(),
         )
         .map(|workspace| serde_json::from_slice(&bytes(&workspace)).unwrap())
@@ -2428,6 +2614,7 @@ mod workspace_patch_tests {
             &mut saved,
             index(),
             vec![RawValue::from_string(odd.into()).unwrap()],
+            Default::default(),
             vec!["a".into()],
         )
         .unwrap();
@@ -2438,6 +2625,7 @@ mod workspace_patch_tests {
             &mut saved,
             index(),
             vec![text(chat("b", "Second"))],
+            Default::default(),
             vec!["b".into(), "a".into()],
         )
         .unwrap();
@@ -2460,7 +2648,14 @@ mod workspace_patch_tests {
         let root = folder.path().join("data");
         std::fs::write(&root, b"").unwrap();
         let mut saved = state(vec![chat("a", "First")]);
-        let workspace = patched_workspace(&mut saved, index(), vec![], vec!["a".into()]).unwrap();
+        let workspace = patched_workspace(
+            &mut saved,
+            index(),
+            vec![],
+            Default::default(),
+            vec!["a".into()],
+        )
+        .unwrap();
         assert!(write_workspace_file(&root, &mut saved, workspace).is_err());
         assert!(saved.saved.is_none());
         assert_eq!(
@@ -2502,6 +2697,174 @@ mod workspace_patch_tests {
             );
             assert_eq!(readable(&raw).is_ok(), accepted, "{conversation}");
         }
+    }
+}
+
+#[cfg(test)]
+mod workspace_parts_tests {
+    use super::{
+        patched_workspace, workspace_chats, workspace_parts, write_workspace_file, StorageState,
+        NEEDS_WHOLE_WORKSPACE,
+    };
+    use crate::parts::{Ahead, Opened, MOVED};
+    use serde_json::{json, value::RawValue, Value};
+
+    fn raw(text: &str) -> Box<RawValue> {
+        RawValue::from_string(text.into()).unwrap()
+    }
+    fn index() -> Value {
+        json!({"version": 3, "preferences": {}})
+    }
+    fn file(root: &std::path::Path, text: &str) {
+        std::fs::write(root.join("workspace.json"), text).unwrap();
+    }
+    fn saved(root: &std::path::Path) -> String {
+        std::fs::read_to_string(root.join("workspace.json")).unwrap()
+    }
+    /// What a window reads of the conversations named, as text.
+    fn read(state: &StorageState, read: u64, ids: &[&str]) -> Result<String, String> {
+        let ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
+        workspace_chats(state, read, &ids).map(|bytes| String::from_utf8(bytes).unwrap())
+    }
+
+    #[test]
+    fn opens_a_workspace_for_reading_a_few_conversations_at_a_time() {
+        let folder = tempfile::tempdir().unwrap();
+        // Text a parser and a writer could change between them.
+        let odd = r#"{"title":"\u00e9\/","id":"a","n":1.0000000000000000000001,"messages":[]}"#;
+        let other = r#"{"id":"b","messages":[]}"#;
+        file(
+            folder.path(),
+            &format!(r#"{{"version":3,"conversations":[{odd},{other}],"preferences":{{"x":1}}}}"#),
+        );
+        let mut state = StorageState::default();
+        let Some(Opened::Parts {
+            rest,
+            chats,
+            read: number,
+        }) = workspace_parts(folder.path(), &mut state).unwrap()
+        else {
+            panic!("read whole");
+        };
+        assert_eq!(rest, json!({"version": 3, "preferences": {"x": 1}}));
+        assert_eq!(
+            chats,
+            vec![("a".to_string(), odd.len()), ("b".to_string(), other.len())]
+        );
+        assert_eq!(read(&state, number, &["b"]).unwrap(), format!("[{other}]"));
+        assert_eq!(
+            read(&state, number, &["a", "b"]).unwrap(),
+            format!("[{odd},{other}]")
+        );
+        // The first save after a start completes from the file it read, sending one conversation.
+        let workspace = patched_workspace(
+            &mut state,
+            index(),
+            vec![raw(r#"{"id":"b","title":"Renamed"}"#)],
+            Default::default(),
+            vec!["b".into(), "a".into()],
+        )
+        .unwrap();
+        write_workspace_file(folder.path(), &mut state, workspace).unwrap();
+        assert_eq!(
+            saved(folder.path()),
+            format!(
+                r#"{{"conversations":[{{"id":"b","title":"Renamed"}},{odd}],"preferences":{{}},"version":3}}"#
+            )
+        );
+        // A window that opened the file before that write starts again.
+        assert_eq!(read(&state, number, &["a"]).unwrap_err(), MOVED);
+        let Some(Opened::Parts { read: number, .. }) =
+            workspace_parts(folder.path(), &mut state).unwrap()
+        else {
+            panic!("read whole");
+        };
+        assert_eq!(read(&state, number, &["a"]).unwrap(), format!("[{odd}]"));
+        // So does one that names a conversation the file does not hold.
+        assert_eq!(read(&state, number, &["c"]).unwrap_err(), MOVED);
+    }
+
+    #[test]
+    fn reads_whole_what_it_cannot_take_apart() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut state = StorageState::default();
+        // No file: nothing to read, and nothing for a patch to complete from.
+        assert!(matches!(
+            workspace_parts(folder.path(), &mut state).unwrap(),
+            Some(Opened::Whole(None))
+        ));
+        assert!(state.saved.is_none());
+        for text in [
+            // Earlier versions, which the window migrates.
+            r#"{"version":2,"conversations":[],"preferences":{}}"#,
+            r#"{"version":1,"agents":[],"conversations":[]}"#,
+            // Conversations that cannot be told apart.
+            r#"{"version":3,"conversations":[{"title":"x"}],"preferences":{}}"#,
+            r#"{"version":3,"conversations":[{"id":"a"},{"id":"a"}],"preferences":{}}"#,
+            // An image saved inline, which reading the file whole moves into the store.
+            r#"{"version":3,"conversations":[{"id":"a","messages":[{"images":[{"data":"AAAA"}]}]}],"preferences":{}}"#,
+            // Not a workspace at all: the whole read says so.
+            r#"{"version":3"#,
+            r#"[]"#,
+        ] {
+            file(folder.path(), text);
+            assert!(
+                workspace_parts(folder.path(), &mut state)
+                    .unwrap()
+                    .is_none(),
+                "{text}"
+            );
+            assert!(state.saved.is_none(), "{text}");
+        }
+        // The word alone, in what a conversation says, is no image.
+        file(
+            folder.path(),
+            r#"{"version":3,"conversations":[{"id":"a","messages":[{"content":"\"data\":","data":"x","images":[{"hash":"h"}]}]}],"preferences":{}}"#,
+        );
+        assert!(workspace_parts(folder.path(), &mut state)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn a_save_of_many_conversations_sends_them_ahead() {
+        let folder = tempfile::tempdir().unwrap();
+        let mut state = StorageState::default();
+        let ahead = |save: &str, chats: &[&str]| Ahead {
+            save: save.into(),
+            upsert: chats.iter().map(|text| raw(text)).collect(),
+        };
+        state
+            .staged
+            .add(ahead("one", &[r#"{"id":"a"}"#, r#"{"id":"b"}"#]))
+            .unwrap();
+        state.staged.add(ahead("one", &[r#"{"id":"c"}"#])).unwrap();
+        let sent = state.staged.take(Some("one")).unwrap();
+        // Nothing was written before: everything the order names was sent, ahead or with the call.
+        let workspace = patched_workspace(
+            &mut state,
+            index(),
+            vec![raw(r#"{"id":"d"}"#)],
+            sent,
+            vec!["d".into(), "c".into(), "b".into(), "a".into()],
+        )
+        .unwrap();
+        write_workspace_file(folder.path(), &mut state, workspace).unwrap();
+        assert_eq!(
+            saved(folder.path()),
+            r#"{"conversations":[{"id":"d"},{"id":"c"},{"id":"b"},{"id":"a"}],"preferences":{},"version":3}"#
+        );
+        // One sent ahead and left out of the order would be silently dropped.
+        state.staged.add(ahead("two", &[r#"{"id":"e"}"#])).unwrap();
+        let sent = state.staged.take(Some("two")).unwrap();
+        assert_eq!(
+            patched_workspace(&mut state, index(), vec![], sent, vec!["a".into()])
+                .err()
+                .unwrap(),
+            NEEDS_WHOLE_WORKSPACE
+        );
+        // The refusal kept the last write's conversations.
+        assert_eq!(state.saved.as_ref().unwrap().len(), 4);
     }
 }
 

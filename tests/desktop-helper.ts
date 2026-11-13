@@ -543,6 +543,31 @@ export async function mockDesktop(page: Page, mode = 'success') {
           }
           if (command === 'load_workspace')
             return JSON.parse(localStorage.getItem('test-workspace') ?? 'null');
+          // The app opens the workspace for the page: everything but its conversations, which
+          // the page then reads a few at a time and the app keeps for the saves that follow to
+          // complete from (src-tauri/src/parts.rs). Earlier versions come whole.
+          if (command === 'open_workspace') {
+            const saved = JSON.parse(localStorage.getItem('test-workspace') ?? 'null');
+            if (saved?.version !== 3 || !Array.isArray(saved.conversations))
+              return { whole: saved };
+            const { conversations, ...rest } = saved;
+            return {
+              parts: {
+                rest,
+                chats: conversations.map((c: { id: string }) => [c.id, JSON.stringify(c).length]),
+                read: 0,
+              },
+            };
+          }
+          if (command === 'read_workspace_chats') {
+            const saved = JSON.parse(localStorage.getItem('test-workspace') ?? 'null');
+            const held = new Map<string, unknown>(
+              (saved?.conversations ?? []).map((c: { id: string }) => [c.id, c]),
+            );
+            const list = (args.ids as string[]).map((id) => held.get(id));
+            if (list.includes(undefined)) throw 'The saved file changed while it was read.';
+            return new TextEncoder().encode(JSON.stringify(list)).buffer;
+          }
           if (command === 'save_workspace') {
             localStorage.setItem('test-workspace', JSON.stringify(args.workspace));
             return;

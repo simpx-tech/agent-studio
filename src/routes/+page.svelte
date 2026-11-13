@@ -3351,7 +3351,10 @@
         // Replies this computer still runs: a reloaded window follows them again, so they are
         // no interrupted ones. Listed before the workspace is read, so none ends unseen between.
         const live = await liveRuns().catch((): LiveRun[] => []);
-        workspace = await loadWorkspace(local, live);
+        // What this start changes over the file, where the app holds the file's conversations:
+        // the first save then sends those instead of every conversation.
+        const start: { unsaved?: Set<string> } = {};
+        workspace = await loadWorkspace(local, live, start);
         installation = local;
         if (installation && desktop()) registerInstallation(workspace.fleet, installation);
         // History lists the chats used from this start of the app until the next one under it.
@@ -3365,14 +3368,18 @@
           // Start each app session with a clean Active list without changing chat recency. A
           // server starts with no one at its window and leaves everyone's chats where they are,
           // and a reloaded window is no new start of the app.
-          if (desktop() && !installation?.server && !started?.reloaded)
+          if (desktop() && !installation?.server && !started?.reloaded && !conversation.archived) {
             conversation.archived = true;
-          if (!conversation.location)
+            start.unsaved?.add(conversation.id);
+          }
+          if (!conversation.location) {
             conversation.location = conversationLocation(
               conversation,
               workspace.fleet,
               installation,
             );
+            start.unsaved?.add(conversation.id);
+          }
         }
         const session = started &&
           installation && {
@@ -3617,7 +3624,11 @@
             for (const runId of unresumedJobs()) followLiveReply(runId);
           }, 30_000);
         }
-        await persist();
+        if (start.unsaved) {
+          localChanges++;
+          marks.saved(start.unsaved);
+          await flushWorkspace();
+        } else await persist();
         await restoreRelayConnection();
         followNotification();
         // Workflows read their store once the relay connection is known (docs/WORKFLOWS.md).
@@ -3833,6 +3844,17 @@
       return;
     }
   }
+  /**
+   * A copy of a conversation for a save that sends every one of them. Like `savedCopies`, it
+   * never fails: a conversation the schema refuses is copied as it is.
+   */
+  function savedCopy(conversation: Conversation): Conversation {
+    try {
+      return chatCopy(conversation);
+    } catch {
+      return detached(conversation);
+    }
+  }
   async function flushWorkspace() {
     if (!loaded) return;
     const scope = workspaceStorageScope();
@@ -3846,7 +3868,7 @@
       try {
         // Resolve the named conversations when the save runs, so it sends their newest state.
         const changed = pending && saved.conversations.filter((c) => pending.has(c.id));
-        await saveWorkspace(saved, scope, changed, changed && savedCopies(changed));
+        await saveWorkspace(saved, scope, changed, changed && savedCopies(changed), savedCopy);
       } finally {
         lastSaveMs = performance.now() - started;
       }

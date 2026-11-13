@@ -79,6 +79,15 @@ export function createChangeMarks(
       if (id === undefined) unsaved = undefined;
       else unsaved?.add(id);
     },
+    /**
+     * The saved file holds every conversation as this device has it but these: what a start of
+     * the app changed over the file it read. Nothing is known otherwise, and the first save
+     * sends every conversation; the first sync compares them all either way.
+     */
+    saved(but: Iterable<string>) {
+      unsaved = new Set(but);
+      index = true;
+    },
     /** Whether a save has anything to write. */
     unsaved(): boolean {
       return index || !unsaved || unsaved.size > 0;

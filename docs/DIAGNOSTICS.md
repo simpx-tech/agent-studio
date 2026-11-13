@@ -228,6 +228,47 @@ What the app does now:
 - A server's page is not repaired this way (its server restarts after five silent minutes), nor a
   page whose async runtime does not answer, which the report names as the error.
 
+## What happened on 2026-11-13
+
+The app (v1.3.1) could not be used from its start at 08:02: the window showed, went blank and
+came back every 20 to 60 seconds.
+
+- `diagnostics/` held a `webviewProcess` report for each round: `renderProcessExited` with
+  `outOfMemory` (exit code -536870904), repaired by loading the page again, 1, 2, 4 … 60 seconds
+  apart, and twice a `windowSilent` repair of the whole window in between. The same reports,
+  fewer, went back to 2026-11-12.
+- The Crashpad dumps of the renderer (`EBWebView\Crashpad\reports`) named the place:
+  `v8-oom-main-cage-size: 4096.00MB`, `ran out of reservation`, 2,645 MB live after two
+  last-resort collections 16.7 seconds into the page, and a `v8-oom-stack` of `stringify` in
+  `processIpcMessage` in `sendIpcMessage`: Tauri writing the arguments of one call as text.
+- The call was the first save of the start. `workspace.json` had reached 465 MB (604
+  conversations). The page saves once it has loaded, and that save named no conversation, so it
+  sent the whole workspace as plain arguments: `JSON.stringify` with Tauri's function for every
+  value, reading the live workspace through the page's proxies, which made all of it reactive
+  (docs/PERFORMANCE.md) while a text of 465 million characters was put together. The page that
+  the app loaded in its place did the same.
+- Nothing was lost: the save never reached the app, which kept the file of the night before, and
+  replies run in the app, not in the page.
+- A text in the page holds at most 536,870,888 characters. Loading the workspace and loading the
+  sync checkpoint each took the file as one text too, so within days neither would have loaded
+  at all, whatever memory was left.
+
+What the app does now:
+
+- **No saved file crosses between the page and the app as one text.** The app opens the
+  workspace and the sync checkpoint for the page: everything but the conversations, which the
+  page reads as lists of about 16 MB, and a save or checkpoint write of more than one list sends
+  them ahead in calls of that size (`src-tauri/src/parts.rs`, `src/lib/saved-parts.ts`).
+- **The first save of a start sends what the start changed.** The app keeps the conversations of
+  the file it handed over, as it keeps those of its last write, so that save is a patch: the
+  chats the start moved to History and the replies it found interrupted.
+- **Conversations are sent as detached copies**, never the live ones as plain arguments.
+
+To tell this from the two earlier kinds of failure: `outOfMemory` on a renderer within seconds
+of every load, with `stringify` under `sendIpcMessage` in the dump's `v8-oom-stack`
+(`artifacts/desktop-oom/crashpad-keys.mjs <dmp>` prints it), is one call writing too much as
+text. `scripts/storage-parts-native-smoke.mjs` runs a real build against copies of real files.
+
 ## Reports and dumps
 
 Each freeze writes `diagnostics/<UTC time>-<kind>.json`:
