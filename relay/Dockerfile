@@ -40,6 +40,7 @@ COPY src/lib/light-chats.ts ./src/lib/
 COPY src/lib/json-equal.ts ./src/lib/
 COPY src/lib/workflow-model.ts ./src/lib/
 COPY src/lib/workflow-store.ts ./src/lib/
+COPY scripts/vps/state-file.ts ./scripts/vps/
 ENV AGENT_STUDIO_RELAY_HOST=0.0.0.0 AGENT_STUDIO_RELAY_PORT=4317 AGENT_STUDIO_RELAY_DATA=/data
 # Node sizes its heap from the container's memory, stopping well before it; let the container's
 # own memory be the limit.

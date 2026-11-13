@@ -263,6 +263,10 @@ What the app does now:
   the file it handed over, as it keeps those of its last write, so that save is a patch: the
   chats the start moved to History and the replies it found interrupted.
 - **Conversations are sent as detached copies**, never the live ones as plain arguments.
+- **The relay reads and writes its state a conversation at a time** (`scripts/vps/state-file.ts`).
+  It saved its whole `workspace.json` as one text with every change and read it back as one when
+  it started, under the same limit of 536,870,888 characters, and so did the VPS updater to count
+  the replies still running (docs/DEPLOYMENT.md).
 
 To tell this from the two earlier kinds of failure: `outOfMemory` on a renderer within seconds
 of every load, with `stringify` under `sendIpcMessage` in the dump's `v8-oom-stack`

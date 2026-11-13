@@ -71,7 +71,7 @@ fi
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 scripts="$(dirname "$here")"
 config="$(dirname "$scripts")/src-tauri/tauri.conf.json"
-for file in "$scripts/release.ts" "$here/update.ts" "$here/install.sh" "$here/agent-studio.service" "$config"; do
+for file in "$scripts/release.ts" "$here/update.ts" "$here/state-file.ts" "$here/install.sh" "$here/agent-studio.service" "$config"; do
   if [ ! -f "$file" ]; then
     echo "$file is missing: copy the repository's scripts directory and src-tauri/tauri.conf.json." >&2
     exit 1

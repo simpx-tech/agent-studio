@@ -17,6 +17,7 @@ updater="$root/updater"
 test -x "$node"
 test -f "$source/release.ts"
 test -f "$source/vps/update.ts"
+test -f "$source/vps/state-file.ts"
 
 # Builds run as this account, which cannot read the relay's private data.
 if ! id agent-studio-build >/dev/null 2>&1; then
@@ -28,6 +29,7 @@ install -d -m 0700 /var/lib/agent-studio-update
 install -d -m 0755 "$updater" "$updater/vps"
 install -m 0644 "$source/release.ts" "$updater/release.ts"
 install -m 0644 "$source/vps/update.ts" "$updater/vps/update.ts"
+install -m 0644 "$source/vps/state-file.ts" "$updater/vps/state-file.ts"
 printf '{ "type": "module" }\n' > "$updater/package.json"
 chmod 0644 "$updater/package.json"
 for unit in agent-studio-update.service agent-studio-update.timer; do

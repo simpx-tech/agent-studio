@@ -1,23 +1,15 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { sessionStore } from './sessions.ts';
 import { workspaceRegistry, WorkspaceAdminError, type RelayWorkspace } from './workspaces.ts';
-import {
-  copyFileSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  writeFileSync,
-  openSync,
-  fsyncSync,
-  closeSync,
-} from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { browserSessions, publicFiles, servePublic } from './web.ts';
 import { serveDownloads } from './downloads.ts';
 import { siteIcons, siteOrigin, type SiteIcons } from './icons.ts';
 import { sharedSchema, emptyShared, type Presence, type RelayJob } from '../src/lib/sync.ts';
+// Beside the updater, which reads the same file and is installed from that folder alone.
+import { readState, stateParts, writeState, type State } from '../scripts/vps/state-file.ts';
 import { lightChat, messagesById, restoreChat } from '../src/lib/light-chats.ts';
 import { jobAwaitsAnswer, pushService, type PushSender } from './push.ts';
 import { pendingChatCount } from '../src/lib/notifications.ts';
@@ -406,7 +398,9 @@ export function createRelay({
     };
     let fresh = false;
     try {
-      const saved = diskSchema.parse(JSON.parse(readFileSync(file, 'utf8')));
+      // Read a conversation at a time: one text of the file holds at most 536,870,888
+      // characters, which a workspace of a few hundred megabytes reaches.
+      const saved = diskSchema.parse(readState(file));
       state =
         saved.version === 2
           ? saved
@@ -500,15 +494,9 @@ export function createRelay({
       chats: state.chatRevisions,
     });
     const save = (next: RelayState) => {
-      const bytes = JSON.stringify(next);
       const temporary = `${file}.tmp`;
-      writeFileSync(temporary, bytes, { mode: 0o600 });
-      const fd = openSync(temporary, 'r+');
-      try {
-        fsyncSync(fd);
-      } finally {
-        closeSync(fd);
-      }
+      // Written a conversation at a time and flushed, for the same reason it is read so.
+      writeState(temporary, next);
       renameSync(temporary, file);
       state = next;
     };
@@ -569,6 +557,12 @@ export function createRelay({
       const send = (code: number, data: unknown) => {
         res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         res.end(JSON.stringify(data));
+      };
+      // The whole state, a conversation at a time: it outgrows what one text can hold.
+      const sendState = (code: number, data: State) => {
+        res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        for (const part of stateParts(data)) res.write(part);
+        res.end();
       };
       const actor = req.headers['x-environment-id'];
       // Apps that know the image store say so; the others read images inline.
@@ -732,7 +726,7 @@ export function createRelay({
                   },
                 }
               : {};
-          send(200, { ...value, ...light, workspaceId: workspace.id });
+          sendState(200, { ...value, ...light, workspaceId: workspace.id });
           return;
         }
         // Pollers holding the current revision skip downloading the whole workspace.
@@ -816,7 +810,7 @@ export function createRelay({
             .parse(await body(req, authorized));
           storeInlineImages(value.workspace.conversations, images);
           if (value.revision !== state.revision) {
-            send(409, { ...forApp(state), workspaceId: workspace.id });
+            sendState(409, { ...forApp(state), workspaceId: workspace.id });
             return;
           }
           const previous = state.workspace;
@@ -829,7 +823,7 @@ export function createRelay({
             }),
           );
           push.changed(previous, state.workspace);
-          send(200, { ...forApp(state), workspaceId: workspace.id });
+          sendState(200, { ...forApp(state), workspaceId: workspace.id });
           return;
         }
         // Which of these images this relay lacks, so a device uploads each one once.

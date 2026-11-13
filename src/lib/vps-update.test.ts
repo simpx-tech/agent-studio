@@ -360,6 +360,26 @@ describe('running replies', () => {
     writeFileSync(join(data, 'workspaces', 'notes', 'workspace.json'), workspace(['running']));
     expect(runningReplies(data)).toBe(2);
     expect(runningReplies(join(data, 'missing'))).toBe(0);
+    // However the file is laid out, and with text that looks like what is counted.
+    const state = {
+      instanceId: 'relay',
+      workspace: {
+        fleet: { note: '"status":"running"' },
+        conversations: [
+          { title: '{"status":"running"}', messages: [{ status: 'running' }, { status: 'done' }] },
+          { messages: [{ status: 'running', blocks: [{ status: 'running' }] }] },
+          { messages: [] },
+        ],
+      },
+      revision: 3,
+    };
+    writeFileSync(join(data, 'workspace.json'), JSON.stringify(state, null, 2));
+    expect(runningReplies(data)).toBe(3);
+    writeFileSync(join(data, 'workspace.json'), JSON.stringify({ revision: 1 }));
+    expect(runningReplies(data)).toBe(1);
+    // A file it cannot read stops the count, as it always did: no release activates on a guess.
+    writeFileSync(join(data, 'workspace.json'), '{"workspace":{"conversations":[{"messages":');
+    expect(() => runningReplies(data)).toThrow(SyntaxError);
   });
 });
 

@@ -226,6 +226,10 @@ async function remote(upload) {
     sh('install', ['-d', '-m', '0755', updater, join(updater, 'vps')]);
     copyFileSync(join(source, 'scripts', 'release.ts'), join(updater, 'release.ts'));
     copyFileSync(join(source, 'scripts', 'vps', 'update.ts'), join(updater, 'vps', 'update.ts'));
+    copyFileSync(
+      join(source, 'scripts', 'vps', 'state-file.ts'),
+      join(updater, 'vps', 'state-file.ts'),
+    );
     writeFileSync(join(updater, 'package.json'), '{ "type": "module" }\n');
     sh('chmod', ['-R', 'u=rwX,go=rX', updater]);
     if (spawnSync('id', ['agent-studio-build']).status !== 0)

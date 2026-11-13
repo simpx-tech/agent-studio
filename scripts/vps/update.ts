@@ -41,6 +41,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { compareVersions, validVersion, verifySignature } from '../release.ts';
+import { scanState } from './state-file.ts';
 
 export type Config = {
   /** GitHub REST API origin. */
@@ -244,20 +245,24 @@ export function runningReplies(data: string): number {
     for (const entry of readdirSync(workspaces, { withFileTypes: true }))
       if (entry.isDirectory() && /^[0-9a-f-]{36}$/.test(entry.name))
         directories.push(join(workspaces, entry.name));
+  type Chat = { messages?: { status?: unknown }[] };
   let count = 0;
+  const running = (conversation: unknown) => {
+    for (const message of (conversation as Chat | null)?.messages ?? [])
+      if (message.status === 'running') count++;
+  };
   for (const directory of directories) {
-    let text: string;
     try {
-      text = readFileSync(join(directory, 'workspace.json'), 'utf8');
+      // A conversation at a time: the file holds every one of them, and outgrows what one text
+      // can hold (state-file.ts). A file laid out otherwise keeps its conversations.
+      const rest = scanState(join(directory, 'workspace.json'), running) as {
+        workspace?: { conversations?: unknown[] };
+      } | null;
+      for (const conversation of rest?.workspace?.conversations ?? []) running(conversation);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
       throw error;
     }
-    const state = JSON.parse(text) as {
-      workspace?: { conversations?: { messages?: { status?: unknown }[] }[] };
-    };
-    for (const conversation of state.workspace?.conversations ?? [])
-      for (const message of conversation.messages ?? []) if (message.status === 'running') count++;
   }
   return count;
 }
