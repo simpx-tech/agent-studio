@@ -5,6 +5,23 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 1.3.2 - 2026-11-13
+
+### Added
+
+- Connections shows the overall usage of an agent's accounts on each computer, the same bars as
+  under Settings → New chats, and the Agent picker keeps its width while it reads its accounts
+
+### Fixed
+
+- Keep the window from going blank and loading again every few seconds once your chats add up to
+  several hundred megabytes, which left the app unusable: the first save after every start sent
+  the whole workspace to the app as one text, and the window ran out of memory writing it. The
+  window and the app now pass the workspace and the sync checkpoint a few megabytes at a time,
+  and a start saves only what it changed, so a 465 MB workspace takes about 690 MB and starts
+  with far shorter pauses
+- Keep an answer you began in a question form when you leave its chat and come back
+
 ## 1.3.1 - 2026-11-10
 
 ### Fixed
