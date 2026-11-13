@@ -5,6 +5,16 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 1.3.3 - 2026-11-13
+
+### Fixed
+
+- Keep syncing once a workspace passes about 500 MB: the relay saved everything it holds of a
+  workspace as one text with every change, and read it back as one when it started, and a text
+  has a largest size, which a workspace growing by tens of megabytes a day was days from. Past it
+  no change could have been saved and a restarted relay could not have read its data. The relay
+  now writes and reads its file a chat at a time, in the same format as before
+
 ## 1.3.2 - 2026-11-13
 
 ### Added
