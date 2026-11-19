@@ -11,14 +11,7 @@ delete env.CODEX_THREAD_ID;
 delete env.CLAUDECODE;
 const child = spawn(
   join(process.env.LOCALAPPDATA, 'Programs/OpenAI/Codex/bin/codex.exe'),
-  [
-    'app-server',
-    '--stdio',
-    '-c',
-    'features.shell_tool=true',
-    '-c',
-    'features.apply_patch_freeform=true',
-  ],
+  ['app-server', '--stdio', '-c', 'web_search="live"'],
   { cwd, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] },
 );
 const records = [];

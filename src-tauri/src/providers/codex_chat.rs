@@ -60,6 +60,55 @@ fn plan_response(
     ))
 }
 
+/// Agent Studio's tools a chat uses now and then, which Codex leaves out of its requests until the
+/// agent finds one with its tool search (`deferLoading`) (requested 2026-11-19): every request
+/// carried all of them, about 28,000 characters of a code-mode model's tool description, and every
+/// sub-agent inherited them. The chat's guidance still names each. Codex 0.170 accepts a deferred
+/// dynamic tool only in a namespace (`NAMESPACE`), whose calls name it.
+const HELD_BACK: &[&str] = &[
+    "compare_files",
+    "save_screen",
+    "list_screens",
+    "read_screen",
+    "list_mcp_tools",
+    "call_mcp_tool",
+];
+/// The workflow tools held back too, except for an orchestrator, whose work they are. A static
+/// workflow's assistant reads and saves its workflow before every change, so workflow_read and
+/// workflow_save stay loaded.
+const HELD_BACK_WORKFLOW: &[&str] = &[
+    "workflow_list",
+    "workflow_run",
+    "workflow_status",
+    "dynamic_start",
+];
+/// The namespace of the tools held back, as Claude Code names Agent Studio's MCP server.
+pub const NAMESPACE: &str = "agent_studio";
+const NAMESPACE_DESCRIPTION: &str = "Agent Studio's tools for comparing images and 3D models side by side, saving and opening screens, calling the MCP servers of this computer's other places, and building and running workflows.";
+
+/// Whether a dynamic tool call comes from a tool Agent Studio registered: one of its own, or one
+/// in `NAMESPACE`. A chat begun before 2026-11-19 keeps its tools outside the namespace.
+pub fn own_namespace(namespace: &Value) -> bool {
+    namespace.is_null() || namespace == NAMESPACE
+}
+
+/// What a Codex chat's guidance says of the tools it holds back. Code mode lets a script call a
+/// tool it found in `ALL_TOOLS` without reading its declaration, and a model that did so guessed a
+/// field name of save_screen and stopped at the refusal (2026-11-19).
+pub fn held_back_guidance(request: &RunRequest) -> String {
+    let names: Vec<String> = dynamic_tools(request)
+        .iter()
+        .filter(|tool| tool["type"] == "namespace")
+        .flat_map(|tool| tool["tools"].as_array().cloned().unwrap_or_default())
+        .filter_map(|tool| tool["name"].as_str().map(String::from))
+        .collect();
+    match names.split_last() {
+        None => String::new(),
+        Some((last, [])) => format!("{last} waits in your tool search, under {NAMESPACE}, until you look it up: read its description there before its first call, since its field names are exact."),
+        Some((last, rest)) => format!("{} and {last} wait in your tool search, under {NAMESPACE}, until you look them up: read the description of the one you need there before its first call, since its field names are exact.", rest.join(", ")),
+    }
+}
+
 /// The tools Agent Studio itself answers in a Codex chat.
 fn dynamic_tools(request: &RunRequest) -> Vec<Value> {
     let mut tools = vec![
@@ -71,10 +120,25 @@ fn dynamic_tools(request: &RunRequest) -> Vec<Value> {
         super::artifact_tool::codex_tool(),
     ];
     tools.extend(crate::screens::tools::codex_tools());
+    let orchestrator = request.mission.is_some();
     tools.extend(super::workflow_calls::codex_tools(
         request.workflow_tools(),
-        request.mission.is_some(),
+        orchestrator,
     ));
+    let (held, mut tools): (Vec<Value>, Vec<Value>) = tools.into_iter().partition(|tool| {
+        let name = tool["name"].as_str().unwrap_or_default();
+        HELD_BACK.contains(&name) || (!orchestrator && HELD_BACK_WORKFLOW.contains(&name))
+    });
+    let held: Vec<Value> = held
+        .into_iter()
+        .map(|mut tool| {
+            tool["deferLoading"] = json!(true);
+            tool
+        })
+        .collect();
+    if !held.is_empty() {
+        tools.push(json!({"type":"namespace","name":NAMESPACE,"description":NAMESPACE_DESCRIPTION,"tools":held}));
+    }
     tools
 }
 fn start_params(request: &RunRequest) -> Value {
@@ -230,6 +294,11 @@ async fn start_turn(
         if effective.agent.model.is_empty() {
             effective.agent.model = process.reported_model.clone().unwrap_or_default();
         }
+        // Every turn names its level: `collaborationMode` takes precedence over the thread's,
+        // so a turn sent without one would run at the model's own instead of the profile's.
+        if effective.agent.reasoning.is_empty() {
+            effective.agent.reasoning = process.default_effort.clone().unwrap_or_default();
+        }
         if effective.agent.plan_mode && effective.agent.model.is_empty() {
             return Err("Codex did not report the model needed to enter plan mode. Select a model and try again.".into());
         }
@@ -295,9 +364,13 @@ pub async fn run(
     reused: bool,
 ) -> Result<(String, String), String> {
     let mut effective = request.clone();
+    // Default reasoning is the level the profile configures, or none (the model's own) when it
+    // names none, on every reply alike (requested 2026-11-19): a new thread reports it, a resumed
+    // one reads it before resuming, and the process remembers it for the replies it serves next.
+    let leaves_reasoning = effective.agent.reasoning.is_empty();
     let resolve_defaults = !reused
         && effective.native_session.as_ref().is_some_and(|s| s.resumed)
-        && (effective.agent.model.is_empty() || effective.agent.reasoning.is_empty());
+        && (effective.agent.model.is_empty() || leaves_reasoning);
     let request = &mut effective;
     let mut pending: HashMap<u64, Kind> = HashMap::new();
     let mut steering = HashMap::new();
@@ -457,7 +530,8 @@ pub async fn run(
                         Kind::Login => prepare_thread(process, &mut pending, request, resolve_defaults, config_cwd, &cancel).await?,
                         Kind::Config => {
                             super::defaults::codex_config(request, &value["result"]["config"]);
-                            if request.agent.model.is_empty() || request.agent.reasoning.is_empty() {
+                            // A level the profile leaves out stays out, as on a new thread.
+                            if request.agent.model.is_empty() {
                                 send(process, &mut pending, Kind::Models, "model/list", json!({"limit":100,"includeHidden":true})).await?;
                             } else {
                                 send(process, &mut pending, Kind::Thread, thread_method(request), start_params(request)).await?;
@@ -470,10 +544,21 @@ pub async fn run(
                                 send(process, &mut pending, Kind::Models, "model/list", json!({"limit":100,"includeHidden":true,"cursor":cursor})).await?;
                             } else {
                                 process.healthy = false;
-                                return Err("Codex could not resolve current model defaults. Select an explicit model and reasoning level to continue.".into());
+                                return Err("Codex could not resolve its current default model. Select a model to continue.".into());
                             }
                         }
                         Kind::Thread => {
+                            if leaves_reasoning {
+                                // A new thread starts at the level the profile configures. A resumed
+                                // one reports its own last instead, which `defaults::codex_config`
+                                // already replaced with the profile's.
+                                if request.agent.reasoning.is_empty() && thread_method(request) == "thread/start" {
+                                    if let Some(effort) = value["result"]["reasoningEffort"].as_str() {
+                                        request.agent.reasoning = effort.into();
+                                    }
+                                }
+                                process.default_effort = Some(request.agent.reasoning.clone()).filter(|e| !e.is_empty());
+                            }
                             decoder.reported_model(value["result"]["model"].as_str());
                             process.reported_model = value["result"]["model"].as_str().map(String::from);
                             thread = value["result"]["thread"]["id"].as_str().ok_or("Codex did not return a thread identity")?.into();
@@ -872,14 +957,22 @@ mod tests {
         assert_eq!(turn["input"][0]["text"], request.prompt());
         assert!(start_params(&request).get("cwd").is_none()); // Inherit validated process cwd, including WSL.
     }
+    /// The tools a chat has, those in Agent Studio's namespace included.
+    fn tool_names(tools: &[Value]) -> Vec<String> {
+        let mut names: Vec<String> = tools
+            .iter()
+            .flat_map(|t| match t["tools"].as_array() {
+                Some(inner) => inner.clone(),
+                None => vec![t.clone()],
+            })
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect();
+        names.sort();
+        names
+    }
     #[test]
     fn saved_chats_get_workflow_tools_and_orchestrators_dynamic_tools() {
-        let names = |request: &RunRequest| {
-            dynamic_tools(request)
-                .iter()
-                .map(|t| t["name"].as_str().unwrap().to_string())
-                .collect::<Vec<_>>()
-        };
+        let names = |request: &RunRequest| tool_names(&dynamic_tools(request));
         let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","reasoning":"","instructions":""},"messages":[{"role":"user","text":"hi"}]})).unwrap();
         assert!(!names(&request).contains(&"workflow_save".to_string()));
         request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
@@ -893,6 +986,78 @@ mod tests {
         assert!(names(&request).contains(&"dynamic_spawn".to_string()));
         request.conversation_only = true;
         assert!(request.validate().is_err());
+    }
+    #[test]
+    fn tools_a_chat_uses_now_and_then_wait_in_a_namespace_until_the_agent_finds_them() {
+        let sorted = |list: &[&[&str]]| {
+            let mut names: Vec<String> = list.concat().iter().map(|n| n.to_string()).collect();
+            names.sort();
+            names
+        };
+        // Codex accepts a deferred dynamic tool only in a namespace, and only those are deferred.
+        let split = |tools: Vec<Value>| {
+            let (namespaces, loaded): (Vec<Value>, Vec<Value>) =
+                tools.into_iter().partition(|t| t["type"] == "namespace");
+            assert_eq!(namespaces.len(), 1);
+            assert_eq!(namespaces[0]["name"], NAMESPACE);
+            let held = namespaces[0]["tools"].as_array().unwrap().clone();
+            assert!(held
+                .iter()
+                .all(|t| t["type"] == "function" && t["deferLoading"] == true));
+            assert!(loaded.iter().all(|t| t["deferLoading"] == false));
+            (tool_names(&held), tool_names(&loaded))
+        };
+        let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"conversationId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","reasoning":"","instructions":""},"messages":[{"role":"user","text":"hi"}]})).unwrap();
+        let (held, loaded) = split(dynamic_tools(&request));
+        // Every tool held back is one the chat has, so a renamed tool fails here.
+        assert_eq!(held, sorted(&[HELD_BACK, HELD_BACK_WORKFLOW]));
+        // The ones replies use often stay loaded, and the workflow assistant's two.
+        assert_eq!(
+            loaded,
+            [
+                "send_files",
+                "show_artifact",
+                "studio_ask_user",
+                "studio_update_plan",
+                "visualize",
+                "workflow_read",
+                "workflow_save"
+            ]
+        );
+        // An orchestrator keeps the workflow tools loaded beside its own.
+        request.mission = Some(super::super::workflow_calls::Binding {
+            run_id: uuid::Uuid::new_v4().to_string(),
+            role: "orchestrator".into(),
+        });
+        let (held, loaded) = split(dynamic_tools(&request));
+        assert_eq!(held, sorted(&[HELD_BACK]));
+        assert!(HELD_BACK_WORKFLOW
+            .iter()
+            .chain(&["dynamic_spawn", "dynamic_complete"])
+            .all(|name| loaded.contains(&name.to_string())));
+        // Calls from the namespace are Agent Studio's own, as are a chat's older top-level tools.
+        assert!(own_namespace(&Value::Null) && own_namespace(&json!(NAMESPACE)));
+        assert!(!own_namespace(&json!("mcp")));
+    }
+    #[test]
+    fn the_guidance_names_the_tools_held_back_and_asks_to_read_them_first() {
+        let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"conversationId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","reasoning":"","instructions":""},"messages":[{"role":"user","text":"hi"}]})).unwrap();
+        let held = held_back_guidance(&request);
+        assert!(held.starts_with("compare_files, save_screen, "), "{held}");
+        assert!(held.contains(" and dynamic_start wait in your tool search, under agent_studio"));
+        assert!(held.contains("read the description of the one you need"));
+        assert!(request.guidance().contains(&held));
+        // An unsaved chat has no workflow tools to hold back.
+        request.conversation_id = None;
+        let held = held_back_guidance(&request);
+        assert!(
+            held.contains("and call_mcp_tool wait") && !held.contains("workflow"),
+            "{held}"
+        );
+        assert!(request.guidance().contains(&held));
+        // Claude's Agent Studio tools wait in its own tool search, which shows their schemas.
+        request.agent.provider = "claude".into();
+        assert!(!request.guidance().contains("under agent_studio"));
     }
     #[test]
     fn plan_tool_validates_parent_and_bounds_without_changing_work() {

@@ -17,7 +17,14 @@ while ($null -ne ($line = [Console]::ReadLine())) {
             [Console]::WriteLine('{"method":"hook/started","params":{"threadId":"fixture","run":{"id":"startup-hook","eventName":"sessionStart","status":"running","entries":[{"text":"PRIVATE_HOOK_OUTPUT"}]}}}')
             [Console]::WriteLine('{"method":"hook/completed","params":{"threadId":"foreign","run":{"id":"foreign-hook","eventName":"sessionStart","status":"completed"}}}')
             [Console]::WriteLine('{"method":"hook/completed","params":{"threadId":"fixture","run":{"id":"startup-hook","eventName":"sessionStart","status":"completed"}}}')
-            [Console]::WriteLine('{"id":' + $id + ',"result":{"thread":{"id":"fixture"},"model":"fixture-model"}}')
+            # The reasoning level the profile configures, which a new thread starts at.
+            $configured = Join-Path (Split-Path $PSCommandPath) 'configured-effort'
+            if (Test-Path -LiteralPath $configured) {
+                $effort = (Get-Content -LiteralPath $configured -Raw).Trim()
+                [Console]::WriteLine('{"id":' + $id + ',"result":{"thread":{"id":"fixture"},"model":"fixture-model","reasoningEffort":"' + $effort + '"}}')
+            } else {
+                [Console]::WriteLine('{"id":' + $id + ',"result":{"thread":{"id":"fixture"},"model":"fixture-model"}}')
+            }
         }
         'thread/compact/start' {
             if ($request.params.threadId -ne 'fixture' -or $request.params.input) { exit 9 }
@@ -29,6 +36,8 @@ while ($null -ne ($line = [Console]::ReadLine())) {
             [Console]::WriteLine('{"method":"turn/completed","params":{"threadId":"fixture","turn":{"id":"compact","status":"completed"}}}')
         }
         'turn/start' {
+            $efforts = Join-Path (Split-Path $PSCommandPath) 'efforts'
+            Add-Content -LiteralPath $efforts -Value ([string]$request.params.effort + '|' + [string]$request.params.collaborationMode.settings.reasoning_effort)
             $env:STUDIO_TEST_TURNS = [string]([int]$env:STUDIO_TEST_TURNS + 1)
             [Console]::WriteLine('{"id":' + $id + ',"result":{"turn":{"id":"turn' + $env:STUDIO_TEST_TURNS + '"}}}')
             $limit = Join-Path (Split-Path $PSCommandPath) 'limit'
@@ -449,6 +458,65 @@ async fn a_parked_process_serves_the_next_reply_without_restarting_the_thread() 
         assert!(!metadata.contains(excluded));
     }
     process.kill().await;
+}
+
+#[tokio::test]
+async fn default_reasoning_runs_every_reply_at_the_level_the_profile_configures() {
+    let folder = tempfile::tempdir().unwrap();
+    let gate = folder.path().join("finish");
+    std::fs::write(&gate, "open").unwrap();
+    std::fs::write(folder.path().join("configured-effort"), "low").unwrap();
+    let mut process = fixture(folder.path(), &gate, false);
+    let channel = EventSink::new(|_| Ok(()));
+    let reply = |text: &str, reasoning: &str| -> RunRequest {
+        serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture","reasoning":reasoning,"instructions":""},"messages":[{"role":"user","text":text}]})).unwrap()
+    };
+    // Default on a new thread: the level Codex starts it at, the profile's.
+    let first = reply("First", "");
+    let mut questions = Questions::default()
+        .open(&first.run_id, None, channel.clone())
+        .unwrap();
+    let result = run(
+        &mut process,
+        &first,
+        Some(&channel),
+        CancellationToken::new(),
+        &mut questions,
+        None,
+        false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.0, "complete");
+    assert_eq!(process.default_effort.as_deref(), Some("low"));
+    // The same process serves the next replies at the same level, unless the chat picks one.
+    for (text, reasoning) in [("Second", ""), ("Third", "high")] {
+        process.turns += 1;
+        process.park();
+        process.claim();
+        let next = reply(text, reasoning);
+        let mut questions = Questions::default()
+            .open(&next.run_id, None, channel.clone())
+            .unwrap();
+        let result = run(
+            &mut process,
+            &next,
+            Some(&channel),
+            CancellationToken::new(),
+            &mut questions,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.0, "complete");
+    }
+    process.kill().await;
+    let efforts = std::fs::read_to_string(folder.path().join("efforts")).unwrap();
+    assert_eq!(
+        efforts.lines().collect::<Vec<_>>(),
+        ["low|low", "low|low", "high|high"]
+    );
 }
 
 #[tokio::test]

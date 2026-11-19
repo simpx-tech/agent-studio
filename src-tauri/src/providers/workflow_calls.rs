@@ -1,7 +1,8 @@
 //! Workflow tools (docs/WORKFLOWS.md): SDK tools of Claude's agent_studio server and Codex
 //! dynamic tools that build, run and read workflows, and for a dynamic workflow's orchestrator,
 //! drive it. The host only checks that a call is the conversation's own (Claude's registered
-//! parent tool use, Codex's parent thread without a namespace) and hands it to this computer's
+//! parent tool use, Codex's parent thread, in no namespace or Agent Studio's own
+//! `codex_chat::NAMESPACE`) and hands it to this computer's
 //! window, whose workflow engine answers it through `answer_workflow_call`, as an answered
 //! question reaches its run.
 use serde::{Deserialize, Serialize};
@@ -486,7 +487,10 @@ impl Session {
         let p = &value["params"];
         let name = p["tool"].as_str().filter(|name| known(name))?;
         let wire = Wire::Codex(value["id"].clone());
-        if root.is_empty() || p["threadId"] != root || !p["namespace"].is_null() {
+        if root.is_empty()
+            || p["threadId"] != root
+            || !super::codex_chat::own_namespace(&p["namespace"])
+        {
             return Some(Some(
                 wire.respond("Workflows are used by the parent conversation.", true),
             ));
@@ -650,6 +654,19 @@ mod tests {
             false
         );
         assert!(calls.lock().unwrap().is_empty());
+        // A call from Agent Studio's namespace, where an ordinary chat finds the workflow tools,
+        // reaches the window; another namespace's does not.
+        let namespaced = |namespace: &str| json!({"id":6,"method":"item/tool/call","params":{"threadId":"root","namespace":namespace,"tool":"workflow_list","arguments":{}}});
+        let (mut chat, calls_3) = open_session(&Hub::default(), false);
+        assert!(chat
+            .codex(&namespaced(super::super::codex_chat::NAMESPACE), "root")
+            .unwrap()
+            .is_none());
+        assert_eq!(calls_3.lock().unwrap()[0].tool, "workflow_list");
+        assert_eq!(
+            chat.codex(&namespaced("mcp"), "root").unwrap().unwrap()["result"]["success"],
+            false
+        );
     }
 
     #[tokio::test]

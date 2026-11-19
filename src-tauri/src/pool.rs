@@ -90,6 +90,9 @@ pub struct Process {
     /// Codex: the loaded thread, its reported model, and the next JSON-RPC request id.
     pub thread: String,
     pub reported_model: Option<String>,
+    /// Codex: the reasoning level Default means in this process, the profile's, or none when it
+    /// names none, which every reply it serves at Default runs at.
+    pub default_effort: Option<String>,
     pub next_id: u64,
     pub turns: u64,
     /// Claude's latest running cost total in this process. It continues while the process
@@ -171,6 +174,7 @@ impl Process {
             limited: false,
             thread: String::new(),
             reported_model: None,
+            default_effort: None,
             next_id: 1,
             turns: 0,
             cost_total: 0.0,

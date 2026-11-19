@@ -119,26 +119,15 @@ pub fn codex_config(request: &mut RunRequest, config: &Value) {
         }
     }
 }
+/// The default model, for a resumed thread whose profile names none. A reasoning level the
+/// profile leaves out stays out (the model's own), as on a new thread.
 pub fn codex_models(request: &mut RunRequest, models: &[Value]) -> bool {
-    let selected = models.iter().find(|m| {
-        if request.agent.model.is_empty() {
-            m["isDefault"] == true
-        } else {
-            m["model"] == request.agent.model
-        }
-    });
-    if let Some(model) = selected {
-        if request.agent.model.is_empty() {
+    if request.agent.model.is_empty() {
+        if let Some(model) = models.iter().find(|m| m["isDefault"] == true) {
             request.agent.model = model["model"].as_str().unwrap_or_default().into();
         }
-        if request.agent.reasoning.is_empty() {
-            request.agent.reasoning = model["defaultReasoningEffort"]
-                .as_str()
-                .unwrap_or_default()
-                .into();
-        }
     }
-    !request.agent.model.is_empty() && !request.agent.reasoning.is_empty()
+    !request.agent.model.is_empty()
 }
 
 #[cfg(test)]
@@ -218,12 +207,16 @@ mod tests {
         );
         assert_eq!(request.agent.model, "configured");
         assert_eq!(request.agent.reasoning, "high");
+        // A level the profile leaves out stays out, the model's own, as on a new thread.
         request.agent.reasoning.clear();
+        codex_config(&mut request, &json!({"model":"other"}));
         assert!(codex_models(
             &mut request,
             &[json!({"model":"configured","defaultReasoningEffort":"medium"})]
         ));
-        assert_eq!(request.agent.reasoning, "medium");
+        assert_eq!(request.agent.reasoning, "");
+        // Explicit picks win over the profile's.
+        request.agent.reasoning = "medium".into();
         codex_config(
             &mut request,
             &json!({"model":"other","model_reasoning_effort":"low"}),
@@ -238,5 +231,6 @@ mod tests {
             &[json!({"model":"runtime-default","isDefault":true,"defaultReasoningEffort":"low"})]
         ));
         assert_eq!(request.agent.model, "runtime-default");
+        assert_eq!(request.agent.reasoning, "");
     }
 }

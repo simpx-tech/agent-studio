@@ -1,7 +1,8 @@
 //! The tools a chat saves, lists and reads this computer's screens with, and reaches the MCP
 //! servers of this computer's places with: SDK tools of Claude's agent_studio server and Codex
 //! dynamic tools. Only the conversation's own call reaches them: Claude's registered parent tool
-//! use, Codex's parent thread without a namespace. A screen is made where the conversation that
+//! use, Codex's parent thread, in no namespace or Agent Studio's own (`codex_chat::NAMESPACE`,
+//! where these tools wait until the agent finds them). A screen is made where the conversation that
 //! created it runs, and calls MCP tools first as that conversation's account, which the host
 //! decides, never the call.
 use super::places::{self, Candidate};
@@ -630,7 +631,10 @@ impl Agent {
             return None;
         }
         let name = p["tool"].as_str().filter(|name| NAMES.contains(name))?;
-        let result = if !root.is_empty() && p["threadId"] == root && p["namespace"].is_null() {
+        let result = if !root.is_empty()
+            && p["threadId"] == root
+            && crate::providers::codex_chat::own_namespace(&p["namespace"])
+        {
             self.answer(name, &p["arguments"], context).await
         } else {
             Err("Screens are saved and read by the parent conversation.".into())
@@ -778,15 +782,18 @@ mod tests {
                 .unwrap()
                 .contains("parent conversation"));
         }
-        let (response, _) = agent
-            .codex(&call("root", Value::Null), "root", None)
-            .await
-            .unwrap();
-        assert_eq!(response["id"], 9);
-        assert!(response["result"]["contentItems"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("saved Claude and Codex conversations"));
+        // A chat begun before 2026-11-19 has the tools outside Agent Studio's namespace.
+        for namespace in [Value::Null, json!(crate::providers::codex_chat::NAMESPACE)] {
+            let (response, _) = agent
+                .codex(&call("root", namespace), "root", None)
+                .await
+                .unwrap();
+            assert_eq!(response["id"], 9);
+            assert!(response["result"]["contentItems"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("saved Claude and Codex conversations"));
+        }
     }
 
     #[test]

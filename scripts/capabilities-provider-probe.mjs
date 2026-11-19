@@ -49,8 +49,6 @@ for (const provider of ['claude', 'codex']) {
           '--ephemeral',
           '--dangerously-bypass-approvals-and-sandbox',
           '-c',
-          'features.multi_agent=true',
-          '-c',
           'web_search="live"',
           '-m',
           'gpt-5.6-sol',

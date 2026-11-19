@@ -43,7 +43,7 @@ function cliProcesses() {
       (p) =>
         apps.has(p.ParentProcessId) &&
         /^(claude|codex)\.exe$/i.test(p.Name ?? '') &&
-        /stream-json|features.shell_tool=true/.test(p.CommandLine ?? '') &&
+        /stream-json|web_search=/.test(p.CommandLine ?? '') &&
         !/--safe-mode|\/usage/.test(p.CommandLine ?? ''),
     )
     .map((p) => ({ pid: p.ProcessId, name: p.Name.toLowerCase() }));

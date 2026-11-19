@@ -20,6 +20,10 @@ const FILES_UNDONE_NOTE: &str = "The user restored files to how they were at an 
 const REWOUND_NOTE: &str = "The user rewound this conversation to an earlier point. Files on disk were not reverted, so edits from the discarded turns may still be present; check git status or the diff before assuming file contents.";
 const FORKED_NOTE: &str = "This session is a fork of another conversation, resumed at this point of its transcript. The working tree may not match what the transcript implies (it can hold changes made after this point, or lack uncommitted ones); check git status or the diff before assuming file contents.";
 const FORK_FOLDER_NOTE: &str = "This fork works in a new folder of its own. Paths in earlier messages and tool results may name the folder of the chat it was forked from, whose files are not here.";
+/// What a session begun before 2026-11-19 reads once: Agent Studio's guidance asked it to
+/// delegate independent work to sub-agents until then (requested 2026-11-19: prefer one agent to
+/// sub-agents, and give neither agent an instruction to use them).
+const SUB_AGENTS_NOTE: &str = "Agent Studio no longer asks you to delegate work to sub-agents. If earlier guidance in this conversation asked you to delegate independent work to sub-agents as needed, that request no longer applies.";
 /// What the reply says when a rewind could not keep its session's context.
 pub(crate) const REWIND_REPLAYED: &str = "Starting a new native session from the retained messages after a rewind. Earlier tool details and compacted context are not carried over.";
 
@@ -83,6 +87,10 @@ struct Record {
     /// context. A binding written before 2026-11-03 has not, and its transcript says otherwise.
     #[serde(default)]
     pages_rule: bool,
+    /// Whether its session has the guidance that asks for no sub-agents, in its first message or
+    /// the reply's context (`SUB_AGENTS_NOTE`). A binding written before 2026-11-19 has not.
+    #[serde(default)]
+    sub_agents_rule: bool,
     /// The sessions this chat's history ran in before this one, nearest first. A fork of a
     /// compacted Claude session leaves out what came before the compaction, which stays there.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -103,6 +111,10 @@ impl Record {
     /// Whether the session may still hold the earlier rule for pages.
     fn before_pages_rule(&self) -> bool {
         !self.received || !self.pages_rule
+    }
+    /// Whether the session may still hold the earlier request to delegate work to sub-agents.
+    fn before_sub_agents_rule(&self) -> bool {
+        !self.received || !self.sub_agents_rule
     }
     /// This session and the ones before it, nearest first.
     fn lineage(&self) -> Vec<String> {
@@ -599,6 +611,7 @@ impl Session {
                 received: true,
                 shared_context: String::new(),
                 pages_rule: true,
+                sub_agents_rule: true,
                 ancestors: Vec::new(),
                 turns: Vec::new(),
                 rewound_at: None,
@@ -625,11 +638,16 @@ impl Session {
             history_rewritten,
             cut,
             native_fork: None,
-            notes: if files_undone {
-                vec![FILES_UNDONE_NOTE]
-            } else {
-                Vec::new()
-            },
+            notes: [
+                files_undone.then_some(FILES_UNDONE_NOTE),
+                previous
+                    .as_ref()
+                    .is_some_and(Record::before_sub_agents_rule)
+                    .then_some(SUB_AGENTS_NOTE),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
             shared_context_changed,
             transfer_from,
             transfer_file: None,
@@ -659,6 +677,7 @@ impl Session {
                 received: false,
                 shared_context,
                 pages_rule: true,
+                sub_agents_rule: true,
                 ancestors,
                 turns,
                 rewound_at: None,
@@ -706,6 +725,7 @@ impl Session {
             self.resumed = true;
             self.instructions_changed = true;
             self.pages_rule_changed = previous.before_pages_rule();
+            self.withdraw_sub_agents(previous.before_sub_agents_rule());
             self.unconfirmed_message = (!previous.received).then_some(previous.history.len() - 1);
             return Ok(());
         }
@@ -732,6 +752,7 @@ impl Session {
         // Refresh conversation instructions while leaving provider-native history intact.
         self.instructions_changed = true;
         self.pages_rule_changed = previous.before_pages_rule();
+        self.withdraw_sub_agents(previous.before_sub_agents_rule());
         self.unconfirmed_message = (!previous.received).then_some(previous.history.len() - 1);
         Ok(())
     }
@@ -739,6 +760,14 @@ impl Session {
     /// Whether this reply's session starts as a fork made for a rewind or a forked chat.
     fn forked(&self) -> bool {
         self.native_fork.is_some() || (self.resumed && self.transfer_path.is_some())
+    }
+
+    /// Tells a session that may hold the earlier request to delegate work to sub-agents, once,
+    /// that it no longer applies.
+    fn withdraw_sub_agents(&mut self, earlier: bool) {
+        if earlier && !self.notes.contains(&SUB_AGENTS_NOTE) {
+            self.notes.push(SUB_AGENTS_NOTE);
+        }
     }
 
     /// Continues a rewound chat or a new fork from the end of the reply it follows, in a fork of
@@ -847,6 +876,7 @@ impl Session {
         if cut.fork && request.location.is_none() {
             self.notes.push(FORK_FOLDER_NOTE);
         }
+        self.withdraw_sub_agents(!record.sub_agents_rule);
         self.record.ancestors = record.lineage();
         self.record.turns = record.turns.clone();
         true
@@ -3252,6 +3282,63 @@ mod tests {
         drop(s);
         r.native_session = Session::prepare(root.path(), &r).unwrap();
         assert!(r.native_session.as_ref().unwrap().pages_rule_changed);
+    }
+
+    #[test]
+    fn a_session_once_asked_to_delegate_to_sub_agents_hears_once_that_it_no_longer_applies() {
+        let root = tempfile::tempdir().unwrap();
+        let mut r = request();
+        r.native_session = Session::prepare(root.path(), &r).unwrap();
+        // A new session's guidance asks for no sub-agents, and it is never told of the change.
+        let first = r.stdin_payload();
+        assert!(first.contains("load applicable skills, and search the web"));
+        assert!(!first.contains("delegate") && !first.contains(SUB_AGENTS_NOTE));
+        let s = r.native_session.take().unwrap();
+        assert!(s.notes.is_empty());
+        s.bind(s.id(), true).unwrap();
+        let binding = s.path.clone();
+        drop(s);
+        r.messages
+            .extend([message("assistant", "Answer"), message("user", "Next")]);
+        r.native_session = Session::prepare(root.path(), &r).unwrap();
+        assert!(r.native_session.as_ref().unwrap().notes.is_empty());
+        r.native_session = None;
+        // A binding as earlier releases wrote it says nothing of the rule.
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&binding).unwrap()).unwrap();
+        assert_eq!(record["sub_agents_rule"], true);
+        record.as_object_mut().unwrap().remove("sub_agents_rule");
+        std::fs::write(&binding, serde_json::to_vec(&record).unwrap()).unwrap();
+        r.native_session = Session::prepare(root.path(), &r).unwrap();
+        assert_eq!(r.native_session.as_ref().unwrap().notes, [SUB_AGENTS_NOTE]);
+        let lines: Vec<serde_json::Value> = r
+            .stdin_payload()
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["shouldQuery"], false);
+        assert_eq!(lines[0]["message"]["content"][0]["text"], SUB_AGENTS_NOTE);
+        // Codex hears it too, ahead of the message.
+        r.agent.provider = "codex".into();
+        assert_eq!(r.native_context().as_deref(), Some(SUB_AGENTS_NOTE));
+        r.agent.provider = "claude".into();
+        // Told once, it is told no more.
+        let s = r.native_session.take().unwrap();
+        s.bind(s.id(), true).unwrap();
+        assert!(saved(&s).sub_agents_rule);
+        drop(s);
+        r.messages
+            .extend([message("assistant", "Answer"), message("user", "Again")]);
+        r.native_session = Session::prepare(root.path(), &r).unwrap();
+        assert!(r.native_session.as_ref().unwrap().notes.is_empty());
+        assert_eq!(r.stdin_payload().lines().count(), 1);
+        // A message that never arrived may have carried it, so the next reply carries it again.
+        let s = r.native_session.take().unwrap();
+        s.bind(s.id(), false).unwrap();
+        drop(s);
+        r.native_session = Session::prepare(root.path(), &r).unwrap();
+        assert_eq!(r.native_session.as_ref().unwrap().notes, [SUB_AGENTS_NOTE]);
     }
 
     #[test]

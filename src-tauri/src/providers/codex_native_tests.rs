@@ -66,7 +66,9 @@ async fn installed_codex_saves_a_screen_whose_action_runs() {
     std::fs::create_dir_all(&runtime).unwrap();
     let data = root.path().join("data");
     std::fs::create_dir_all(&data).unwrap();
-    let text = "This is an Agent Studio integration test. Call the save_screen tool once to save a screen titled Probe screen. Its html is a paragraph with id status that shows the passing count from await studio.json('count', { limit: 3 }). Give it exactly one action: name count, shell powershell, an integer parameter limit with minimum 1 and maximum 5, and a script that prints, with ConvertTo-Json -Compress, an object whose passing property is [int]$env:PARAM_LIMIT. Run no other tool and no command. Then reply with one short sentence.";
+    // Since 2026-11-19 save_screen waits in the tool search until the agent looks it up, and a
+    // look-up or a second call after a refusal is ordinary use.
+    let text = "This is an Agent Studio integration test. Use the save_screen tool to save one screen titled Probe screen. Its html is a paragraph with id status that shows the passing count from await studio.json('count', { limit: 3 }). Give it exactly one action: name count, shell powershell, an integer parameter limit with minimum 1 and maximum 5, and a script that prints, with ConvertTo-Json -Compress, an object whose passing property is [int]$env:PARAM_LIMIT. Run no other tool and no command. Then reply with one short sentence.";
     let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","reasoning":"low","instructions":""},"messages":[{"role":"user","text":text}]})).unwrap();
     request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
     request.native_session =
@@ -149,6 +151,148 @@ async fn installed_codex_saves_a_screen_whose_action_runs() {
     eprintln!(
         "Saved {} with {}; answer: {answer}",
         card.title, detail["actions"][0]["script"]
+    );
+}
+
+/// What the installed CLI records of a chat at Default reasoning (requested 2026-11-19): every
+/// reply, on a new process and on the one it keeps, runs at the level the profile configures, the
+/// tools a chat uses now and then stay out of its requests, and nothing asks for sub-agents.
+#[tokio::test]
+#[ignore = "Opt-in installed Codex CLI test; uses subscription capacity for two short replies."]
+async fn installed_codex_runs_default_reasoning_at_the_profiles_level_with_tools_held_back() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let text =
+        "This is an Agent Studio integration test. Run no tool. Reply with just the word OK.";
+    let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","reasoning":"","instructions":""},"messages":[{"role":"user","text":text}]})).unwrap();
+    request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
+    request.native_session =
+        crate::providers::sessions::Session::prepare(root.path(), &request).unwrap();
+    let exe = crate::providers::resolve("codex").await.unwrap();
+    let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+        .await
+        .unwrap();
+    let mut process = Process::new(
+        exe,
+        command.spawn().unwrap(),
+        "real-default-effort-test".into(),
+        String::new(),
+    )
+    .unwrap();
+    let channel = EventSink::new(|_| Ok(()));
+    for reused in [false, true] {
+        if reused {
+            // The next reply, as the parked process serves it.
+            process.turns += 1;
+            process.park();
+            process.claim();
+            request.native_session = None;
+            request.native_session =
+                crate::providers::sessions::Session::prepare(root.path(), &request).unwrap();
+            assert!(request.native_session.as_ref().unwrap().resumed);
+        }
+        let mut questions = Questions::default()
+            .open(&request.run_id, None, channel.clone())
+            .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(300),
+            run(
+                &mut process,
+                &request,
+                Some(&channel),
+                CancellationToken::new(),
+                &mut questions,
+                None,
+                reused,
+            ),
+        )
+        .await
+        .expect("Installed CLI test timed out");
+        let (status, answer) = result.expect("Installed CLI failed");
+        assert_eq!(status, "complete", "{answer}");
+        request.run_id = uuid::Uuid::new_v4().to_string();
+        request.messages.extend([
+            serde_json::from_value(json!({"role":"assistant","text":answer})).unwrap(),
+            serde_json::from_value(json!({"role":"user","text":text})).unwrap(),
+        ]);
+    }
+    let thread = process.thread.clone();
+    let configured = process.default_effort.clone();
+    process.kill().await;
+    // Codex's own record of the thread.
+    fn find(dir: &std::path::Path, thread: &str) -> Option<std::path::PathBuf> {
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(found) = find(&path, thread) {
+                    return Some(found);
+                }
+            } else if path.to_string_lossy().ends_with(&format!("{thread}.jsonl")) {
+                return Some(path);
+            }
+        }
+        None
+    }
+    let home = crate::context::native_profile_root("codex").await.unwrap();
+    let rollout = find(&home.join("sessions"), &thread).expect("Codex recorded no thread");
+    let lines: Vec<Value> = std::fs::read_to_string(&rollout)
+        .unwrap()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let efforts: Vec<Value> = lines
+        .iter()
+        .filter(|line| line["type"] == "turn_context")
+        .map(|line| line["payload"]["effort"].clone())
+        .collect();
+    assert_eq!(efforts.len(), 2, "{efforts:?}");
+    assert!(
+        efforts
+            .iter()
+            .all(|effort| effort.as_str() == configured.as_deref()),
+        "both replies at the profile's level {configured:?}: {efforts:?}"
+    );
+    let tools = lines
+        .iter()
+        .find(|line| line["type"] == "session_meta")
+        .map(|line| line["payload"]["dynamic_tools"].clone())
+        .unwrap();
+    // However Codex records the namespace, save_screen is in it, deferred.
+    fn named<'a>(value: &'a Value, name: &str) -> Option<&'a Value> {
+        match value {
+            Value::Object(map) if map.get("name").and_then(Value::as_str) == Some(name) => {
+                Some(value)
+            }
+            Value::Object(map) => map.values().find_map(|v| named(v, name)),
+            Value::Array(items) => items.iter().find_map(|v| named(v, name)),
+            _ => None,
+        }
+    }
+    let held = named(&tools, "save_screen").expect("save_screen is registered");
+    assert!(
+        held["defer_loading"] == true || held["deferLoading"] == true,
+        "{held}"
+    );
+    let deferred = &held["name"];
+    let offered = lines
+        .iter()
+        .find(|line| line["payload"]["type"] == "additional_tools")
+        .map(|line| line["payload"].to_string())
+        .unwrap_or_default();
+    assert!(offered.contains("send_files"), "the often-used tools stay");
+    assert!(!offered.contains("Save a screen"), "save_screen waits");
+    let guidance = lines
+        .iter()
+        .filter(|line| line["payload"]["role"] == "user")
+        .map(|line| line["payload"].to_string())
+        .find(|text| text.contains("You are having a conversation in Agent Studio"))
+        .unwrap();
+    assert!(!guidance.contains("sub-agents") && !guidance.contains("delegate"));
+    eprintln!(
+        "Default ran at {configured:?} on both replies ({efforts:?}); held back {deferred} among others; offered {} characters of additional tools; {}",
+        offered.len(),
+        rollout.display()
     );
 }
 

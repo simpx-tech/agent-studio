@@ -502,7 +502,10 @@ impl FileSender {
         }
         let tool = Tool::named(p["tool"].as_str()?)?;
         let call = format!("{}-{}", tool.name(), value["id"]);
-        let result = if !root.is_empty() && p["threadId"] == root && p["namespace"].is_null() {
+        let result = if !root.is_empty()
+            && p["threadId"] == root
+            && super::codex_chat::own_namespace(&p["namespace"])
+        {
             self.submit(&p["arguments"], tool, &call, staging).await
         } else {
             Err("Files must be sent by the parent conversation.".into())
@@ -947,12 +950,20 @@ mod tests {
                 .unwrap()
                 .contains("parent conversation"));
         }
-        let (response, event) = sender
-            .codex(&call("root", Value::Null), "root", &staging)
-            .await
-            .unwrap();
-        assert_eq!(response["result"]["success"], false);
-        assert!(event.is_none());
+        // The parent's call is checked (its file is missing here), from Agent Studio's namespace
+        // too, where compare_files waits until the agent finds it.
+        for namespace in [Value::Null, json!(super::super::codex_chat::NAMESPACE)] {
+            let (response, event) = sender
+                .codex(&call("root", namespace), "root", &staging)
+                .await
+                .unwrap();
+            assert_eq!(response["result"]["success"], false);
+            assert!(event.is_none());
+            assert!(!response["result"]["contentItems"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("parent conversation"));
+        }
     }
 
     #[tokio::test]

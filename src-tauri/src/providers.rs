@@ -973,7 +973,18 @@ impl RunRequest {
         let [tools, visuals, files, questions, screens, workflows] =
             self.capability_sections(studio_tools);
         if studio_tools {
-            format!("{tools} {visuals} {files} {questions} {screens} {workflows}")
+            let text = format!("{tools} {visuals} {files} {questions} {screens} {workflows}");
+            // Codex holds some of these tools back until the agent looks them up.
+            let held = if self.uses_codex_server() {
+                codex_chat::held_back_guidance(self)
+            } else {
+                String::new()
+            };
+            if held.is_empty() {
+                text
+            } else {
+                format!("{text} {held}")
+            }
         } else {
             tools
         }
@@ -992,7 +1003,9 @@ impl RunRequest {
             } else {
                 crate::artifacts::Delivery::Fence
             };
-            format!("Tools are enabled in this conversation. Use available tools to inspect files, edit files, run commands, load applicable skills, search the web, and delegate independent work to sub-agents as needed to complete the user's requested work in the selected working directory. Use available task/plan tools to report progress on multi-step work. Follow applicable project instructions. Earlier messages may describe tools as disabled; that restriction no longer applies. {} {}", crate::console::GUIDANCE, crate::artifacts::guidance(delivery))
+            // Nothing asks for sub-agents (requested 2026-11-19: prefer one agent to sub-agents);
+            // whether to start one is the agent's own call, or the user's.
+            format!("Tools are enabled in this conversation. Use available tools to inspect files, edit files, run commands, load applicable skills, and search the web to complete the user's requested work in the selected working directory. Use available task/plan tools to report progress on multi-step work. Follow applicable project instructions. Earlier messages may describe tools as disabled; that restriction no longer applies. {} {}", crate::console::GUIDANCE, crate::artifacts::guidance(delivery))
         } else {
             "Do not use tools, inspect files, execute commands, or delegate.".to_string()
         };
@@ -1303,20 +1316,10 @@ pub async fn chat_command(
     match request.agent.provider.as_str() {
         "codex" => {
             if request.tools_enabled() {
-                c.args([
-                    "app-server",
-                    "--stdio",
-                    "-c",
-                    "features.shell_tool=true",
-                    "-c",
-                    "features.mentions_v2=true",
-                    "-c",
-                    "features.apply_patch_freeform=true",
-                    "-c",
-                    "web_search=\"live\"",
-                    "-c",
-                    "features.multi_agent=true",
-                ]);
+                // The CLI's own feature defaults otherwise (2026-11-19): Codex 0.170 has the
+                // shell tool and mentions on by default, removed apply_patch_freeform and
+                // deprecated multi_agent for the sub-agents it starts by itself.
+                c.args(["app-server", "--stdio", "-c", "web_search=\"live\""]);
                 for entry in &request.shared_context.codex_overrides {
                     c.args(["-c", entry]);
                 }
@@ -2192,10 +2195,9 @@ mod tests {
                 "codex" => {
                     assert!(args.iter().any(|a| a == "app-server"));
                     assert!(args.iter().any(|a| a == "--stdio"));
-                    assert!(args_contain("-c", "features.shell_tool=true"));
-                    assert!(args_contain("-c", "features.apply_patch_freeform=true"));
-                    assert!(args_contain("-c", "features.multi_agent=true"));
                     assert!(args_contain("-c", "web_search=\"live\""));
+                    // Codex's own feature defaults otherwise.
+                    assert!(!args.iter().any(|a| a.starts_with("features.")));
                     assert!(!args.iter().any(|a| matches!(
                         a.as_ref(),
                         "--ignore-user-config" | "--ignore-rules" | "--sandbox"
