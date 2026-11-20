@@ -1,6 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -9,18 +17,20 @@ import {
   authenticate,
   check,
   appImageName,
+  busPath,
   emptyState,
   healthy,
   hostUnit,
   installerName,
   parseRelease,
+  parseService,
   relayKeyIn,
   publicKeyId,
   readConfig,
+  replaceData,
   retry,
   runningReplies,
-  startLimit,
-  stateBytes,
+  trialArguments,
   type State,
   type System,
   type Unit,
@@ -94,15 +104,20 @@ type Behaviour = {
   crash?: boolean;
   /** When it begins to answer; never when infinite. */
   listens?: number;
-  /** It uses no CPU time while it runs. */
-  idle?: boolean;
+  /** It does nothing at all, or nothing from then on: no CPU time, nothing read or written. */
+  idle?: boolean | number;
   /** Each answer takes this long. */
   stall?: number;
   /** From then on it answers nothing. */
   mute?: number;
+  /** From then on it answers again. */
+  speaks?: number;
   /** It ends then. */
   dies?: number;
 };
+
+/** An updater that was killed: nothing it would still do happens, and nothing more is saved. */
+class Killed extends Error {}
 
 function fake() {
   let clock = Date.parse('2026-09-23T12:00:00Z');
@@ -124,6 +139,9 @@ function fake() {
   };
   const calls: string[] = [];
   const logs: string[] = [];
+  // Backups by their path, and the folders that keep replaced data by their name.
+  const backups = new Map<string, string[]>();
+  const kept = new Map<string, string[]>();
   const env = {
     state: { ...emptyState(), trustedKey: trusted.key } as State,
     latest: undefined as unknown,
@@ -139,9 +157,17 @@ function fake() {
     healthy: (_release?: string) => true,
     /** What a release's relay does: in its trial, or on its nth start as the service. */
     relay: (_release: string | undefined, _trial: boolean, _start: number): Behaviour => ({}),
-    stateBytes: 0,
+    /** The private data: the releases whose relays wrote to it, each time one started. */
+    data: [] as string[],
+    kept,
+    /** systemd does not answer the next looks at the relay's service. */
+    unseen: 0,
     lastWords: undefined as string | undefined,
     trialError: undefined as Error | undefined,
+    /** The trial's unit does not stop. */
+    trialStuck: false,
+    preflightError: undefined as Error | undefined,
+    backupError: undefined as Error | undefined,
     buildError: undefined as Error | undefined,
     publishError: undefined as Error | undefined,
     releaseKeys: {} as Record<string, string>,
@@ -195,29 +221,32 @@ function fake() {
       env.current = undefined;
     },
     serviceActive: () => env.active,
-    unit: (trial): Unit => {
+    unit: (trial): Unit | undefined => {
+      if (env.unseen > 0) {
+        env.unseen--;
+        return undefined;
+      }
       if (trial ? !tried.release : !env.active) return { state: 'inactive', restarts: 0, pid: 0 };
       // The trial's unit has nothing start it again.
       if (gone(trial))
         return trial
           ? { state: 'failed', restarts: 0, pid: 0, result: 'exit-code 1' }
           : { state: 'activating', restarts: 1, pid: 0, result: 'exit-code 1' };
-      return {
-        state: 'active',
-        restarts: 0,
-        pid: 100,
-        cpu: behaviour(trial).idle ? 0 : age(trial),
-      };
+      const idle = behaviour(trial).idle;
+      const worked = idle === true ? 0 : Math.min(age(trial), idle || Infinity);
+      return { state: 'active', restarts: 0, pid: 100, cpu: worked, io: worked * 1000 };
     },
-    stateBytes: () => env.stateBytes,
     lastWords: () => env.lastWords,
     startTrial: (commit) => {
       calls.push(`trial ${commit}`);
+      if (env.trialStuck) throw new Error('agent-studio-trial did not stop');
       if (env.trialError) throw env.trialError;
       tried.release = commit;
       tried.since = clock;
     },
     endTrial: () => {
+      if (!tried.release) return;
+      if (env.trialStuck) throw new Error('agent-studio-trial did not stop');
       calls.push('end trial');
       tried.release = undefined;
     },
@@ -231,25 +260,48 @@ function fake() {
       env.active = true;
       live.release = env.current;
       live.since = clock;
-      if (env.current) starts.set(env.current, (starts.get(env.current) ?? 0) + 1);
+      if (env.current) {
+        starts.set(env.current, (starts.get(env.current) ?? 0) + 1);
+        env.data.push(env.current);
+      }
+    },
+    preflight: () => {
+      if (env.preflightError) throw env.preflightError;
     },
     backup: (commit) => {
       calls.push(`backup ${commit}`);
-      return `/var/backups/agent-studio/pre-${commit}.tar.gz`;
+      if (env.backupError) throw env.backupError;
+      const path = `/var/backups/agent-studio/pre-${commit}.tar`;
+      backups.set(path, [...env.data]);
+      return path;
+    },
+    compress: (backup) => {
+      backups.set(`${backup}.gz`, backups.get(backup) ?? []);
+      return `${backup}.gz`;
     },
     select: (release) => {
       calls.push(`select ${release}`);
       env.current = release;
     },
-    restore: (backup, commit) => {
+    restore: (backup, keep) => {
       calls.push(`restore ${backup}`);
-      return `/var/lib/.agent-studio-failed-${commit.slice(0, 12)}`;
+      const folder = `/var/lib/.agent-studio-failed-${keep}`;
+      // Done again under the same name, it replaces nothing a second time.
+      if (!kept.has(folder)) {
+        kept.set(folder, env.data);
+        env.data = [...(backups.get(backup) ?? [])];
+      }
+      return folder;
     },
     probe: async (trial) => {
       if (trial ? !tried.release : !env.active) return undefined;
       const relay = behaviour(trial);
       if (relay.crash || gone(trial) || age(trial) < (relay.listens ?? 0)) return undefined;
-      if (relay.mute !== undefined && age(trial) >= relay.mute) {
+      if (
+        relay.mute !== undefined &&
+        age(trial) >= relay.mute &&
+        age(trial) < (relay.speaks ?? Infinity)
+      ) {
         // A probe waits its 30 seconds for an answer that does not come.
         clock += 30_000;
         return undefined;
@@ -305,6 +357,28 @@ function fake() {
       env.hostKey = key;
     },
   };
+  // The updater as a process that can be killed: before or after its nth call of a method.
+  // Once dead, every call throws, so nothing it still tries happens and no state is written.
+  let dead = false;
+  let kill: { method: string; nth: number; before: boolean } | undefined;
+  const counts = new Map<string, number>();
+  const process = new Proxy(system, {
+    get(target, name: string) {
+      const method = target[name as keyof System] as (...args: unknown[]) => unknown;
+      return (...args: unknown[]) => {
+        if (dead) throw new Killed(`killed (${name})`);
+        counts.set(name, (counts.get(name) ?? 0) + 1);
+        const now = kill?.method === name && --kill.nth === 0 ? kill : undefined;
+        if (now?.before) {
+          dead = true;
+          throw new Killed(`killed before ${name}`);
+        }
+        const result = method(...args);
+        if (now) dead = true;
+        return result;
+      };
+    },
+  });
   const publish = (
     version: string,
     commit: string,
@@ -342,11 +416,36 @@ function fake() {
     logs,
     env,
     publish,
+    counts,
     advance: (ms: number) => {
       clock += ms;
     },
     now: () => clock,
-    run: (options: Partial<typeof config> = {}) => check(system, { ...config, ...options }),
+    /** The relay the service runs, and whether it serves. */
+    serves: () =>
+      env.active && !gone() && behaviour().listens !== Infinity ? live.release : undefined,
+    /** The service runs a release since before this updater looked. */
+    boot: (release: string) => {
+      env.current = release;
+      env.active = true;
+      live.release = release;
+      live.since = clock;
+    },
+    /** A trial that an updater left running. */
+    leaveTrial: (commit: string) => {
+      tried.release = commit;
+      tried.since = clock;
+    },
+    /** Kills the updater before or after its nth call of a system method. */
+    kill: (method: keyof System, when: 'before' | 'after', nth = 1) => {
+      kill = { method, nth, before: when === 'before' };
+    },
+    /** The next updater: the timer starts a new process. */
+    revive: () => {
+      dead = false;
+      kill = undefined;
+    },
+    run: (options: Partial<typeof config> = {}) => check(process, { ...config, ...options }),
   };
 }
 
@@ -442,11 +541,6 @@ describe('running replies', () => {
     writeFileSync(join(data, 'workspaces', 'notes', 'workspace.json'), workspace(['running']));
     expect(runningReplies(data)).toBe(2);
     expect(runningReplies(join(data, 'missing'))).toBe(0);
-    // What a relay reads before it listens: the checkpoints of the same folders.
-    expect(stateBytes(data)).toBe(
-      workspace(['done', 'running']).length + workspace(['running', 'failed']).length,
-    );
-    expect(stateBytes(join(data, 'missing'))).toBe(0);
     // However the file is laid out, and with text that looks like what is counted.
     const state = {
       instanceId: 'relay',
@@ -490,6 +584,7 @@ describe('automatic updates', () => {
       'end trial',
       'stop',
       `backup ${B}`,
+      'stop',
       `select ${B}`,
       'start',
       `publish ${B} ${installer.length}`,
@@ -503,7 +598,11 @@ describe('automatic updates', () => {
       download: 'published',
     });
     expect(f.env.state.history).toEqual([
-      expect.objectContaining({ tag: 'v0.2.1', commit: B, backup: expect.stringContaining(B) }),
+      expect.objectContaining({
+        tag: 'v0.2.1',
+        commit: B,
+        backup: `/var/backups/agent-studio/pre-${B}.tar.gz`,
+      }),
     ]);
     expect(f.logs.join('\n')).toMatch(/Found v0.2.1[\s\S]*Activated v0.2.1/);
     f.calls.length = 0;
@@ -596,16 +695,21 @@ describe('automatic updates', () => {
     expect(f.calls.slice(f.calls.indexOf('stop'))).toEqual([
       'stop',
       `backup ${B}`,
+      'stop',
       `select ${B}`,
       'start',
       'stop',
-      `restore /var/backups/agent-studio/pre-${B}.tar.gz`,
+      `restore /var/backups/agent-studio/pre-${B}.tar`,
       `select ${A}`,
       'start',
     ]);
     expect(f.env.current).toBe(A);
     expect(f.env.state.release).toMatchObject({ phase: 'failed' });
+    expect(f.env.state.release?.activation).toBeUndefined();
     expect(f.env.state.history).toEqual([]);
+    // The data is what it was, but for what the restored relay wrote since; the rest is kept.
+    expect(f.env.data).toEqual([A]);
+    expect([...f.env.kept.values()]).toEqual([[B]]);
 
     const broken = fake();
     broken.publish('0.2.1', B);
@@ -613,7 +717,7 @@ describe('automatic updates', () => {
     await expect(broken.run()).rejects.toThrow(/Intervene manually/);
   });
 
-  it('waits for a relay that takes long to listen while it works', async () => {
+  it('waits for a relay as long as it works, however long it takes to listen', async () => {
     // What failed v1.3.2 and v1.3.3 on 2026-11-13: more than 30 seconds to read the state.
     const f = fake();
     f.publish('0.2.1', B);
@@ -623,22 +727,38 @@ describe('automatic updates', () => {
     expect(f.env.current).toBe(B);
     expect(f.logs).toContain('v0.2.1 read the copy and listened after 45 s.');
 
-    // Ten minutes for a state of 537 MB, which is given five and a second for each megabyte.
-    const large = fake();
-    large.publish('0.2.1', B);
-    large.env.stateBytes = 537_000_000;
-    large.env.relay = () => ({ listens: 10 * 60_000 });
-    await large.run();
-    expect(large.env.state.release).toMatchObject({ phase: 'active' });
-    expect(startLimit(537_000_000)).toBe((5 * 60 + 537) * 1000);
+    // No length of time ends a relay whose process works: three hours, said in the journal.
+    const long = fake();
+    long.publish('0.2.1', B);
+    long.env.relay = () => ({ listens: 3 * 60 * 60_000 });
+    await long.run();
+    expect(long.env.state.release).toMatchObject({ phase: 'active' });
+    expect(long.logs).toContain('v0.2.1 read the copy and listened after 10800 s.');
+    expect(long.logs).toContain(
+      'The trial has not listened after 60 s; its process works on, so it is waited for.',
+    );
+    expect(long.logs).toContain(
+      'The relay has not listened after 10740 s; its process works on, so it is waited for.',
+    );
   });
 
-  it('accepts a relay whose answers take as long as its saves hold it', async () => {
+  it('accepts a relay whose answers take as long as its saves hold it, or longer', async () => {
     const f = fake();
     f.publish('0.2.1', B);
     f.env.relay = () => ({ stall: 16_000 });
     await f.run();
     expect(f.env.state.release).toMatchObject({ phase: 'active' });
+
+    // A relay that answers nothing for minutes while its process works is saving, not gone:
+    // five times the longest save measured, on a day as slow as 2026-11-13, is 80 seconds.
+    const saving = fake();
+    saving.publish('0.2.1', B);
+    saving.env.relay = () => ({ mute: 7000, speaks: 300_000 });
+    await saving.run();
+    expect(saving.env.state.release).toMatchObject({ phase: 'active' });
+    expect(
+      saving.logs.some((line) => /^The trial has not answered for \d+ s; its/.test(line)),
+    ).toBe(true);
   });
 
   it('refuses a release whose relay cannot read a copy of the data, leaving the relay alone', async () => {
@@ -656,6 +776,7 @@ describe('automatic updates', () => {
     expect(f.env.active).toBe(true);
     expect(f.env.current).toBe(A);
     expect(f.env.state.release).toMatchObject({ phase: 'failed' });
+    expect(f.env.state.release?.activation).toBeUndefined();
     f.calls.length = 0;
     await f.run();
     expect(f.calls).toEqual([]);
@@ -667,7 +788,7 @@ describe('automatic updates', () => {
       'its relay could not be tried: ENOSPC: no space left on device',
     );
     expect(full.calls).not.toContain('stop');
-    expect(full.calls.at(-1)).toBe('end trial');
+    expect(full.calls.at(-1)).toBe(`trial ${B}`);
   });
 
   it('fails a crash loop within seconds and goes back', async () => {
@@ -677,7 +798,9 @@ describe('automatic updates', () => {
     f.env.relay = (release, trial) => (release === B && !trial ? { crash: true } : {});
     const began = f.now();
     await expect(f.run()).rejects.toThrow(
-      `v0.2.1 failed its health check; ${A} was restored. Data the failed release wrote is kept in /var/lib/.agent-studio-failed-${B.slice(0, 12)}. Its relay ended (exit-code 1) and its service started it again before it listened.`,
+      new RegExp(
+        `^v0\\.2\\.1 failed its health check; ${A} was restored\\. Data the failed release wrote is kept in /var/lib/\\.agent-studio-failed-${B.slice(0, 12)}-20260923T1200\\d\\dZ\\. Its relay ended \\(exit-code 1\\) and its service started it again before it listened\\.$`,
+      ),
     );
     // Two relays shown to answer for 25 seconds each, and no wait for the one that ended.
     expect(f.now() - began).toBeLessThan(60_000);
@@ -685,11 +808,10 @@ describe('automatic updates', () => {
     expect(f.env.active).toBe(true);
   });
 
-  it('ends the wait for a relay that stopped working, works without end or goes silent', async () => {
-    const tried = async (relay: Behaviour, stateBytes = 0) => {
+  it('ends the wait only for a relay that ended or that neither answers nor works', async () => {
+    const tried = async (relay: Behaviour) => {
       const f = fake();
       f.publish('0.2.1', B);
-      f.env.stateBytes = stateBytes;
       f.env.relay = (release) => (release === B ? relay : {});
       const began = f.now();
       const error = await f.run().then(
@@ -703,18 +825,18 @@ describe('automatic updates', () => {
     expect(idle.error).toContain(
       'its relay ran for 120 s without listening, the last 120 s without working.',
     );
-    const busy = await tried({ listens: Infinity }, 100_000_000);
-    expect(busy.error).toContain(
-      'its relay did not listen within 400 s, the longest a state of 100 MB is given.',
+    // It read for five minutes and then waits for something that does not come.
+    const stuck = await tried({ listens: Infinity, idle: 300_000 });
+    expect(stuck.error).toContain(
+      'its relay ran for 420 s without listening, the last 120 s without working.',
     );
-    expect(busy.took).toBeLessThan(402_000);
     const died = await tried({ dies: 12_000 });
     expect(died.error).toContain(
       'its relay listened after 0 s and then ended (exit-code 1) and its service failed.',
     );
-    const silent = await tried({ mute: 7000 });
-    expect(silent.error).toContain(
-      'its relay listened after 0 s and then answered nothing for 70 s.',
+    const silent = await tried({ mute: 7000, idle: 7000 });
+    expect(silent.error).toMatch(
+      /its relay listened after 0 s and then answered nothing for 175 s, the last 140 s without working\./,
     );
     // One answer that does not come is a save, not the end.
     const f = fake();
@@ -726,7 +848,22 @@ describe('automatic updates', () => {
     expect(await healthy(f.system)).toEqual({ ok: true, listened: 0 });
   });
 
-  it('starts the new release once more when the one before it no longer starts', async () => {
+  it('never takes systemd not answering for a relay that ended', async () => {
+    // One failed `systemctl show` read as "its service now unknown" and rolled a release back.
+    const f = fake();
+    f.publish('0.2.1', B);
+    f.env.unseen = 7;
+    f.env.relay = () => ({ listens: 20_000 });
+    await f.run();
+    expect(f.env.state.release).toMatchObject({ phase: 'active' });
+    expect(f.env.current).toBe(B);
+    expect(f.logs).toContain(
+      'systemd does not say how the trial is; still asking it and the trial.',
+    );
+    expect(f.calls.some((call) => call.startsWith('restore'))).toBe(false);
+  });
+
+  it('starts the new release once more, on the data from before the switch, when the one before it no longer starts', async () => {
     // Production on 2026-11-20: the data had outgrown what the running release could read.
     const f = fake();
     f.publish('0.2.1', B);
@@ -734,16 +871,19 @@ describe('automatic updates', () => {
       trial ? {} : release === A || start === 1 ? { crash: true } : {};
     f.env.lastWords = 'Error: Relay data is unreadable';
     await f.run();
+    const backup = `/var/backups/agent-studio/pre-${B}.tar`;
     expect(f.calls.slice(f.calls.indexOf('stop'))).toEqual([
       'stop',
       `backup ${B}`,
+      'stop',
       `select ${B}`,
       'start',
       'stop',
-      `restore /var/backups/agent-studio/pre-${B}.tar.gz`,
+      `restore ${backup}`,
       `select ${A}`,
       'start',
       'stop',
+      `restore ${backup}`,
       `select ${B}`,
       'start',
       `publish ${B} ${installer.length}`,
@@ -753,13 +893,23 @@ describe('automatic updates', () => {
     expect(f.env.active).toBe(true);
     expect(f.env.state.release).toMatchObject({ phase: 'active', previous: A });
     expect(f.env.state.release?.error).toBeUndefined();
-    expect(f.env.state.release?.note).toMatch(
-      new RegExp(
-        `^v0\\.2\\.1 failed its first health check \\(its relay ended .*\\) and ${A} did not start again \\(its relay ended .*\\), so v0\\.2\\.1 was started once more and serves\\. ${A} can no longer be gone back to\\. Data the failed release wrote is kept in `,
-      ),
+    expect(f.env.state.release?.activation).toBeUndefined();
+    // The release before wrote to the restored data before it ended: that is kept aside, and
+    // the second start runs on the backup, not on what a relay that failed left.
+    expect(f.env.data).toEqual([B]);
+    const kept = [...f.env.kept.keys()];
+    expect(kept).toEqual([
+      expect.stringMatching(`^/var/lib/\\.agent-studio-failed-${B.slice(0, 12)}-`),
+      expect.stringMatching(`^/var/lib/\\.agent-studio-failed-${A.slice(0, 12)}-`),
+    ]);
+    expect([...f.env.kept.values()]).toEqual([[B], [A]]);
+    expect(f.env.state.release?.note).toBe(
+      `v0.2.1 failed its first health check (its relay ended (exit-code 1) and its service started it again before it listened; it last logged: Error: Relay data is unreadable) and ${A} did not start again (its relay ended (exit-code 1) and its service started it again before it listened; it last logged: Error: Relay data is unreadable), so v0.2.1 was started once more, on the data as it was before the switch, and serves. ${A} can no longer be gone back to. Data the failed release wrote is kept in ${kept[0]}. What ${A} left when it did not start is kept in ${kept[1]}.`,
     );
     expect(f.logs).toContain(f.env.state.release?.note);
-    expect(f.env.state.history).toEqual([expect.objectContaining({ commit: B })]);
+    expect(f.env.state.history).toEqual([
+      expect.objectContaining({ commit: B, backup: `${backup}.gz` }),
+    ]);
   });
 
   it('says what each relay did when neither release starts', async () => {
@@ -767,12 +917,132 @@ describe('automatic updates', () => {
     f.publish('0.2.1', B);
     f.env.relay = (release, trial) =>
       trial ? {} : release === A ? { crash: true } : { listens: Infinity, idle: true };
-    await expect(f.run()).rejects.toThrow(
-      `v0.2.1 failed its health check, restoring ${A} did not bring the relay back, and v0.2.1 did not start a second time: the relay is down. Intervene manually; v0.2.1 stays selected and the data backup is /var/backups/agent-studio/pre-${B}.tar.gz. Data the failed release wrote is kept in /var/lib/.agent-studio-failed-${B.slice(0, 12)}. v0.2.1: its relay ran for 120 s without listening, the last 120 s without working. ${A}: its relay ended (exit-code 1) and its service started it again before it listened. v0.2.1 again: its relay ran for 120 s without listening, the last 120 s without working.`,
+    const error: string = await f.run().then(
+      () => '',
+      (reason: Error) => reason.message,
+    );
+    const kept = [...f.env.kept.keys()];
+    expect(kept).toHaveLength(2);
+    expect(error).toBe(
+      `v0.2.1 failed its health check, restoring ${A} did not bring the relay back, and v0.2.1 did not start a second time: the relay is down. Intervene manually; v0.2.1 stays selected and the data backup is /var/backups/agent-studio/pre-${B}.tar. Data the failed release wrote is kept in ${kept[0]}. What ${A} left when it did not start is kept in ${kept[1]}. v0.2.1: its relay ran for 120 s without listening, the last 120 s without working. ${A}: its relay ended (exit-code 1) and its service started it again before it listened. v0.2.1 again: its relay ran for 120 s without listening, the last 120 s without working.`,
     );
     expect(f.env.current).toBe(B);
     expect(f.env.state.release).toMatchObject({ phase: 'failed' });
     expect(f.env.state.history).toEqual([]);
+  });
+
+  it('checks before it stops the relay that its data can be backed up and restored', async () => {
+    const f = fake();
+    f.publish('0.2.1', B);
+    f.env.preflightError = new Error(
+      '/var/backups/agent-studio has 12 MB free, less than a backup of the 786 MB of private data takes.',
+    );
+    await expect(f.run()).rejects.toThrow(
+      `v0.2.1 was not activated: /var/backups/agent-studio has 12 MB free, less than a backup of the 786 MB of private data takes. ${A} runs on and nothing changed.`,
+    );
+    expect(f.calls).not.toContain('stop');
+    expect(f.env.state.release).toMatchObject({ phase: 'failed' });
+    f.env.preflightError = undefined;
+    retry(f.env.state);
+    await f.run();
+    expect(f.env.state.release).toMatchObject({ phase: 'active' });
+  });
+
+  it('starts the release that ran again when the backup fails after the relay stopped', async () => {
+    const f = fake();
+    f.publish('0.2.1', B);
+    f.env.backupError = new Error('tar -cf exited with 2.');
+    await expect(f.run()).rejects.toThrow(
+      `v0.2.1 was not activated: private data could not be backed up (tar -cf exited with 2.). ${A} runs again on its data, which was not touched.`,
+    );
+    expect(f.calls.slice(f.calls.indexOf('stop'))).toEqual([
+      'stop',
+      `backup ${B}`,
+      'stop',
+      `select ${A}`,
+      'start',
+    ]);
+    expect(f.serves()).toBe(A);
+    expect(f.env.state.release).toMatchObject({ phase: 'failed' });
+    expect(f.env.kept.size).toBe(0);
+
+    // The release that ran no longer reads its data, as production's could not on 2026-11-20:
+    // the relay is not left down, the release that read a copy of the data in its trial runs.
+    const outgrown = fake();
+    outgrown.publish('0.2.1', B);
+    outgrown.env.backupError = new Error('tar -cf exited with 2.');
+    outgrown.env.relay = (release) => (release === A ? { crash: true } : {});
+    await outgrown.run();
+    expect(outgrown.calls.slice(outgrown.calls.indexOf('stop'))).toEqual([
+      'stop',
+      `backup ${B}`,
+      'stop',
+      `select ${A}`,
+      'start',
+      'stop',
+      `select ${B}`,
+      'start',
+      `publish ${B} ${installer.length}`,
+      `discard ${B}`,
+    ]);
+    expect(outgrown.serves()).toBe(B);
+    expect(outgrown.env.state.release).toMatchObject({ phase: 'active' });
+    expect(outgrown.env.state.release?.note).toBe(
+      `Private data could not be backed up before activating v0.2.1 (tar -cf exited with 2.) and ${A} did not start again (its relay ended (exit-code 1) and its service started it again before it listened), so v0.2.1, which read a copy of this data in its trial, was started on it and serves, without a backup. ${A} can no longer be gone back to.`,
+    );
+    expect(outgrown.env.state.history).toEqual([
+      expect.not.objectContaining({ backup: expect.anything() }),
+    ]);
+
+    const down = fake();
+    down.publish('0.2.1', B);
+    down.env.backupError = new Error('tar -cf exited with 2.');
+    down.env.relay = (_release, trial) => (trial ? {} : { crash: true });
+    await expect(down.run()).rejects.toThrow(
+      /did not start on that data either: the relay is down\. Intervene manually; v0\.2\.1 stays selected and there is no backup/,
+    );
+  });
+
+  it('clears a trial an updater left behind, and activates nothing while one cannot be cleared', async () => {
+    // The updater was killed while its trial ran: systemd stops the unit bound to it, and the
+    // next check finds what is left, the copy of the data, before it does anything else.
+    const f = fake();
+    f.leaveTrial(B);
+    await f.run();
+    expect(f.calls).toEqual(['end trial']);
+
+    const killed = fake();
+    killed.publish('0.2.1', B);
+    killed.kill('startTrial', 'after');
+    await expect(killed.run()).rejects.toThrow();
+    expect(killed.env.state.release).toMatchObject({
+      phase: 'staged',
+      activation: { step: 'trial' },
+    });
+    killed.revive();
+    killed.calls.length = 0;
+    await killed.run();
+    expect(killed.calls.slice(0, 3)).toEqual(['end trial', `trial ${B}`, 'end trial']);
+    expect(killed.env.state.release).toMatchObject({ phase: 'active' });
+
+    // A trial whose unit does not stop still reads its copy: the copy stays, the release is
+    // not failed for it, and no relay is stopped until a check clears it.
+    const stuck = fake();
+    stuck.publish('0.2.1', B);
+    stuck.leaveTrial(A);
+    stuck.env.trialStuck = true;
+    await expect(stuck.run()).rejects.toThrow(
+      `v0.2.1 is not activated while its trial cannot be removed: agent-studio-trial did not stop ${A} runs on and nothing changed.`,
+    );
+    expect(stuck.logs).toContain(
+      'A trial left behind could not be removed: agent-studio-trial did not stop',
+    );
+    expect(stuck.calls).not.toContain('stop');
+    expect(stuck.calls).not.toContain('end trial');
+    expect(stuck.env.state.release).toMatchObject({ phase: 'staged' });
+    stuck.env.trialStuck = false;
+    await stuck.run();
+    expect(stuck.env.state.release).toMatchObject({ phase: 'active' });
   });
 
   it('starts a new server’s relay with its first release', async () => {
@@ -789,6 +1059,7 @@ describe('automatic updates', () => {
       `build ${B}`,
       'stop',
       `backup ${B}`,
+      'stop',
       `select ${B}`,
       'start',
       `publish ${B} ${installer.length}`,
@@ -807,16 +1078,19 @@ describe('automatic updates', () => {
     f.env.healthy = () => false;
     f.publish('0.2.1', B);
     await expect(f.run()).rejects.toThrow(
-      `v0.2.1 failed its health check, so the relay stays stopped. Data it wrote is kept in /var/lib/.agent-studio-failed-${B.slice(0, 12)}.`,
+      new RegExp(
+        `^v0\\.2\\.1 failed its health check, so the relay stays stopped\\. Data it wrote is kept in /var/lib/\\.agent-studio-failed-${B.slice(0, 12)}-\\d{8}T\\d{6}Z\\. Its relay ended`,
+      ),
     );
     expect(f.calls.slice(f.calls.indexOf('stop'))).toEqual([
       'stop',
       `backup ${B}`,
+      'stop',
       `select ${B}`,
       'start',
       'deselect',
       'stop',
-      `restore /var/backups/agent-studio/pre-${B}.tar.gz`,
+      `restore /var/backups/agent-studio/pre-${B}.tar`,
     ]);
     expect(f.env.current).toBeUndefined();
     expect(f.env.active).toBe(false);
@@ -841,14 +1115,241 @@ describe('automatic updates', () => {
     expect(f.calls.some((call) => call.startsWith('select'))).toBe(false);
   });
 
-  it('records a release that is already live without restarting it', async () => {
+  it('records a release that is already selected only once its relay passes the check', async () => {
     const f = fake();
-    f.env.current = B;
+    f.boot(B);
     f.publish('0.2.1', B);
+    const began = f.now();
     await f.run();
     expect(f.calls).not.toContain('stop');
     expect(f.calls.some((call) => call.startsWith('build'))).toBe(false);
     expect(f.env.state.release).toMatchObject({ phase: 'active', download: 'published' });
+    // Its relay was watched answering, not taken for running because it is selected.
+    expect(f.now() - began).toBeGreaterThanOrEqual(25_000);
+    expect(f.logs).toContain('v0.2.1 is already the current release, and its relay answers.');
+
+    const dead = fake();
+    dead.boot(B);
+    dead.publish('0.2.1', B);
+    dead.env.relay = () => ({ listens: Infinity, idle: true });
+    await expect(dead.run()).rejects.toThrow(
+      'v0.2.1 is the current release, selected outside this updater, but its relay ran for 120 s without listening, the last 120 s without working. Nothing was changed.',
+    );
+    expect(dead.env.state.release).toMatchObject({ phase: 'failed' });
+    expect(dead.env.state.history).toEqual([]);
+    expect(dead.calls.some((call) => call.startsWith('publish'))).toBe(false);
+
+    const stopped = fake();
+    stopped.env.current = B;
+    stopped.env.active = false;
+    stopped.publish('0.2.1', B);
+    await stopped.run();
+    expect(stopped.env.state.release).toMatchObject({ phase: 'staged', waiting: 'service' });
+    expect(stopped.calls).not.toContain('start');
+  });
+
+  describe('an updater that is killed', () => {
+    it('never leaves a selected release that nobody checked marked active', async () => {
+      // The updater ended right after it selected the release, whose relay then does not run:
+      // the next check must not read success off the link, publish its installer or switch
+      // the host. It starts the relay, checks it, and goes back like after any failed check.
+      const f = fake();
+      f.publish('0.2.1', B);
+      f.env.relay = (release, trial) => (release === B && !trial ? { crash: true } : {});
+      f.kill('select', 'after');
+      await expect(f.run()).rejects.toThrow(Killed);
+      expect(f.env.current).toBe(B);
+      expect(f.env.active).toBe(false);
+      expect(f.env.state.release).toMatchObject({
+        phase: 'staged',
+        previous: A,
+        backup: `/var/backups/agent-studio/pre-${B}.tar`,
+        activation: { step: 'candidate', previous: A },
+      });
+
+      f.revive();
+      f.calls.length = 0;
+      await expect(f.run()).rejects.toThrow(`v0.2.1 failed its health check; ${A} was restored.`);
+      expect(f.calls).toEqual([
+        'stop',
+        `select ${B}`,
+        'start',
+        'stop',
+        `restore /var/backups/agent-studio/pre-${B}.tar`,
+        `select ${A}`,
+        'start',
+      ]);
+      expect(f.logs).toContain(
+        'An updater ended while starting v0.2.1; the activation of v0.2.1 goes on from there, and nothing is taken for done.',
+      );
+      expect(f.serves()).toBe(A);
+      expect(f.env.state.release).toMatchObject({ phase: 'failed' });
+      expect(f.env.state.history).toEqual([]);
+      expect(f.env.data).toEqual([A]);
+    });
+
+    it('goes on from the step it had written, whichever it was', async () => {
+      const at = async (
+        method: keyof System,
+        when: 'before' | 'after',
+        nth: number,
+        step: string,
+      ) => {
+        const f = fake();
+        f.publish('0.2.1', B);
+        f.kill(method, when, nth);
+        await expect(f.run()).rejects.toThrow(Killed);
+        expect(f.env.state.release).toMatchObject({ phase: 'staged', activation: { step } });
+        f.revive();
+        f.calls.length = 0;
+        await f.run();
+        expect(f.env.state.release).toMatchObject({ phase: 'active' });
+        expect(f.env.state.release?.activation).toBeUndefined();
+        expect(f.serves()).toBe(B);
+        expect(f.env.state.history).toHaveLength(1);
+        return f;
+      };
+      // After the relay was stopped: it is not left down until someone looks.
+      let f = await at('stopService', 'after', 1, 'backup');
+      expect(f.calls.slice(0, 5)).toEqual(['stop', `backup ${B}`, 'stop', `select ${B}`, 'start']);
+      // After the backup was written but before the state named it: another one is taken.
+      f = await at('backup', 'after', 1, 'backup');
+      expect(f.calls.slice(0, 2)).toEqual(['stop', `backup ${B}`]);
+      // After the release was selected, and after its relay was started.
+      f = await at('select', 'after', 1, 'candidate');
+      expect(f.calls.slice(0, 3)).toEqual(['stop', `select ${B}`, 'start']);
+      f = await at('startService', 'after', 1, 'candidate');
+      expect(f.calls.slice(0, 3)).toEqual(['stop', `select ${B}`, 'start']);
+      // After its relay passed the check but before that was written: it is checked again.
+      f = await at('releaseKey', 'before', 1, 'candidate');
+      expect(f.calls.slice(0, 3)).toEqual(['stop', `select ${B}`, 'start']);
+    });
+
+    it('finishes a restore it was in the middle of, replacing the data once', async () => {
+      for (const when of ['before', 'after'] as const) {
+        const f = fake();
+        f.publish('0.2.1', B);
+        f.env.relay = (release, trial) => (release === B && !trial ? { crash: true } : {});
+        f.kill('restore', when);
+        await expect(f.run()).rejects.toThrow(Killed);
+        expect(f.env.state.release).toMatchObject({
+          phase: 'staged',
+          activation: { step: 'previous', keep: expect.stringContaining(B.slice(0, 12)) },
+        });
+        f.revive();
+        f.calls.length = 0;
+        await expect(f.run()).rejects.toThrow(`v0.2.1 failed its health check; ${A} was restored.`);
+        expect(f.calls).toEqual([
+          'stop',
+          `restore /var/backups/agent-studio/pre-${B}.tar`,
+          `select ${A}`,
+          'start',
+        ]);
+        expect(f.serves()).toBe(A);
+        // One folder holds what the failed release wrote, under the name written beforehand.
+        expect([...f.env.kept.values()]).toEqual([[B]]);
+        expect(f.env.data).toEqual([A]);
+      }
+    });
+
+    it('finishes what it began before a newer release replaces it', async () => {
+      const f = fake();
+      f.publish('0.2.1', B);
+      f.kill('select', 'after');
+      await expect(f.run()).rejects.toThrow(Killed);
+      f.revive();
+      f.publish('0.2.2', C);
+      f.calls.length = 0;
+      await f.run();
+      expect(f.calls.slice(0, 3)).toEqual(['stop', `select ${B}`, 'start']);
+      expect(f.calls).not.toContain(`discard ${B}`);
+      expect(f.env.state.history.map((entry) => entry.commit)).toEqual([C, B]);
+      expect(f.serves()).toBe(C);
+    });
+
+    it('ends well wherever it is killed, in every activation', async () => {
+      // Every call the updater makes, in three activations: one that goes through, one whose
+      // relay ends as the service, and one where the release before no longer starts either.
+      // The updater is killed before and after each call; the checks that follow must end with
+      // a relay that was checked, or say that there is none, and never with a guess.
+      const scenarios: {
+        name: string;
+        relay: (release: string | undefined, trial: boolean) => Behaviour;
+        ends: 'active' | 'restored' | 'down';
+      }[] = [
+        { name: 'goes through', relay: () => ({}), ends: 'active' },
+        {
+          name: 'ends as the service',
+          relay: (release, trial) => (release === B && !trial ? { crash: true } : {}),
+          ends: 'restored',
+        },
+        {
+          name: 'neither starts',
+          relay: (_release, trial) => (trial ? {} : { crash: true }),
+          ends: 'down',
+        },
+      ];
+      const methods = [
+        'writeState',
+        'startTrial',
+        'endTrial',
+        'preflight',
+        'stopService',
+        'backup',
+        'select',
+        'startService',
+        'restore',
+        'compress',
+        'probe',
+      ] as const;
+      let kills = 0;
+      for (const scenario of scenarios) {
+        const whole = fake();
+        whole.publish('0.2.1', B);
+        whole.env.relay = scenario.relay;
+        await whole.run().catch(() => undefined);
+        for (const method of methods)
+          for (let nth = 1; nth <= (whole.counts.get(method) ?? 0); nth++)
+            for (const when of ['before', 'after'] as const) {
+              const f = fake();
+              f.publish('0.2.1', B);
+              f.env.relay = scenario.relay;
+              f.kill(method, when, nth);
+              const where = `${scenario.name}: killed ${when} ${method} #${nth}`;
+              await f.run().catch(() => undefined);
+              kills++;
+              // The timer goes on starting updaters until one has nothing left to do.
+              for (let checks = 0; checks < 4; checks++) {
+                f.revive();
+                await f.run().catch(() => undefined);
+              }
+              const release = f.env.state.release;
+              expect(release?.activation, where).toBeUndefined();
+              if (release?.phase === 'active') {
+                // Only a relay that was checked: it runs the release and answers.
+                expect(f.serves(), where).toBe(B);
+                expect(f.env.current, where).toBe(B);
+                expect(scenario.ends, where).toBe('active');
+              } else {
+                expect(release?.phase, where).toBe('failed');
+                expect(f.env.state.history, where).toEqual([]);
+                expect(
+                  f.calls.some((call) => call.startsWith('publish')),
+                  where,
+                ).toBe(false);
+                if (scenario.ends === 'restored') {
+                  expect(f.serves(), where).toBe(A);
+                  // Nothing the failed release wrote is in the data the restored relay reads.
+                  expect(f.env.data, where).not.toContain(B);
+                } else {
+                  expect(scenario.ends, where).toBe('down');
+                  expect(release?.error, where).toContain('the relay is down. Intervene manually');
+                }
+              }
+            }
+      }
+      expect(kills).toBeGreaterThan(150);
+    });
   });
 
   it('never downgrades, and replaces a release still waiting to activate', async () => {
@@ -922,6 +1423,203 @@ describe('automatic updates', () => {
   });
 });
 
+describe('the trial of a release', () => {
+  // What `busctl --json=short get-property` prints for each property of the relay's service.
+  const properties = {
+    User: { type: 's', data: 'agent-studio' },
+    Group: { type: 's', data: 'agent-studio' },
+    Environment: {
+      type: 'as',
+      data: [
+        'NODE_ENV=production',
+        'NODE_OPTIONS=--max-old-space-size=32768 --no-warnings',
+        'AGENT_STUDIO_RELAY_PORT=4317',
+        'AGENT_STUDIO_RELAY_DATA=/var/lib/agent-studio',
+        'QUOTED="kept as it is" $HOME',
+      ],
+    },
+    EnvironmentFiles: {
+      type: 'a(sb)',
+      data: [
+        ['/etc/agent-studio/relay.env', false],
+        ['/etc/agent-studio/more settings.env', true],
+      ],
+    },
+  };
+  const trial = (service = parseService(properties)) =>
+    trialArguments({
+      unit: 'agent-studio-trial',
+      updater: 'agent-studio-update.service',
+      service,
+      release: '/opt/agent-studio/releases/abc',
+      data: '/var/lib/.agent-studio-trial',
+      port: 4317,
+      node: '/opt/agent-studio/runtimes/node/bin/node',
+      hidden: ['/var/lib/agent-studio', '/var/backups/agent-studio'],
+    });
+
+  it('reads the service entry by entry, whatever the values hold', () => {
+    expect(parseService(properties)).toEqual({
+      user: 'agent-studio',
+      group: 'agent-studio',
+      environment: properties.Environment.data,
+      files: [
+        { path: '/etc/agent-studio/relay.env', optional: false },
+        { path: '/etc/agent-studio/more settings.env', optional: true },
+      ],
+    });
+    expect(busPath('agent-studio.service')).toBe(
+      '/org/freedesktop/systemd1/unit/agent_2dstudio_2eservice',
+    );
+    expect(busPath('9relay@a.service')).toBe(
+      '/org/freedesktop/systemd1/unit/_39relay_40a_2eservice',
+    );
+    for (const broken of [
+      { ...properties, Environment: { data: 'NODE_ENV=production' } },
+      { ...properties, Environment: { data: ['no assignment'] } },
+      { ...properties, EnvironmentFiles: { data: [['relative.env', false]] } },
+      { ...properties, EnvironmentFiles: { data: ['/etc/agent-studio/relay.env'] } },
+      { ...properties, User: {} },
+    ])
+      expect(() => parseService(broken)).toThrow(/systemd reported/);
+  });
+
+  it('keeps every entry and every file of the service, each as one argument', () => {
+    const args = trial();
+    const command = args.indexOf('--');
+    const options = args.slice(0, command);
+    // Values with spaces, quotes and dollar signs stay one argument each, unchanged.
+    for (const entry of properties.Environment.data) expect(options).toContain(`--setenv=${entry}`);
+    // Every file, in the service's order, with its own "may be missing" mark.
+    expect(options.filter((option) => option.startsWith('--property=EnvironmentFile='))).toEqual([
+      '--property=EnvironmentFile=/etc/agent-studio/relay.env',
+      '--property=EnvironmentFile=-/etc/agent-studio/more settings.env',
+    ]);
+    expect(options).toContain('--uid=agent-studio');
+    expect(options).toContain('--property=PrivateNetwork=yes');
+    expect(options).toContain(
+      '--property=InaccessiblePaths=-/var/lib/agent-studio -/var/backups/agent-studio',
+    );
+    // It ends with the updater that started it.
+    expect(options).toContain('--property=BindsTo=agent-studio-update.service');
+    expect(trialArguments({ ...trialOf(), updater: undefined }).join(' ')).not.toContain('BindsTo');
+  });
+
+  it('sets where the trial reads and listens after everything the service sets', () => {
+    // systemd gives an environment file precedence over Environment=, which is all --setenv is:
+    // a relay.env that names the data folder or the port would send the trial to the real data.
+    // What env(1) sets in the command itself comes after both.
+    const args = trial();
+    expect(args.slice(args.indexOf('--') + 1)).toEqual([
+      '/usr/bin/env',
+      'AGENT_STUDIO_RELAY_HOST=127.0.0.1',
+      'AGENT_STUDIO_RELAY_PORT=4317',
+      'AGENT_STUDIO_RELAY_DATA=/var/lib/.agent-studio-trial',
+      'AGENT_STUDIO_WEB_DIR=/opt/agent-studio/releases/abc/build',
+      '/opt/agent-studio/runtimes/node/bin/node',
+      'relay/start.ts',
+    ]);
+    // The service's own, conflicting values are still passed on, and lose.
+    expect(args.indexOf('--setenv=AGENT_STUDIO_RELAY_DATA=/var/lib/agent-studio')).toBeLessThan(
+      args.indexOf('--'),
+    );
+    // systemd expands $NAME in a command's arguments, so a dollar sign is written twice.
+    const odd = trialArguments({ ...trialOf(), data: '/var/lib/.a$b-trial' });
+    expect(odd).toContain('AGENT_STUDIO_RELAY_DATA=/var/lib/.a$$b-trial');
+    expect(odd).toContain('--property=ReadWritePaths=/var/lib/.a$b-trial');
+  });
+
+  function trialOf() {
+    return {
+      unit: 'agent-studio-trial',
+      updater: 'agent-studio-update.service' as string | undefined,
+      service: parseService(properties),
+      release: '/opt/agent-studio/releases/abc',
+      data: '/var/lib/.agent-studio-trial',
+      port: 4317,
+      node: '/opt/agent-studio/runtimes/node/bin/node',
+      hidden: ['/var/lib/agent-studio'],
+    };
+  }
+});
+
+describe('restoring private data', () => {
+  // The folders as a restore finds them, and an extraction that can end early.
+  const folders = () => {
+    const root = mkdtempSync(join(tmpdir(), 'studio-vps-restore-'));
+    temporary.push(root);
+    const data = join(root, 'agent-studio');
+    mkdirSync(data);
+    writeFileSync(join(data, 'workspace.json'), 'what the failed release wrote');
+    const staging = join(root, '.agent-studio-restore-b-1');
+    const kept = join(root, '.agent-studio-failed-b-1');
+    let extractions = 0;
+    const extract = (until: 'whole' | 'partly' = 'whole') => {
+      extractions++;
+      mkdirSync(join(staging, 'agent-studio'), { recursive: true });
+      if (until === 'partly') throw new Error('killed while extracting');
+      writeFileSync(join(staging, 'agent-studio', 'workspace.json'), 'the backup');
+    };
+    const read = (folder: string) => readFileSync(join(folder, 'workspace.json'), 'utf8');
+    const settled = () => {
+      expect(read(data)).toBe('the backup');
+      expect(read(kept)).toBe('what the failed release wrote');
+      expect(existsSync(staging)).toBe(false);
+    };
+    return { data, staging, kept, extract, settled, extractions: () => extractions };
+  };
+
+  it('replaces the data with the backup and keeps what was there', () => {
+    const f = folders();
+    replaceData(f.data, f.staging, f.kept, f.extract);
+    f.settled();
+  });
+
+  it('can be done again after ending anywhere, and replaces the data once', () => {
+    // While extracting: the data is untouched, and the extraction starts over.
+    let f = folders();
+    expect(() => replaceData(f.data, f.staging, f.kept, () => f.extract('partly'))).toThrow();
+    expect(existsSync(f.kept)).toBe(false);
+    replaceData(f.data, f.staging, f.kept, f.extract);
+    f.settled();
+
+    // After the data was moved aside and before the backup took its place: there is no data
+    // folder at all, and the extraction, which had finished, is not done again.
+    f = folders();
+    f.extract();
+    renameSync(f.data, f.kept);
+    replaceData(f.data, f.staging, f.kept, () => {
+      throw new Error('extracted twice');
+    });
+    f.settled();
+
+    // After the backup took its place, before the empty folder it came from was removed.
+    f = folders();
+    f.extract();
+    renameSync(f.data, f.kept);
+    renameSync(join(f.staging, 'agent-studio'), f.data);
+    replaceData(f.data, f.staging, f.kept, () => {
+      throw new Error('extracted twice');
+    });
+    f.settled();
+
+    // After all of it, when the relay that was started has written again: nothing is replaced.
+    f = folders();
+    replaceData(f.data, f.staging, f.kept, f.extract);
+    writeFileSync(join(f.data, 'workspace.json'), 'what the restored relay wrote');
+    replaceData(f.data, f.staging, f.kept, () => {
+      throw new Error('extracted twice');
+    });
+    expect(readFileSync(join(f.data, 'workspace.json'), 'utf8')).toBe(
+      'what the restored relay wrote',
+    );
+    expect(readFileSync(join(f.kept, 'workspace.json'), 'utf8')).toBe(
+      'what the failed release wrote',
+    );
+    expect(f.extractions()).toBe(1);
+  });
+});
+
 describe('server host', () => {
   const relayCalls = (commit: string, first = false) => [
     'download Agent-Studio_0.9.0_x64-setup.exe',
@@ -931,6 +1629,8 @@ describe('server host', () => {
     ...(first ? [] : [`trial ${commit}`, 'end trial']),
     'stop',
     `backup ${commit}`,
+    // Every start of a relay stops whatever runs first, so that it can be done again.
+    'stop',
     `select ${commit}`,
     'start',
     `publish ${commit} ${installer.length}`,

@@ -8,6 +8,8 @@ After=network-online.target
 Type=oneshot
 # Skip this run while a manual deployment holds the same lock.
 ExecStart=/usr/bin/flock --nonblock --conflict-exit-code 0 /opt/agent-studio/.deploy.lock /opt/agent-studio/runtimes/node-v24.20.0-linux-x64/bin/node /opt/agent-studio/updater/vps/update.ts check
+# A run that is killed here, or any other way, loses nothing: update.ts writes each step of an
+# activation to its state before it takes it, and the next run goes on from there.
 TimeoutStartSec=2h
 UMask=0077
 ProtectHome=yes

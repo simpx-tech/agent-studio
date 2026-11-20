@@ -9,7 +9,10 @@
 // to listen, refuse a release whose relay cannot read a copy of the data without touching the
 // relay, roll back a release that ends once it is the service, accept a relay whose answers take
 // seconds, start a release once more when the one before it no longer starts, refuse an
-// untrusted installer and ignore a downgrade. The first release is built from source; the
+// untrusted installer and ignore a downgrade. Updaters are killed while a trial runs and right
+// after a release was selected, and the next check must clear up and take nothing for done. The
+// QA relay's environment file names its data folder, which a trial must not follow. The first
+// release is built from source; the
 // others are that build with another relay/start.ts. Each release also runs as
 // the server's host (agent-studio-qa-host.service): a stand-in AppImage that only stays up, or,
 // with --appimage, a real build of the app for the first release, which must pair with the QA
@@ -146,6 +149,7 @@ async function remote(upload) {
     viewer: crypto.randomUUID(),
   };
   const relayEnv = join(qa.root, 'relay.env');
+  const moreEnv = join(qa.root, 'relay-more.env');
   const hostKey = join(qa.state, 'host.key');
   const hostUnit = `/etc/systemd/system/${qa.hostService}.service`;
   const token = randomBytes(32).toString('hex');
@@ -206,6 +210,8 @@ async function remote(upload) {
     '9.0.4': 'f5',
     '9.0.5': 'a6',
     '9.0.6': 'b7',
+    '9.0.7': 'c8',
+    '9.0.8': 'd9',
     '8.0.0': 'e4',
   };
   // Something a relay can write that outlives a restored data folder.
@@ -297,7 +303,15 @@ async function remote(upload) {
       chmodSync(stub, 0o755);
     }
     sh('chown', ['-R', `${qa.hostUser}:${qa.hostUser}`, qa.hostHome]);
-    writeFileSync(relayEnv, `AGENT_STUDIO_RELAY_TOKEN=${token}\n`, { mode: 0o600 });
+    // Like a production file may, it names the data folder and the port: systemd lets it
+    // override the unit's Environment=, and a trial must read its copy all the same.
+    writeFileSync(
+      relayEnv,
+      `AGENT_STUDIO_RELAY_TOKEN=${token}\nAGENT_STUDIO_RELAY_DATA=${qa.data}\nAGENT_STUDIO_RELAY_PORT=${qa.port}\n`,
+      { mode: 0o600 },
+    );
+    // A second file, which may be missing, with a quoted value.
+    writeFileSync(moreEnv, 'QA_QUOTED="two words"\n', { mode: 0o600 });
     writeFileSync(join(qa.data, 'qa-marker.txt'), 'original data');
     mkdirSync(join(qa.data, '.npm'));
     writeFileSync(join(qa.data, '.npm', 'cache.txt'), 'npm cache');
@@ -321,7 +335,10 @@ User=${qa.user}
 Group=${qa.user}
 WorkingDirectory=${qa.root}/current
 EnvironmentFile=${relayEnv}
+EnvironmentFile=-${moreEnv}
+EnvironmentFile=-${qa.root}/relay-missing.env
 Environment=NODE_ENV=production
+Environment="QA_SPACED=a b"
 Environment=NODE_OPTIONS=--max-old-space-size=32768
 Environment=AGENT_STUDIO_RELAY_HOST=127.0.0.1
 Environment=AGENT_STUDIO_RELAY_PORT=${qa.port}
@@ -374,9 +391,32 @@ TasksMax=infinity
     // Relays that behave otherwise: the first release's build with a start.ts that does
     // something before, instead of or after starting the relay (relay-start.ts, the original).
     const onTrial = "/-trial$/.test(process.env.AGENT_STUDIO_RELAY_DATA ?? '')";
+    // Every one of them first requires the service's environment, values with spaces included,
+    // from its Environment= and from both of its files, as the service and in a trial.
+    const environment = `if (process.env.QA_QUOTED !== 'two words' || process.env.QA_SPACED !== 'a b' || !process.env.AGENT_STUDIO_RELAY_TOKEN) {
+  console.error('Error: QA relay lacks the environment of its service');
+  process.exit(4);
+}
+`;
     const relays = {
+      // Starts as it is.
+      plain: `await import('./relay-start.ts');
+`,
+      // Serves a copy of the data; as the service it works for 40 seconds and then ends, every
+      // time: a release an updater selected and never checked.
+      dyingLate: `if (!${onTrial}) {
+  for (const until = Date.now() + 40_000; Date.now() < until; );
+  console.error('Error: QA relay ends after working for a while');
+  process.exit(3);
+}
+await import('./relay-start.ts');
+`,
       // Works for 45 seconds before it listens, as a relay reading a large state does.
-      slow: `for (const until = Date.now() + 45_000; Date.now() < until; );
+      // In a trial it also writes into the data it was given, which must be the copy.
+      slow: `import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+if (${onTrial}) writeFileSync(join(process.env.AGENT_STUDIO_RELAY_DATA, 'qa-trial-wrote'), '');
+for (const until = Date.now() + 45_000; Date.now() < until; );
 await import('./relay-start.ts');
 `,
       // Ends at once, wherever it runs.
@@ -396,6 +436,9 @@ await import('./relay-start.ts');
 import { join } from 'node:path';
 const mark = join(process.env.AGENT_STUDIO_RELAY_DATA ?? '', 'qa-started-once');
 if (existsSync(mark)) {
+  // It writes to its data before it ends: what the release that is started after it must not
+  // run on.
+  writeFileSync(join(process.env.AGENT_STUDIO_RELAY_DATA ?? '', 'qa-wrote-before-failing'), '');
   console.error('Error: QA relay cannot read its data a second time');
   process.exit(3);
 }
@@ -424,7 +467,7 @@ await import('./relay-start.ts');
       const target = join(qa.root, 'releases', commit[version]);
       sh('cp', ['-a', join(qa.root, 'releases', commit['9.0.0']), target]);
       copyFileSync(join(target, 'relay', 'start.ts'), join(target, 'relay', 'relay-start.ts'));
-      writeFileSync(join(target, 'relay', 'start.ts'), relays[relay]);
+      writeFileSync(join(target, 'relay', 'start.ts'), environment + relays[relay]);
       sh('chmod', [
         '0644',
         join(target, 'relay', 'start.ts'),
@@ -442,6 +485,8 @@ await import('./relay-start.ts');
       ['9.0.4', good, otherKey, fakeAppImage(true)],
       ['9.0.5', good, qaKey, fakeAppImage(false)],
       ['9.0.6', good, qaKey, fakeAppImage(true)],
+      ['9.0.7', good, qaKey, fakeAppImage(true)],
+      ['9.0.8', good, qaKey, fakeAppImage(true)],
       ['8.0.0', good, qaKey, fakeAppImage(true)],
     ]) {
       const installer = randomBytes(512 * 1024);
@@ -534,7 +579,9 @@ await import('./relay-start.ts');
 
     // Run the updater the way its systemd unit does, pointed at the QA instance. It must run
     // asynchronously so this process keeps answering as GitHub.
-    const update = async (...args) => {
+    let launched = 0;
+    const launch = (...args) => {
+      const name = `${qa.service}-update-${++launched}`;
       const env = {
         API: origin,
         REPO: 'qa/agent-studio',
@@ -552,6 +599,7 @@ await import('./relay-start.ts');
       };
       const child = spawn('systemd-run', [
         '--quiet',
+        `--unit=${name}`,
         '--wait',
         '--pipe',
         '--collect',
@@ -571,13 +619,20 @@ await import('./relay-start.ts');
       let output = '';
       child.stdout.on('data', (chunk) => (output += chunk));
       child.stderr.on('data', (chunk) => (output += chunk));
-      const run = { status: await new Promise((done) => child.on('close', done)) };
+      const closed = new Promise((done) => child.on('close', done));
+      return { name, args, closed, output: () => output };
+    };
+    const update = async (...args) => finish(launch(...args));
+    const finish = async (launched) => {
+      const { args } = launched;
+      const run = { status: await launched.closed };
+      const output = launched.output();
       appendFileSync(logFile, `\n$ update.ts ${args.join(' ')} (exit ${run.status})\n${output}`);
       // Only the updater's own messages; build tools print their own progress.
       const messages = output
         .split('\n')
         .filter((line) =>
-          /^(Found|Building|Staged|Waiting|Trying|Activat|Published|Not installing|Ignoring|Could not|Trusting|v\d|[0-9a-f]{40} |No |The |Extracting|Installing|Created|Starting)/.test(
+          /^(Found|Building|Staged|Waiting|Trying|Activat|Published|Not installing|Ignoring|Could not|Trusting|v\d|[0-9a-f]{40} |No |The |Extracting|Installing|Created|Starting|An updater|A trial)/.test(
             line,
           ),
         );
@@ -585,6 +640,29 @@ await import('./relay-start.ts');
       return { status: run.status, output, messages };
     };
     const state = () => JSON.parse(readFileSync(join(qa.state, 'state.json'), 'utf8'));
+    const trialCopy = `/var/lib/.${basename(qa.data)}-trial`;
+    const settle = (ms) => new Promise((done) => setTimeout(done, ms));
+    // Starts a check and kills its updater, as the kernel or a timeout would, once `when` holds.
+    const killed = async (when, what) => {
+      const check = launch('check');
+      let met = false;
+      for (let waited = 0; waited < 300 && !met; waited++) {
+        try {
+          met = when();
+        } catch {
+          // The state is being replaced.
+        }
+        if (!met) await settle(200);
+      }
+      if (!met) {
+        const run = await finish(check);
+        throw new Error(`the updater never was ${what}:\n${run.output.slice(-4000)}`);
+      }
+      sh('systemctl', ['kill', '--signal=KILL', '--kill-whom=all', `${check.name}.service`]);
+      const run = await finish(check);
+      expect(run.status !== 0, `the updater killed while ${what} ended well`);
+      return run;
+    };
     const selected = () => basename(realpathSync(join(qa.root, 'current')));
     const hostVersion = () => {
       try {
@@ -810,10 +888,39 @@ await import('./relay-start.ts');
     run = await update('check');
     expect(run.status === 0 && run.output.trim() === '', 'waiting was not quiet');
     rmSync(checkpoint);
+
+    // An updater killed while its trial runs: systemd stops the trial with it, the relay is
+    // untouched, and the next check removes the copy of the data before anything else.
+    let pid = relayPid();
+    await killed(
+      () => state().release.activation?.step === 'trial' && active(trialService),
+      'trying the release',
+    );
+    for (let waited = 0; waited < 50 && active(trialService); waited++) await settle(200);
+    expect(!active(trialService), 'the trial outlived the updater that was killed');
+    expect(existsSync(trialCopy), 'no copy of the data was left to clear up');
+    expect(
+      state().release.phase === 'staged' && state().release.activation?.step === 'trial',
+      `a killed trial changed the release: ${JSON.stringify(state().release)}`,
+    );
+    expect(
+      relayPid() === pid && selected() === commit['9.0.0'],
+      'a killed trial touched the relay',
+    );
+    passed('a trial ends with the updater that is killed, and the relay is untouched');
+
     run = await update('check');
     expect(
       run.status === 0 && run.output.includes('Activated v9.0.1'),
       `activation failed:\n${run.output}`,
+    );
+    expect(!existsSync(trialCopy), 'the copy a killed trial left was not removed');
+    expect(
+      !existsSync(join(qa.data, 'qa-trial-wrote')),
+      'the trial wrote into the data of the relay: its environment file sent it there',
+    );
+    passed(
+      'a trial reads its copy although the environment file names the data folder, with the values of every file',
     );
     expect(selected() === commit['9.0.1'], 'current does not select v9.0.1');
     const slow = Number(/v9\.0\.1 read the copy and listened after (\d+) s/.exec(run.output)?.[1]);
@@ -833,7 +940,7 @@ await import('./relay-start.ts');
     // 3. A release whose relay cannot read the data is refused on a copy: the relay never stops.
     prepare('9.0.2', 'broken');
     latest = '9.0.2';
-    let pid = relayPid();
+    pid = relayPid();
     let began = Date.now();
     run = await update('check');
     let took = Date.now() - began;
@@ -969,8 +1076,8 @@ await import('./relay-start.ts');
     expect(run.status === 0, `v9.0.6 was not kept:\n${run.output.slice(-6000)}`);
     for (const text of [
       'v9.0.6 failed its health check: its relay ended (exit-code 3) and its service started it again before it listened; it last logged: Error: QA relay ends the first time it starts. Restoring',
-      `${commit['9.0.5']} did not come back: its relay ended (exit-code 3) and its service started it again before it listened; it last logged: Error: QA relay cannot read its data a second time. Starting v9.0.6 once more on the restored data.`,
-      'so v9.0.6 was started once more and serves.',
+      `${commit['9.0.5']} did not come back: its relay ended (exit-code 3) and its service started it again before it listened; it last logged: Error: QA relay cannot read its data a second time. Starting v9.0.6 once more, on the data as it was before the switch.`,
+      'so v9.0.6 was started once more, on the data as it was before the switch, and serves.',
       `${commit['9.0.5']} can no longer be gone back to.`,
       'The host runs v9.0.6',
     ])
@@ -991,24 +1098,115 @@ await import('./relay-start.ts');
         existsSync(join(qa.data, 'qa-started-once')),
       'the second start does not run on the data from before the switch',
     );
+    // The release before wrote to the restored data before it ended. That is kept aside, and
+    // the second start runs on the backup once more, not on what a failed relay left.
+    const failed = readdirSync('/var/lib').filter((name) =>
+      name.startsWith('.agent-studio-qa-failed-'),
+    );
+    expect(failed.length === 3, `kept data: ${failed.join(', ')}`);
+    const left = failed.find((name) => name.includes(`-failed-${commit['9.0.5'].slice(0, 12)}-`));
     expect(
-      readdirSync('/var/lib').filter((name) => name.startsWith('.agent-studio-qa-failed-'))
-        .length === 2,
-      'the data of the first start was not kept',
+      left && existsSync(join('/var/lib', left, 'qa-wrote-before-failing')),
+      'what the release before wrote when it did not start was not kept',
+    );
+    expect(
+      !existsSync(join(qa.data, 'qa-wrote-before-failing')),
+      'the second start runs on data the release before wrote to as it failed',
+    );
+    expect(
+      state().release.note?.includes(
+        `What ${commit['9.0.5']} left when it did not start is kept in /var/lib/${left}.`,
+      ),
+      `the note does not say where: ${state().release.note}`,
+    );
+    expect(
+      existsSync(join(qa.backups, `pre-${commit['9.0.6']}.tar.gz`)) &&
+        !existsSync(join(qa.backups, `pre-${commit['9.0.6']}.tar`)),
+      'the backup was not compressed once the relay ran',
     );
     expect(hostVersion() === '9.0.6' && active(qa.hostService), 'host does not run v9.0.6');
     passed('starts the new release once more when the one before it no longer starts', {
       note: state().release.note,
     });
 
-    // 8. Older releases are never installed.
+    // 8. An updater killed right after it selected a release, whose relay then ends: the
+    // current link selects it, and nothing checked it. The next check must not take it for
+    // active; it starts it, checks it, and goes back as after any failed check.
+    prepare('9.0.7', 'dyingLate');
+    latest = '9.0.7';
+    const published = sha256(readFileSync(download));
+    await killed(
+      () =>
+        state().release.activation?.step === 'candidate' &&
+        selected() === commit['9.0.7'] &&
+        active(qa.service),
+      'starting the release',
+    );
+    expect(
+      selected() === commit['9.0.7'] && state().release.phase === 'staged',
+      `the kill did not leave the release selected and unchecked: ${JSON.stringify(state().release)}`,
+    );
+    run = await update('check');
+    expect(
+      run.status === 1,
+      `a selected release was taken for active:\n${run.output.slice(-4000)}`,
+    );
+    for (const text of [
+      'An updater ended while starting v9.0.7; the activation of v9.0.7 goes on from there, and nothing is taken for done.',
+      'v9.0.7 failed its health check: its relay ended (exit-code 3) and its service started it again before it listened; it last logged: Error: QA relay ends after working for a while. Restoring',
+      `v9.0.7 failed its health check; ${commit['9.0.6']} was restored.`,
+    ])
+      expect(run.output.includes(text), `missing "${text}":\n${run.output.slice(-6000)}`);
+    expect(selected() === commit['9.0.6'], 'the release before was not restored');
+    expect(
+      active(qa.service) && (await status(`http://127.0.0.1:${qa.port}/v1/state`)) === 401,
+      'relay down after an interrupted activation',
+    );
+    expect(
+      state().release.phase === 'failed' && !state().release.activation,
+      `state: ${JSON.stringify(state().release)}`,
+    );
+    expect(
+      sha256(readFileSync(download)) === published,
+      'the installer of a release that never passed its check was published',
+    );
+    expect(hostVersion() === '9.0.6' && active(qa.hostService), 'the host was switched');
+    passed('a release selected by an updater that was killed is checked, not taken for active');
+
+    // 9. Killed the same way with a relay that serves: the next check starts it again, checks
+    // it and only then records it.
+    prepare('9.0.8', 'plain');
+    latest = '9.0.8';
+    await killed(
+      () => state().release.activation?.step === 'candidate' && selected() === commit['9.0.8'],
+      'starting the release',
+    );
+    run = await update('check');
+    expect(
+      run.status === 0 &&
+        run.output.includes('An updater ended while starting v9.0.8') &&
+        run.output.includes('Activated v9.0.8') &&
+        run.output.includes('The host runs v9.0.8'),
+      `the interrupted activation was not finished:\n${run.output.slice(-4000)}`,
+    );
+    expect(
+      selected() === commit['9.0.8'] && state().release.phase === 'active',
+      'v9.0.8 is not active',
+    );
+    expect(
+      active(qa.service) && (await status(`http://127.0.0.1:${qa.port}/v1/state`)) === 401,
+      'relay down after the activation was finished',
+    );
+    passed('an activation its updater was killed in is finished by the next check');
+
+    // 10. Older releases are never installed.
     latest = '8.0.0';
     run = await update('check');
     expect(
       run.status === 0 && run.output.includes('Not installing v8.0.0'),
       'downgrade not ignored',
     );
-    expect(selected() === commit['9.0.6'], 'downgraded');
+    expect(selected() === commit['9.0.8'], 'downgraded');
     passed('never downgrades');
 
     expect(
@@ -1032,6 +1230,7 @@ await import('./relay-start.ts');
     spawnSync('systemctl', ['disable', '--now', qa.hostService]);
     rmSync(hostUnit, { force: true });
     spawnSync('systemctl', ['reset-failed', qa.hostService]);
+    spawnSync('systemctl', ['stop', `${qa.service}-update-*`]);
     spawnSync('systemctl', ['stop', qa.service, trialService]);
     spawnSync('systemctl', ['reset-failed', trialService]);
     rmSync(secondStart, { force: true });
