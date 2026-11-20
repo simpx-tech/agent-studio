@@ -1294,6 +1294,7 @@ await import('./relay-start.ts');
     // its run while something holds it; retry waits, and changes the state only afterwards.
     const lockFile = join(qa.root, '.deploy.lock');
     const holder = spawn('flock', [lockFile, 'sleep', '9'], { stdio: 'ignore' });
+    const released = new Promise((done) => holder.on('close', done));
     await settle(1000);
     began = Date.now();
     run = await update('check');
@@ -1319,7 +1320,7 @@ await import('./relay-start.ts');
         Date.now() - began > 4000,
       `retry did not wait for the lock:\n${run.output}`,
     );
-    await new Promise((done) => holder.on('close', done));
+    await released;
     expect(
       !readdirSync(qa.state).some((name) => name.endsWith('.tmp') || name.endsWith('.partial')) &&
         existsSync(join(qa.state, 'state.json.previous')),
