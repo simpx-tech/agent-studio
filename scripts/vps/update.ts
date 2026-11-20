@@ -9,9 +9,11 @@
 // A release is installed only when its Windows installer carries a valid updater signature for
 // its own version from the trusted key, so only the signing release pipeline can deploy. The
 // source is built and tested by an unprivileged, sandboxed user without access to private data.
-// Activation waits for running replies (at most two hours), backs up private data, switches the
-// release and restarts only the relay. A failed health check restores the previous release and
-// data. The installer then replaces the public Windows download, keeping the previous package.
+// Activation waits for running replies (at most two hours), tries the release's relay on a copy
+// of the private data, backs the data up, switches the release and restarts only the relay. A
+// failed health check restores the previous release and data, and when that release no longer
+// starts either, the new one is started once more. The installer then replaces the public
+// Windows download, keeping the previous package.
 // A new server, prepared by setup.sh, starts its relay with the first release it activates.
 //
 // The server also runs the desktop app as a host for its workspace (requested 2026-10-10), so
@@ -25,17 +27,22 @@ import { spawnSync, type SpawnSyncOptions } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  chownSync,
   closeSync,
+  constants,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   renameSync,
   rmSync,
   rmdirSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -237,14 +244,39 @@ export function publicKeyId(key: string): string | undefined {
   return Buffer.from(raw.subarray(2, 10)).reverse().toString('hex').toUpperCase();
 }
 
-/** Replies still marked running in any workspace checkpoint the relay retains. */
-export function runningReplies(data: string): number {
+/** The folders that hold a workspace checkpoint: the owner's and each member workspace's. */
+function workspaceDirectories(data: string): string[] {
   const directories = [data];
   const workspaces = join(data, 'workspaces');
   if (existsSync(workspaces))
     for (const entry of readdirSync(workspaces, { withFileTypes: true }))
       if (entry.isDirectory() && /^[0-9a-f-]{36}$/.test(entry.name))
         directories.push(join(workspaces, entry.name));
+  return directories;
+}
+
+/** The size of the checkpoints a relay reads, whole, before it listens. */
+export function stateBytes(data: string): number {
+  let bytes = 0;
+  for (const directory of workspaceDirectories(data)) {
+    try {
+      bytes += statSync(join(directory, 'workspace.json')).size;
+    } catch {
+      // A workspace without a checkpoint yet.
+    }
+  }
+  return bytes;
+}
+
+/**
+ * Replies still marked running in any workspace checkpoint the relay retains. A reply whose
+ * computer stopped publishing stays marked for good, and the files do not tell it from one that
+ * runs: which computers are connected is known to the running relay alone, and a computer that
+ * lost its connection can still be running its reply. So such a reply holds an activation for
+ * the two hours a running one may, and no longer.
+ */
+export function runningReplies(data: string): number {
+  const directories = workspaceDirectories(data);
   type Chat = { messages?: { status?: unknown }[] };
   let count = 0;
   const running = (conversation: unknown) => {
@@ -286,6 +318,8 @@ export type Tracked = {
   previous?: string;
   backup?: string;
   activated?: string;
+  /** What an activation that did not go straight through had to do, kept for the operator. */
+  note?: string;
   /** Publication of the public Windows download. */
   download?: 'published' | 'failed' | 'unavailable';
   downloadAttempts?: number;
@@ -351,6 +385,19 @@ export type System = {
   /** Removes the current link again, after a new server's first release did not start. */
   deselect(): void;
   serviceActive(): boolean;
+  /** What systemd says of the relay's service, or of the trial's. */
+  unit(trial?: boolean): Unit;
+  /** The size of the saved state a relay reads before it listens. */
+  stateBytes(): number;
+  /** The last thing the relay, or the trial, logged since `since`: an error when it logged one. */
+  lastWords(since: Date, trial?: boolean): string | undefined;
+  /**
+   * Starts a release's relay on a copy of the private data, where no device and no network
+   * reaches it, as the service would run it.
+   */
+  startTrial(commit: string): void;
+  /** Ends the trial and removes its copy of the data. */
+  endTrial(): void;
   runningReplies(): number;
   stopService(): void;
   startService(): void;
@@ -358,8 +405,11 @@ export type System = {
   select(release: string): void;
   /** Replaces private data with a backup and returns where the replaced data was kept. */
   restore(backup: string, commit: string): string;
-  /** HTTP status of the relay's unauthenticated state request. */
-  probe(): Promise<number | undefined>;
+  /**
+   * HTTP status of the relay's unauthenticated state request, or of the trial's, waiting
+   * `probeTimeout` for it.
+   */
+  probe(trial?: boolean): Promise<number | undefined>;
   publishInstaller(commit: string, installer: Buffer): Promise<'published' | 'unavailable'>;
   prune(commit: string, backup?: string): void;
   /** GitHub's response for the release of a tag. */
@@ -733,17 +783,118 @@ async function stage(system: System, state: State, release: Tracked, save: () =>
     );
 }
 
-/** The relay answers an unauthenticated state request with 401 once it serves requests. */
-async function healthy(system: System): Promise<boolean> {
-  for (let attempt = 0; attempt < 30; attempt++) {
-    if ((await system.probe()) === 401) {
-      // Catch a release that exits shortly after starting.
-      await system.sleep(5000);
-      return system.serviceActive() && (await system.probe()) === 401;
-    }
+/** What systemd says of a relay's service and its main process. */
+export type Unit = {
+  /** systemd's ActiveState: active, activating, failed, inactive… */
+  state: string;
+  /** How often systemd started it again by itself. */
+  restarts: number;
+  pid: number;
+  /** The CPU time it used so far, in milliseconds, when that is known. */
+  cpu?: number;
+  /** How its last process ended, when it did not end well: `exit-code 1`, `oom-kill`. */
+  result?: string;
+};
+
+export type Health =
+  /** `listened`: how long the relay took to answer, in milliseconds. */
+  { ok: true; listened: number } | { ok: false; reason: string };
+
+// The health check waits on what the relay does, never on a clock alone. Until 2026-11-20 it
+// gave a relay 30 seconds to listen and one 3-second probe five seconds later. A relay reads its
+// whole state before it listens: 13 to 19 seconds for the owner's 537 MB, 46 seconds at a third
+// of a core's speed, and more than 30 on 2026-11-13, when the server was slow and v1.3.2 and
+// v1.3.3 were both rolled back while they were starting. Once up, its saves and whole reads
+// hold its event loop for 4 to 16 seconds, which a 3-second probe reads as a relay that is gone.
+
+/**
+ * How long a probe waits for its answer: about twice the longest a save was measured to keep a
+ * healthy relay from answering.
+ */
+export const probeTimeout = 30_000;
+/** A relay that answers must go on answering: this many answers, this far apart. */
+const answersNeeded = 6;
+const answerEvery = 5000;
+/** A relay that answered is gone when it answers nothing for this long, two probes' worth. */
+const silenceLimit = 2 * probeTimeout;
+/**
+ * A relay reading its state uses the CPU all the while (a third of a core even when held to
+ * that), so one that has not listened and used less than a second of it in two minutes waits
+ * for something that will not come.
+ */
+const idleLimit = 2 * 60_000;
+const worked = 1000;
+/**
+ * The longest a relay that keeps working is given to listen, so that one that works without
+ * ever listening ends somewhere too: five minutes and a second for each megabyte of state it
+ * reads, thirty times what the owner's state took and ten times what it took on 2026-11-13.
+ */
+export const startLimit = (bytes: number) => 5 * 60_000 + Math.ceil(bytes / 1_000_000) * 1000;
+
+/** What ended a relay since `started` was read, or undefined while the same process runs. */
+function ended(started: Unit, unit: Unit): string | undefined {
+  const how = unit.result ? ` (${unit.result})` : '';
+  if (unit.state === 'failed') return `ended${how} and its service failed`;
+  if (unit.state !== 'active' && unit.state !== 'activating')
+    return `ended${how}, its service now ${unit.state}`;
+  if (unit.restarts !== started.restarts || unit.pid !== started.pid)
+    return `ended${how} and its service started it again`;
+  return undefined;
+}
+
+const seconds = (ms: number) => `${Math.round(ms / 1000)} s`;
+
+/**
+ * Whether the relay just started serves requests and goes on serving them: it answers an
+ * unauthenticated state request with 401. The answer is waited for as long as the relay's own
+ * process runs and works, and a relay that ended is known at once from its service, so a crash
+ * loop fails within seconds. `reason` says what the relay did, after "its relay".
+ */
+export async function healthy(system: System, trial = false): Promise<Health> {
+  const began = system.now();
+  const since = (from: Date | number) => system.now().getTime() - new Date(from).getTime();
+  const fail = (reason: string): Health => {
+    const said = system.lastWords(began, trial);
+    return { ok: false, reason: said ? `${reason}; it last logged: ${said}` : reason };
+  };
+  const started = system.unit(trial);
+  const bytes = system.stateBytes();
+  const limit = startLimit(bytes);
+  let work = { cpu: started.cpu, at: began.getTime() };
+  for (;;) {
+    if ((await system.probe(trial)) === 401) break;
+    const unit = system.unit(trial);
+    const gone = ended(started, unit);
+    if (gone) return fail(`${gone} before it listened`);
+    if (unit.cpu === undefined || work.cpu === undefined || unit.cpu - work.cpu >= worked)
+      work = { cpu: unit.cpu, at: system.now().getTime() };
+    else if (since(work.at) >= idleLimit)
+      return fail(
+        `ran for ${seconds(since(began))} without listening, the last ${seconds(since(work.at))} without working`,
+      );
+    if (since(began) >= limit)
+      return fail(
+        `did not listen within ${seconds(limit)}, the longest a state of ${Math.ceil(bytes / 1_000_000)} MB is given`,
+      );
     await system.sleep(1000);
   }
-  return false;
+  const listened = since(began);
+  let answers = 1;
+  let answered = system.now().getTime();
+  while (answers < answersNeeded) {
+    await system.sleep(answerEvery);
+    const status = await system.probe(trial);
+    const gone = ended(started, system.unit(trial));
+    if (gone) return fail(`listened after ${seconds(listened)} and then ${gone}`);
+    if (status === 401) {
+      answers++;
+      answered = system.now().getTime();
+    } else if (since(answered) >= silenceLimit)
+      return fail(
+        `listened after ${seconds(listened)} and then answered nothing for ${seconds(since(answered))}`,
+      );
+  }
+  return { ok: true, listened };
 }
 
 async function activate(
@@ -770,6 +921,7 @@ async function activate(
     release.phase = 'active';
     release.activated = activated;
     delete release.waiting;
+    delete release.error;
     state.history.unshift({
       tag: release.tag,
       commit: release.commit,
@@ -814,6 +966,29 @@ async function activate(
         `Waiting up to two hours before activating ${release.tag}: ${replies} running.`,
       );
     if (running) system.log(`Activating ${release.tag} although ${replies} still marked running.`);
+
+    // The switch stops the relay every device uses, and going back is not always possible: on
+    // 2026-11-20 the release in production could no longer read its own data, which had
+    // outgrown it while it ran. So the new relay first shows, on a copy, that it reads this
+    // data and serves; one that does not is refused while the old one runs on, untouched.
+    system.log(`Trying ${release.tag} on a copy of the private data.`);
+    let trial: Health;
+    try {
+      system.startTrial(release.commit);
+      trial = await healthy(system, true);
+    } catch (error) {
+      trial = { ok: false, reason: `could not be tried: ${message(error)}` };
+    }
+    try {
+      system.endTrial();
+    } catch (error) {
+      system.log(`Could not remove the trial of ${release.tag}: ${message(error)}`);
+    }
+    if (!trial.ok)
+      return fail(
+        `${release.tag} was not activated: on a copy of the private data its relay ${trial.reason}. ${current} runs on and nothing changed.`,
+      );
+    system.log(`${release.tag} read the copy and listened after ${seconds(trial.listened)}.`);
   }
 
   system.stopService();
@@ -829,15 +1004,19 @@ async function activate(
   if (current) release.previous = current;
   release.backup = backup;
   save();
-  let ok = false;
-  try {
-    system.select(release.commit);
-    system.startService();
-    ok = await healthy(system);
-  } catch (error) {
-    system.log(`Activating ${release.tag} failed: ${message(error)}`);
-  }
-  if (ok) {
+  // Selects a release and waits for its relay; a step that fails is the relay's reason too.
+  const start = async (commit: string, before?: () => void): Promise<Health> => {
+    try {
+      before?.();
+      system.select(commit);
+      system.startService();
+      return await healthy(system);
+    } catch (error) {
+      return { ok: false, reason: `could not be started: ${message(error)}` };
+    }
+  };
+  const health = await start(release.commit);
+  if (health.ok) {
     complete(backup);
     system.log(
       current
@@ -857,26 +1036,39 @@ async function activate(
       system.log(`Stopping ${release.tag} failed: ${message(error)}`);
     }
     return fail(
-      `${release.tag} failed its health check, so the relay stays stopped.${kept ? ` Data it wrote is kept in ${kept}.` : ''}`,
+      `${release.tag} failed its health check, so the relay stays stopped.${kept ? ` Data it wrote is kept in ${kept}.` : ''} Its relay ${health.reason}.`,
     );
   }
 
-  system.log(`${release.tag} failed its health check; restoring ${current} and its data.`);
+  system.log(
+    `${release.tag} failed its health check: its relay ${health.reason}. Restoring ${current} and its data.`,
+  );
   let kept = '';
-  let restored = false;
-  try {
+  const back = await start(current, () => {
     system.stopService();
     kept = system.restore(backup, release.commit);
-    system.select(current);
-    system.startService();
-    restored = await healthy(system);
-  } catch (error) {
-    system.log(`Rollback failed: ${message(error)}`);
+  });
+  const wrote = kept ? ` Data the failed release wrote is kept in ${kept}.` : '';
+  if (back.ok)
+    return fail(
+      `${release.tag} failed its health check; ${current} was restored.${wrote} Its relay ${health.reason}.`,
+    );
+
+  // The release that ran no longer starts, as one whose data outgrew it while it ran does not.
+  // The new one read this data in its trial, so rather than leave the relay down it is started
+  // once more, on the data as it was before the switch.
+  system.log(
+    `${current} did not come back: its relay ${back.reason}. Starting ${release.tag} once more${kept ? ' on the restored data' : ''}.`,
+  );
+  const again = await start(release.commit, () => system.stopService());
+  if (again.ok) {
+    release.note = `${release.tag} failed its first health check (its relay ${health.reason}) and ${current} did not start again (its relay ${back.reason}), so ${release.tag} was started once more and serves. ${current} can no longer be gone back to.${wrote}`;
+    complete(backup);
+    system.log(release.note);
+    return;
   }
   fail(
-    restored
-      ? `${release.tag} failed its health check; ${current} was restored. Data the failed release wrote is kept in ${kept}.`
-      : `${release.tag} failed its health check, and restoring ${current} did not bring the relay back. Intervene manually; the data backup is ${backup}.`,
+    `${release.tag} failed its health check, restoring ${current} did not bring the relay back, and ${release.tag} did not start a second time: the relay is down. Intervene manually; ${release.tag} stays selected and the data backup is ${backup}.${wrote} ${release.tag}: its relay ${health.reason}. ${current}: its relay ${back.reason}. ${release.tag} again: its relay ${again.reason}.`,
   );
 }
 
@@ -910,7 +1102,7 @@ export function retry(state: State): string {
   if (release?.phase === 'failed') {
     release.phase = 'pending';
     release.attempts = 0;
-    for (const field of ['retryAt', 'waiting', 'error'] as const) delete release[field];
+    for (const field of ['retryAt', 'waiting', 'error', 'note'] as const) delete release[field];
     return `${release.tag} will be tried again at the next check.`;
   }
   if (release?.phase === 'active' && release.download === 'failed') {
@@ -1104,6 +1296,48 @@ export function createSystem(config: Config): System {
     chmodSync(staging, mode);
     return staging;
   };
+  // What systemd reports of a unit, by property; a property given several times keeps its last.
+  const show = (unit: string, properties: string[]) => {
+    const result = spawnSync(
+      'systemctl',
+      ['show', unit, ...properties.map((property) => `--property=${property}`)],
+      { encoding: 'utf8' },
+    );
+    const values: Record<string, string> = {};
+    for (const line of (result.stdout ?? '').split('\n')) {
+      const at = line.indexOf('=');
+      if (at > 0) values[line.slice(0, at)] = line.slice(at + 1);
+    }
+    return values;
+  };
+  // The trial of a release: its relay as a unit of its own, on a copy of the data beside it.
+  const trialUnit = `${config.service}-trial`;
+  const trialData = join(dirname(config.data), `.${basename(config.data)}-trial`);
+  // Copies a folder with its owners and modes while the relay may be writing in it: the relay
+  // replaces its files by renaming, so a file is whole or, when it left meanwhile, skipped.
+  const copyTree = (from: string, to: string, skip: string[] = []) => {
+    const folder = lstatSync(from);
+    mkdirSync(to, { mode: 0o700 });
+    for (const entry of readdirSync(from, { withFileTypes: true })) {
+      if (skip.includes(entry.name)) continue;
+      const source = join(from, entry.name);
+      const target = join(to, entry.name);
+      try {
+        if (entry.isDirectory()) copyTree(source, target);
+        else if (entry.isSymbolicLink()) symlinkSync(readlinkSync(source), target);
+        else if (entry.isFile()) {
+          const file = lstatSync(source);
+          copyFileSync(source, target, constants.COPYFILE_FICLONE);
+          chownSync(target, file.uid, file.gid);
+          chmodSync(target, file.mode & 0o7777);
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      }
+    }
+    chownSync(to, folder.uid, folder.gid);
+    chmodSync(to, folder.mode & 0o7777);
+  };
   // How often the host's service restarted the host on its own, as of the updater's restart.
   let hostRestarts: string | undefined;
   const restartsOf = (service: string) =>
@@ -1218,6 +1452,10 @@ export function createSystem(config: Config): System {
       const text = (path: string) => readFileSync(path, 'utf8').replace(/\r\n/g, '\n');
       return [
         [join(releases, commit, 'scripts', 'vps', 'update.ts'), join(installed, 'update.ts')],
+        [
+          join(releases, commit, 'scripts', 'vps', 'state-file.ts'),
+          join(installed, 'state-file.ts'),
+        ],
         [join(releases, commit, 'scripts', 'release.ts'), join(dirname(installed), 'release.ts')],
       ].some(([candidate, running]) => {
         try {
@@ -1241,6 +1479,118 @@ export function createSystem(config: Config): System {
     },
     serviceActive: () =>
       spawnSync('systemctl', ['is-active', '--quiet', config.service]).status === 0,
+    unit(trial) {
+      const values = show(trial ? trialUnit : config.service, [
+        'ActiveState',
+        'NRestarts',
+        'MainPID',
+        'CPUUsageNSec',
+        'Result',
+        'ExecMainStatus',
+      ]);
+      const pid = Number(values.MainPID) || 0;
+      // Without CPU accounting systemd reports no number, or the largest there is.
+      let cpu = /^\d{1,18}$/.test(values.CPUUsageNSec ?? '')
+        ? Number(values.CPUUsageNSec) / 1e6
+        : undefined;
+      if (cpu === undefined && pid) {
+        try {
+          // The process's own user and system time, in the kernel's hundredths of a second.
+          const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+          const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+          cpu = (Number(fields[11]) + Number(fields[12])) * 10;
+          if (!Number.isFinite(cpu)) cpu = undefined;
+        } catch {
+          // It ended meanwhile.
+        }
+      }
+      const status = Number(values.ExecMainStatus) || 0;
+      const result = values.Result && values.Result !== 'success' ? values.Result : '';
+      return {
+        state: values.ActiveState || 'unknown',
+        restarts: Number(values.NRestarts) || 0,
+        pid,
+        ...(cpu === undefined ? {} : { cpu }),
+        ...(result ? { result: `${result}${status ? ` ${status}` : ''}` } : {}),
+      };
+    },
+    stateBytes: () => stateBytes(config.data),
+    lastWords(since, trial) {
+      const result = spawnSync(
+        'journalctl',
+        [
+          `--unit=${trial ? trialUnit : config.service}`,
+          `--since=@${Math.floor(since.getTime() / 1000)}`,
+          '--lines=80',
+          '--output=cat',
+          '--no-pager',
+          '--quiet',
+        ],
+        { encoding: 'utf8' },
+      );
+      const lines = (result.stdout ?? '')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean);
+      return (lines.findLast((line) => /error/i.test(line)) ?? lines.at(-1))?.slice(0, 300);
+    },
+    startTrial(commit) {
+      const release = join(releases, commit);
+      if (!/^[\w.-]+$/.test(commit) || !lstatSync(release).isDirectory())
+        throw new Error(`${commit} is not a release directory.`);
+      system.endTrial();
+      // The npm cache earlier manual builds left there is not private data.
+      copyTree(config.data, trialData, ['.npm']);
+      // As the service runs the relay: its user, its pairing configuration and its settings,
+      // but for where it listens and what it reads. It has no network but a loopback of its own
+      // (a relay delivers the phone alerts its data holds queued, and no device may reach this
+      // one), and cannot see the data itself.
+      const service = show(config.service, ['User', 'Group', 'Environment']);
+      const listed = ['show', config.service, '--property=EnvironmentFiles'];
+      const files = spawnSync('systemctl', listed, { encoding: 'utf8' });
+      const environmentFiles = (files.stdout ?? '')
+        .split('\n')
+        .map((line) => /^EnvironmentFiles=(\/\S+) \(ignore_errors=(yes|no)\)$/.exec(line))
+        .filter((match) => match !== null)
+        .map((match) => `${match[2] === 'yes' ? '-' : ''}${match[1]}`);
+      const environment = (service.Environment ?? '')
+        .split(' ')
+        .filter((entry) => /^[A-Za-z_]\w*=\S*$/.test(entry) && !entry.startsWith('AGENT_STUDIO_'));
+      const hidden = [config.data, config.backups, config.stateDirectory];
+      run('systemd-run', [
+        '--quiet',
+        `--unit=${trialUnit}`,
+        '--service-type=exec',
+        ...(service.User ? [`--uid=${service.User}`] : []),
+        ...(service.Group ? [`--gid=${service.Group}`] : []),
+        `--working-directory=${release}`,
+        ...environment.map((entry) => `--setenv=${entry}`),
+        '--setenv=AGENT_STUDIO_RELAY_HOST=127.0.0.1',
+        `--setenv=AGENT_STUDIO_RELAY_PORT=${config.port}`,
+        `--setenv=AGENT_STUDIO_RELAY_DATA=${trialData}`,
+        `--setenv=AGENT_STUDIO_WEB_DIR=${join(release, 'build')}`,
+        ...[
+          ...environmentFiles.map((file) => `EnvironmentFile=${file}`),
+          'PrivateNetwork=yes',
+          'ProtectSystem=strict',
+          `ReadWritePaths=${trialData}`,
+          `InaccessiblePaths=${hidden.map((path) => `-${path}`).join(' ')}`,
+          'ProtectHome=yes',
+          'PrivateTmp=yes',
+          'NoNewPrivileges=yes',
+          'UMask=0077',
+          'TasksMax=infinity',
+        ].map((property) => `--property=${property}`),
+        '--',
+        process.execPath,
+        'relay/start.ts',
+      ]);
+    },
+    endTrial() {
+      spawnSync('systemctl', ['stop', trialUnit], { stdio: 'ignore' });
+      spawnSync('systemctl', ['reset-failed', trialUnit], { stdio: 'ignore' });
+      rmSync(trialData, { recursive: true, force: true });
+    },
     runningReplies: () => runningReplies(config.data),
     stopService() {
       run('systemctl', ['stop', config.service]);
@@ -1281,11 +1631,23 @@ export function createSystem(config: Config): System {
       rmdirSync(staging);
       return kept;
     },
-    async probe() {
+    async probe(trial) {
+      const url = `http://127.0.0.1:${config.port}/v1/state`;
+      if (trial) {
+        // The trial listens on a loopback of its own, which is reached from its process.
+        const { pid } = system.unit(true);
+        if (!pid) return undefined;
+        const ask = `fetch(${JSON.stringify(url)}, { signal: AbortSignal.timeout(${probeTimeout}) }).then((response) => { console.log(response.status); process.exit(0); }, () => process.exit(0));`;
+        const result = spawnSync(
+          'nsenter',
+          [`--net=/proc/${pid}/ns/net`, '--', process.execPath, '--eval', ask],
+          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: probeTimeout + 10_000 },
+        );
+        const status = Number((result.stdout ?? '').trim());
+        return Number.isInteger(status) && status > 0 ? status : undefined;
+      }
       try {
-        const response = await fetch(`http://127.0.0.1:${config.port}/v1/state`, {
-          signal: AbortSignal.timeout(3000),
-        });
+        const response = await fetch(url, { signal: AbortSignal.timeout(probeTimeout) });
         await response.body?.cancel();
         return response.status;
       } catch {

@@ -10,6 +10,7 @@ import {
   check,
   appImageName,
   emptyState,
+  healthy,
   hostUnit,
   installerName,
   parseRelease,
@@ -18,8 +19,11 @@ import {
   readConfig,
   retry,
   runningReplies,
+  startLimit,
+  stateBytes,
   type State,
   type System,
+  type Unit,
 } from '../../scripts/vps/update.ts';
 
 const temporary: string[] = [];
@@ -84,8 +88,40 @@ function githubRelease(version: string, data = installer, linux = false) {
   };
 }
 
+/** What a started relay does, by the time since its start in milliseconds. */
+type Behaviour = {
+  /** It ends at once, each time its service starts it. */
+  crash?: boolean;
+  /** When it begins to answer; never when infinite. */
+  listens?: number;
+  /** It uses no CPU time while it runs. */
+  idle?: boolean;
+  /** Each answer takes this long. */
+  stall?: number;
+  /** From then on it answers nothing. */
+  mute?: number;
+  /** It ends then. */
+  dies?: number;
+};
+
 function fake() {
   let clock = Date.parse('2026-09-23T12:00:00Z');
+  // The relay and the trial: which release each runs and since when.
+  const live = { release: undefined as string | undefined, since: clock };
+  const tried = { release: undefined as string | undefined, since: clock };
+  const starts = new Map<string, number>();
+  const behaviour = (trial?: boolean): Behaviour => {
+    const release = trial ? tried.release : live.release;
+    if (!trial && !env.healthy(release)) return { crash: true };
+    return env.relay(release, !!trial, starts.get(release ?? '') ?? 0);
+  };
+  const age = (trial?: boolean) => clock - (trial ? tried : live).since;
+  const gone = (trial?: boolean) => {
+    const relay = behaviour(trial);
+    return (
+      (relay.crash && age(trial) > 0) || (relay.dies !== undefined && age(trial) >= relay.dies)
+    );
+  };
   const calls: string[] = [];
   const logs: string[] = [];
   const env = {
@@ -101,6 +137,11 @@ function fake() {
     active: true,
     running: 0,
     healthy: (_release?: string) => true,
+    /** What a release's relay does: in its trial, or on its nth start as the service. */
+    relay: (_release: string | undefined, _trial: boolean, _start: number): Behaviour => ({}),
+    stateBytes: 0,
+    lastWords: undefined as string | undefined,
+    trialError: undefined as Error | undefined,
     buildError: undefined as Error | undefined,
     publishError: undefined as Error | undefined,
     releaseKeys: {} as Record<string, string>,
@@ -154,6 +195,32 @@ function fake() {
       env.current = undefined;
     },
     serviceActive: () => env.active,
+    unit: (trial): Unit => {
+      if (trial ? !tried.release : !env.active) return { state: 'inactive', restarts: 0, pid: 0 };
+      // The trial's unit has nothing start it again.
+      if (gone(trial))
+        return trial
+          ? { state: 'failed', restarts: 0, pid: 0, result: 'exit-code 1' }
+          : { state: 'activating', restarts: 1, pid: 0, result: 'exit-code 1' };
+      return {
+        state: 'active',
+        restarts: 0,
+        pid: 100,
+        cpu: behaviour(trial).idle ? 0 : age(trial),
+      };
+    },
+    stateBytes: () => env.stateBytes,
+    lastWords: () => env.lastWords,
+    startTrial: (commit) => {
+      calls.push(`trial ${commit}`);
+      if (env.trialError) throw env.trialError;
+      tried.release = commit;
+      tried.since = clock;
+    },
+    endTrial: () => {
+      calls.push('end trial');
+      tried.release = undefined;
+    },
     runningReplies: () => env.running,
     stopService: () => {
       calls.push('stop');
@@ -162,6 +229,9 @@ function fake() {
     startService: () => {
       calls.push('start');
       env.active = true;
+      live.release = env.current;
+      live.since = clock;
+      if (env.current) starts.set(env.current, (starts.get(env.current) ?? 0) + 1);
     },
     backup: (commit) => {
       calls.push(`backup ${commit}`);
@@ -175,7 +245,18 @@ function fake() {
       calls.push(`restore ${backup}`);
       return `/var/lib/.agent-studio-failed-${commit.slice(0, 12)}`;
     },
-    probe: async () => (env.active && env.healthy(env.current) ? 401 : undefined),
+    probe: async (trial) => {
+      if (trial ? !tried.release : !env.active) return undefined;
+      const relay = behaviour(trial);
+      if (relay.crash || gone(trial) || age(trial) < (relay.listens ?? 0)) return undefined;
+      if (relay.mute !== undefined && age(trial) >= relay.mute) {
+        // A probe waits its 30 seconds for an answer that does not come.
+        clock += 30_000;
+        return undefined;
+      }
+      clock += relay.stall ?? 0;
+      return 401;
+    },
     publishInstaller: async (commit, data) => {
       calls.push(`publish ${commit} ${data.length}`);
       if (env.publishError) throw env.publishError;
@@ -264,6 +345,7 @@ function fake() {
     advance: (ms: number) => {
       clock += ms;
     },
+    now: () => clock,
     run: (options: Partial<typeof config> = {}) => check(system, { ...config, ...options }),
   };
 }
@@ -360,6 +442,11 @@ describe('running replies', () => {
     writeFileSync(join(data, 'workspaces', 'notes', 'workspace.json'), workspace(['running']));
     expect(runningReplies(data)).toBe(2);
     expect(runningReplies(join(data, 'missing'))).toBe(0);
+    // What a relay reads before it listens: the checkpoints of the same folders.
+    expect(stateBytes(data)).toBe(
+      workspace(['done', 'running']).length + workspace(['running', 'failed']).length,
+    );
+    expect(stateBytes(join(data, 'missing'))).toBe(0);
     // However the file is laid out, and with text that looks like what is counted.
     const state = {
       instanceId: 'relay',
@@ -399,6 +486,8 @@ describe('automatic updates', () => {
       'download Agent-Studio_0.2.1_x64-setup.exe',
       'download Agent-Studio_0.2.1_x64-setup.exe.sig',
       `build ${B}`,
+      `trial ${B}`,
+      'end trial',
       'stop',
       `backup ${B}`,
       `select ${B}`,
@@ -522,6 +611,168 @@ describe('automatic updates', () => {
     broken.publish('0.2.1', B);
     broken.env.healthy = () => false;
     await expect(broken.run()).rejects.toThrow(/Intervene manually/);
+  });
+
+  it('waits for a relay that takes long to listen while it works', async () => {
+    // What failed v1.3.2 and v1.3.3 on 2026-11-13: more than 30 seconds to read the state.
+    const f = fake();
+    f.publish('0.2.1', B);
+    f.env.relay = () => ({ listens: 45_000 });
+    await f.run();
+    expect(f.env.state.release).toMatchObject({ phase: 'active' });
+    expect(f.env.current).toBe(B);
+    expect(f.logs).toContain('v0.2.1 read the copy and listened after 45 s.');
+
+    // Ten minutes for a state of 537 MB, which is given five and a second for each megabyte.
+    const large = fake();
+    large.publish('0.2.1', B);
+    large.env.stateBytes = 537_000_000;
+    large.env.relay = () => ({ listens: 10 * 60_000 });
+    await large.run();
+    expect(large.env.state.release).toMatchObject({ phase: 'active' });
+    expect(startLimit(537_000_000)).toBe((5 * 60 + 537) * 1000);
+  });
+
+  it('accepts a relay whose answers take as long as its saves hold it', async () => {
+    const f = fake();
+    f.publish('0.2.1', B);
+    f.env.relay = () => ({ stall: 16_000 });
+    await f.run();
+    expect(f.env.state.release).toMatchObject({ phase: 'active' });
+  });
+
+  it('refuses a release whose relay cannot read a copy of the data, leaving the relay alone', async () => {
+    const f = fake();
+    f.publish('0.2.1', B);
+    f.env.relay = (release) => (release === B ? { crash: true } : {});
+    f.env.lastWords = 'Error: Relay data is unreadable; preserved without overwriting.';
+    const began = f.now();
+    await expect(f.run()).rejects.toThrow(
+      `v0.2.1 was not activated: on a copy of the private data its relay ended (exit-code 1) and its service failed before it listened; it last logged: Error: Relay data is unreadable; preserved without overwriting.. ${A} runs on and nothing changed.`,
+    );
+    // Known from the service at the next look, not after a wait.
+    expect(f.now() - began).toBeLessThan(5000);
+    expect(f.calls.slice(f.calls.indexOf(`trial ${B}`))).toEqual([`trial ${B}`, 'end trial']);
+    expect(f.env.active).toBe(true);
+    expect(f.env.current).toBe(A);
+    expect(f.env.state.release).toMatchObject({ phase: 'failed' });
+    f.calls.length = 0;
+    await f.run();
+    expect(f.calls).toEqual([]);
+
+    const full = fake();
+    full.publish('0.2.1', B);
+    full.env.trialError = new Error('ENOSPC: no space left on device');
+    await expect(full.run()).rejects.toThrow(
+      'its relay could not be tried: ENOSPC: no space left on device',
+    );
+    expect(full.calls).not.toContain('stop');
+    expect(full.calls.at(-1)).toBe('end trial');
+  });
+
+  it('fails a crash loop within seconds and goes back', async () => {
+    const f = fake();
+    f.publish('0.2.1', B);
+    // It reads the copy and ends each time its service starts it.
+    f.env.relay = (release, trial) => (release === B && !trial ? { crash: true } : {});
+    const began = f.now();
+    await expect(f.run()).rejects.toThrow(
+      `v0.2.1 failed its health check; ${A} was restored. Data the failed release wrote is kept in /var/lib/.agent-studio-failed-${B.slice(0, 12)}. Its relay ended (exit-code 1) and its service started it again before it listened.`,
+    );
+    // Two relays shown to answer for 25 seconds each, and no wait for the one that ended.
+    expect(f.now() - began).toBeLessThan(60_000);
+    expect(f.env.current).toBe(A);
+    expect(f.env.active).toBe(true);
+  });
+
+  it('ends the wait for a relay that stopped working, works without end or goes silent', async () => {
+    const tried = async (relay: Behaviour, stateBytes = 0) => {
+      const f = fake();
+      f.publish('0.2.1', B);
+      f.env.stateBytes = stateBytes;
+      f.env.relay = (release) => (release === B ? relay : {});
+      const began = f.now();
+      const error = await f.run().then(
+        () => undefined,
+        (reason: Error) => reason.message,
+      );
+      expect(f.calls).not.toContain('stop');
+      return { error, took: f.now() - began };
+    };
+    const idle = await tried({ listens: Infinity, idle: true });
+    expect(idle.error).toContain(
+      'its relay ran for 120 s without listening, the last 120 s without working.',
+    );
+    const busy = await tried({ listens: Infinity }, 100_000_000);
+    expect(busy.error).toContain(
+      'its relay did not listen within 400 s, the longest a state of 100 MB is given.',
+    );
+    expect(busy.took).toBeLessThan(402_000);
+    const died = await tried({ dies: 12_000 });
+    expect(died.error).toContain(
+      'its relay listened after 0 s and then ended (exit-code 1) and its service failed.',
+    );
+    const silent = await tried({ mute: 7000 });
+    expect(silent.error).toContain(
+      'its relay listened after 0 s and then answered nothing for 70 s.',
+    );
+    // One answer that does not come is a save, not the end.
+    const f = fake();
+    let asked = 0;
+    const probe = f.system.probe;
+    f.system.probe = async (trial) => (++asked === 3 ? undefined : probe(trial));
+    f.env.current = A;
+    f.system.startService();
+    expect(await healthy(f.system)).toEqual({ ok: true, listened: 0 });
+  });
+
+  it('starts the new release once more when the one before it no longer starts', async () => {
+    // Production on 2026-11-20: the data had outgrown what the running release could read.
+    const f = fake();
+    f.publish('0.2.1', B);
+    f.env.relay = (release, trial, start) =>
+      trial ? {} : release === A || start === 1 ? { crash: true } : {};
+    f.env.lastWords = 'Error: Relay data is unreadable';
+    await f.run();
+    expect(f.calls.slice(f.calls.indexOf('stop'))).toEqual([
+      'stop',
+      `backup ${B}`,
+      `select ${B}`,
+      'start',
+      'stop',
+      `restore /var/backups/agent-studio/pre-${B}.tar.gz`,
+      `select ${A}`,
+      'start',
+      'stop',
+      `select ${B}`,
+      'start',
+      `publish ${B} ${installer.length}`,
+      `discard ${B}`,
+    ]);
+    expect(f.env.current).toBe(B);
+    expect(f.env.active).toBe(true);
+    expect(f.env.state.release).toMatchObject({ phase: 'active', previous: A });
+    expect(f.env.state.release?.error).toBeUndefined();
+    expect(f.env.state.release?.note).toMatch(
+      new RegExp(
+        `^v0\\.2\\.1 failed its first health check \\(its relay ended .*\\) and ${A} did not start again \\(its relay ended .*\\), so v0\\.2\\.1 was started once more and serves\\. ${A} can no longer be gone back to\\. Data the failed release wrote is kept in `,
+      ),
+    );
+    expect(f.logs).toContain(f.env.state.release?.note);
+    expect(f.env.state.history).toEqual([expect.objectContaining({ commit: B })]);
+  });
+
+  it('says what each relay did when neither release starts', async () => {
+    const f = fake();
+    f.publish('0.2.1', B);
+    f.env.relay = (release, trial) =>
+      trial ? {} : release === A ? { crash: true } : { listens: Infinity, idle: true };
+    await expect(f.run()).rejects.toThrow(
+      `v0.2.1 failed its health check, restoring ${A} did not bring the relay back, and v0.2.1 did not start a second time: the relay is down. Intervene manually; v0.2.1 stays selected and the data backup is /var/backups/agent-studio/pre-${B}.tar.gz. Data the failed release wrote is kept in /var/lib/.agent-studio-failed-${B.slice(0, 12)}. v0.2.1: its relay ran for 120 s without listening, the last 120 s without working. ${A}: its relay ended (exit-code 1) and its service started it again before it listened. v0.2.1 again: its relay ran for 120 s without listening, the last 120 s without working.`,
+    );
+    expect(f.env.current).toBe(B);
+    expect(f.env.state.release).toMatchObject({ phase: 'failed' });
+    expect(f.env.state.history).toEqual([]);
   });
 
   it('starts a new server’s relay with its first release', async () => {
@@ -672,10 +923,12 @@ describe('automatic updates', () => {
 });
 
 describe('server host', () => {
-  const relayCalls = (commit: string) => [
+  const relayCalls = (commit: string, first = false) => [
     'download Agent-Studio_0.9.0_x64-setup.exe',
     'download Agent-Studio_0.9.0_x64-setup.exe.sig',
     `build ${commit}`,
+    // A new server has no relay to protect and nothing to try a release on.
+    ...(first ? [] : [`trial ${commit}`, 'end trial']),
     'stop',
     `backup ${commit}`,
     `select ${commit}`,
@@ -718,7 +971,7 @@ describe('server host', () => {
     f.publish('0.9.0', B, { linux: true });
     await f.run({ host });
     expect(f.calls).toEqual([
-      ...relayCalls(B),
+      ...relayCalls(B, true),
       'write host key',
       'download Agent-Studio_0.9.0_amd64.AppImage',
       'download Agent-Studio_0.9.0_amd64.AppImage.sig',
