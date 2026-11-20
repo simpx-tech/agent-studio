@@ -101,7 +101,10 @@
   bind:this={dialog}
   class="image-preview"
   aria-label="Image preview"
-  onclose={() => (preview = undefined)}
+  onclose={() => {
+    // The event arrives after the dialog closed, so a preview opened meanwhile keeps its image.
+    if (!dialog?.open) preview = undefined;
+  }}
   {@attach closeOnBackdrop}
 >
   {#if preview}

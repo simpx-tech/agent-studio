@@ -39,9 +39,15 @@
   });
 
   // The dialog exists only while it shows a file, and goes with the file's reply.
+  // Opening a file again shows a dialog that closed and has not reported it yet (below).
   $effect(() => {
+    void viewer.opened;
     if (dialog && open && !dialog.open) dialog.showModal();
   });
+  // A dialog's close event arrives after the dialog closed, so one shown again meanwhile stays.
+  function closed() {
+    if (!dialog?.open) viewer.close();
+  }
   $effect(() => () => viewer.close());
   // A model, a comparison's models and a video give way in the chat while the viewer shows them.
   const shown = $derived(file && file.kind !== 'image' ? file.shown : undefined);
@@ -98,7 +104,7 @@
     class="file-viewer"
     aria-label={previews[kind]}
     tabindex="-1"
-    onclose={() => viewer.close()}
+    onclose={closed}
     {@attach closeOnScrim}
   >
     <div class="file-viewer-body" data-scrim>

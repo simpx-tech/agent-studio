@@ -54,6 +54,12 @@ export class FileViewer {
   readonly #files = new SvelteMap<Element, () => ViewedFile>();
   /** Where the shown file stands in the chat, while the viewer is open. */
   current = $state<Element>();
+  /**
+   * How often a file was asked for. A dialog reports that it closed a moment after it did (40 ms
+   * in WebView2 158), so a file opened in between finds the last one still current, and only
+   * this count tells the viewer to show its dialog again.
+   */
+  opened = $state(0);
 
   /**
    * An attachment registering the file `describe` returns where its element stands; the element
@@ -83,6 +89,7 @@ export class FileViewer {
     for (let element: Element | null = from; element; element = element.parentElement)
       if (this.#files.has(element)) {
         this.current = element;
+        this.opened++;
         return;
       }
   }
