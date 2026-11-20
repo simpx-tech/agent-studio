@@ -263,7 +263,8 @@ done
 say 'Installing the latest release (this takes a while)'
 journalctl --unit agent-studio-update.service --follow --output cat --since "$since" &
 follower=$!
-systemctl start agent-studio-update.service || true
+# The unit says that it started as soon as it runs, so the end of this run is waited for.
+systemctl start --wait agent-studio-update.service || true
 sleep 2
 kill "$follower" 2>/dev/null || true
 wait "$follower" 2>/dev/null || true

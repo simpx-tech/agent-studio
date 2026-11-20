@@ -6,6 +6,9 @@
 //   node update.ts retry                              Try a failed release again.
 //   node update.ts trust <tauri.conf.json> [--replace] Store the trusted updater key.
 //
+// Each of them holds the deployment lock (<root>/.deploy.lock) while it runs: a check skips its
+// run while something else holds it, and retry and trust wait for it.
+//
 // A release is installed only when its Windows installer carries a valid updater signature for
 // its own version from the trusted key, so only the signing release pipeline can deploy. The
 // source is built and tested by an unprivileged, sandboxed user without access to private data.
@@ -13,8 +16,10 @@
 // of the private data, backs the data up, switches the release and restarts only the relay. A
 // failed health check restores the previous release and data, and when that release no longer
 // starts either, the new one is started once more. Each step is written to the state before it
-// is taken, so an updater that was killed goes on from it at the next check. The installer then
-// replaces the public Windows download, keeping the previous package.
+// is taken, so an updater that was killed goes on from it at the next check. The state, a backup
+// and each replacement of the data are flushed to the disk in the order a recovery needs, and a
+// backup is restored only when it is the archive that was made. The installer then replaces the
+// public Windows download, keeping the previous package.
 // A new server, prepared by setup.sh, starts its relay with the first release it activates.
 //
 // The server also runs the desktop app as a host for its workspace (requested 2026-10-10), so
@@ -24,8 +29,8 @@
 // passwordless sudo, Claude Code and Codex, the pairing key, the unit) and switches it to each
 // release the relay runs, after running replies end, going back to the previous one when it
 // does not stay up.
-import { spawnSync, type SpawnSyncOptions } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { spawn, spawnSync, type SpawnSyncOptions } from 'node:child_process';
+import { createHash, randomBytes } from 'node:crypto';
 import {
   chmodSync,
   chownSync,
@@ -33,11 +38,14 @@ import {
   constants,
   copyFileSync,
   existsSync,
+  fsyncSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   openSync,
   statfsSync,
   readFileSync,
+  readSync,
   readdirSync,
   readlinkSync,
   realpathSync,
@@ -47,6 +55,7 @@ import {
   statSync,
   symlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { compareVersions, validVersion, verifySignature } from '../release.ts';
@@ -68,6 +77,8 @@ export type Config = {
   buildHome: string;
   /** How long activation waits for running replies. */
   deferLimit: number;
+  /** How long an updater may neither run its own code nor have its commands work. */
+  hungAfter: number;
   /** Releases (and their backups) this updater activated that stay on disk. */
   keep: number;
   /** The desktop app this server runs for its workspace's devices, or false to run none. */
@@ -102,6 +113,7 @@ export function readConfig(env: Record<string, string | undefined> = process.env
     buildUser: value('BUILD_USER', 'agent-studio-build'),
     buildHome: value('BUILD_HOME', '/var/cache/agent-studio-build'),
     deferLimit: 2 * 60 * 60 * 1000,
+    hungAfter: Number(value('HUNG_AFTER', '900')) * 1000,
     keep: 5,
     host:
       value('HOST', 'on') === 'off'
@@ -130,6 +142,7 @@ export function readConfig(env: Record<string, string | undefined> = process.env
     !/^[\w.-]+\/[\w.-]+$/.test(config.repo) ||
     !/^[\w@.-]+$/.test(config.service) ||
     !/^[a-z_][a-z0-9_-]*$/.test(config.buildUser) ||
+    !(config.hungAfter >= 1000) ||
     !Number.isInteger(config.port) ||
     config.port < 1 ||
     config.port > 65535 ||
@@ -333,12 +346,19 @@ export type Activation = {
    */
   step: 'trial' | 'backup' | 'candidate' | 'previous' | 'again' | 'abandon';
   began: string;
+  /** When the step was written, before anything of it was done. */
+  entered?: string;
   /** The release that ran before; a new server has none. */
   previous?: string;
   /** The backup of the data as it was before the switch. */
   backup?: string;
   /** Why there is no backup. */
   backupError?: string;
+  /**
+   * Why the backup was not put back: it is missing or is not the archive that was made. The data
+   * was then left as it was, and nothing was moved aside for it.
+   */
+  restoreError?: string;
   /** Names for the folders that keep replaced data, chosen before the data is replaced. */
   keep?: string;
   keepPrevious?: string;
@@ -365,6 +385,11 @@ export type HostRelease = {
   waiting?: 'replies';
   /** The host version that ran before this one. */
   previous?: string;
+  /**
+   * The switch under way, written before anything of it is done: `switch` selects the version
+   * and restarts the host, `back` does so for the version before.
+   */
+  activation?: { step: 'switch' | 'back'; entered: string; resumed?: number };
   activated?: string;
   error?: string;
 };
@@ -378,9 +403,20 @@ export type State = {
   hostKey?: string;
   /** A latest release that is not installed: malformed, or older than the tracked one. */
   ignored?: string;
-  /** Releases this updater activated, newest first. */
-  history: { tag: string; commit: string; activated: string; backup?: string }[];
+  /**
+   * Releases this updater activated, newest first. `packing` counts the attempts to compress a
+   * backup that is still the archive as it was written.
+   */
+  history: { tag: string; commit: string; activated: string; backup?: string; packing?: number }[];
+  /** Archives whose compressed copy took their place, still to be removed. */
+  cleanup?: string[];
 };
+
+/**
+ * Where a state came from: the journal, the generation before it (the journal was missing or
+ * could not be read), or nowhere although something was there (`lost`).
+ */
+export type Recovered = { from: 'previous' | 'lost'; problem: string };
 
 export const emptyState = (): State => ({ version: 1, history: [] });
 
@@ -390,6 +426,9 @@ export type System = {
   log(message: string): void;
   sleep(ms: number): Promise<void>;
   readState(): State;
+  /** Says when the state just read is not the journal as it was last written. */
+  recovered(): Recovered | undefined;
+  /** Writes the state so that it survives a power loss, keeping the generation before it. */
   writeState(state: State): void;
   /** GitHub's latest-release response, or undefined when nothing is published. */
   latestRelease(): Promise<unknown>;
@@ -428,22 +467,40 @@ export type System = {
    * of the data once its unit ended. Throws, keeping the copy, when the unit does not end.
    */
   endTrial(): void;
-  /** Throws when a backup cannot be written or the disk lacks room for one and for a restore. */
+  /**
+   * Throws when a backup cannot be written or the disks lack room for it and for the two
+   * restores an activation can need, counted together where they share a disk.
+   */
   preflight(): void;
   runningReplies(): number;
   stopService(): void;
   startService(): void;
-  /** Archives the private data of the stopped relay, uncompressed so the relay starts sooner. */
-  backup(commit: string): string;
-  /** Compresses a backup once the relay runs again, and returns where it is now. */
+  /**
+   * Archives the private data of the stopped relay, uncompressed so the relay starts sooner,
+   * with a manifest of what it holds, both on the disk before it returns. `began` names the
+   * activation: the backup an updater made for it and could not record is returned instead of
+   * another one, while the data is still as that backup holds it, or whatever the data holds
+   * when `behind` says the release may have run on it since.
+   */
+  backup(commit: string, began?: string, behind?: boolean): string;
+  /**
+   * Compresses a backup once the relay runs again, checks that the copy unpacks to the archive
+   * that was made, and returns where the copy is. The archive stays until `removeBackup`.
+   */
   compress(backup: string): string;
+  /** Removes an archive whose compressed copy the state names. */
+  removeBackup(backup: string): void;
   select(release: string): void;
   /**
    * Replaces private data with a backup and returns where the replaced data is kept, a folder
    * named after `keep`. Doing it again with the same name, after being interrupted anywhere,
-   * finishes it and never replaces the data twice.
+   * finishes it and never replaces the data twice. Throws a BackupError, with the data untouched
+   * and nothing moved aside, when the backup is missing, is not the archive that was made or
+   * does not unpack to what was backed up.
    */
   restore(backup: string, keep: string): string;
+  /** Whether the restore named `keep` replaced the data, all of it. */
+  restored(keep: string): boolean;
   /**
    * HTTP status of the relay's unauthenticated state request, or of the trial's, waiting
    * `probeTimeout` for it.
@@ -463,11 +520,17 @@ export type System = {
   /** The host version the host's current link selects. */
   currentHost(): string | undefined;
   /** Installs the packages the host needs when missing, the app's own libraries among them. */
-  hostPackages(): void;
+  hostPackages(): Promise<void>;
   /** Installs what the host needs: packages, its user, sudo, Claude Code and Codex, its unit. */
   provisionHost(): Promise<void>;
   selectHost(version: string): void;
   hostActive(): boolean;
+  /**
+   * Whether the host's service runs this version, with the process this updater first saw
+   * running it: its link selects the version and its processes run that version's files or
+   * began after the link selected it.
+   */
+  hostRuns(version: string): boolean;
   restartHost(): void;
   stopHost(): void;
   /** Removes host versions other than these. */
@@ -490,12 +553,18 @@ export function message(error: unknown): string {
 export async function check(system: System, config: Config): Promise<void> {
   const state = system.readState();
   const save = () => system.writeState(state);
-  // A trial whose updater was killed: its unit, and its copy of the private data.
+  // A trial whose updater was killed: its unit, and its copy of the private data. Nothing goes
+  // on while one cannot be removed: a relay may still read the copy, and no release is tried or
+  // activated beside it.
   try {
     system.endTrial();
   } catch (error) {
-    system.log(`A trial left behind could not be removed: ${message(error)}`);
+    throw new Error(
+      `Nothing is activated while a trial left behind cannot be removed: ${message(error)}`,
+    );
   }
+  const recovered = system.recovered();
+  if (recovered) await recover(system, config, state, recovered, save);
   // An activation an earlier updater began comes first, before a newer release can replace it:
   // the relay may be stopped, or running a release nobody checked.
   const begun = state.release;
@@ -506,6 +575,7 @@ export async function check(system: System, config: Config): Promise<void> {
   }
   if (begun?.phase === 'staged' && begun.activation)
     await activate(system, config, state, begun, save);
+  tidy(system, state, save);
   await track(system, state, save);
   const release = state.release;
   if (!release || release.phase === 'failed') return;
@@ -521,6 +591,98 @@ export async function check(system: System, config: Config): Promise<void> {
   )
     await publish(system, state, release, save);
   if (release.phase === 'active' && config.host) await host(system, config, state, release, save);
+}
+
+/**
+ * Goes on from a state that is not the journal as it was last written. The generation before it
+ * is at most one step behind, and every step can be done again from its start, so an activation
+ * it names is taken up as after any kill. Without one, and with no state at all, nothing says
+ * whether an updater stopped the relay: what is selected is started and checked.
+ */
+async function recover(
+  system: System,
+  config: Config,
+  state: State,
+  recovered: Recovered,
+  save: () => void,
+) {
+  system.log(
+    recovered.from === 'previous'
+      ? `The updater's state could not be used (${recovered.problem}); the one written before it is, which may be a step behind. Every step is done again from its start.`
+      : `The updater's state is lost (${recovered.problem}): nothing is known of earlier checks.`,
+  );
+  const step = state.release?.activation?.step;
+  let relay = '';
+  if (!step || step === 'trial') {
+    const current = system.currentRelease();
+    if (current && !system.serviceActive()) {
+      system.log(`${config.service} is not running; starting ${current}, which is selected.`);
+      let health: Health;
+      try {
+        system.startService();
+        health = await healthy(system);
+      } catch (error) {
+        health = { ok: false, reason: `could not be started: ${message(error)}` };
+      }
+      // Nothing is written, so the next check finds the same and says so again.
+      if (!health.ok)
+        throw new Error(
+          `The updater's state was not usable and ${config.service} does not run: the relay of ${current}, which is selected, ${health.reason}. Intervene manually.`,
+        );
+      relay = ` ${current}, which is selected, was started and its relay answers.`;
+      system.log(relay.trim());
+    }
+  }
+  save();
+  if (recovered.from === 'lost')
+    throw new Error(
+      `The updater's state was lost (${recovered.problem}).${relay} No updater key is trusted any more, so no release is installed: run scripts/vps/install.sh again.`,
+    );
+}
+
+/**
+ * Finishes what an activation leaves for when the relay runs again: an archive whose compressed
+ * copy took its place is removed, and a backup still as it was written is compressed. Each can
+ * be done again, and the state names a file only while the file is there.
+ */
+function tidy(system: System, state: State, save: () => void) {
+  const remove = () => {
+    for (const archive of [...(state.cleanup ?? [])]) {
+      try {
+        system.removeBackup(archive);
+      } catch (error) {
+        system.log(`Could not remove ${archive}: ${message(error)}`);
+        continue;
+      }
+      state.cleanup = state.cleanup?.filter((path) => path !== archive);
+    }
+    if (state.cleanup && !state.cleanup.length) delete state.cleanup;
+  };
+  if (state.cleanup?.length) {
+    remove();
+    save();
+  }
+  for (const entry of state.history) {
+    const archive = entry.backup;
+    if (!archive?.endsWith('.tar') || (entry.packing ?? 0) >= maxAttempts) continue;
+    entry.packing = (entry.packing ?? 0) + 1;
+    save();
+    let packed: string;
+    try {
+      packed = system.compress(archive);
+    } catch (error) {
+      system.log(`Could not compress ${archive}, which stays as it is: ${message(error)}`);
+      continue;
+    }
+    // The state names the copy, on the disk, before the archive goes.
+    entry.backup = packed;
+    delete entry.packing;
+    if (state.release?.backup === archive) state.release.backup = packed;
+    if (packed !== archive) state.cleanup = [...(state.cleanup ?? []), archive];
+    save();
+    remove();
+    save();
+  }
 }
 
 /**
@@ -603,7 +765,7 @@ async function stageHost(
       const signature = (await system.download(appImageSignature)).toString('utf8');
       authenticateAsset(data, signature, appImage, release, key, 'AppImage');
       // The check below starts the app, which a new server cannot load without its libraries.
-      system.hostPackages();
+      await system.hostPackages();
       system.log(`Extracting the ${release.tag} host.`);
       if (!(await system.extractHost(release.version, data)))
         return unsupported(`${release.tag} does not run as a server.`);
@@ -627,12 +789,15 @@ async function stageHost(
   system.log(`Staged the ${release.tag} host.`);
 }
 
-/** The host stays up through its start and a while after it. */
-async function hostUp(system: System): Promise<boolean> {
+/**
+ * The host runs the version, and stays up with the same process through its start and a while
+ * after it. That its app reached the relay is not checked: see docs/DEPLOYMENT.md.
+ */
+async function hostUp(system: System, version: string): Promise<boolean> {
   await system.sleep(10_000);
-  if (!system.hostActive()) return false;
+  if (!system.hostRuns(version)) return false;
   await system.sleep(10_000);
-  return system.hostActive();
+  return system.hostRuns(version);
 }
 
 async function activateHost(
@@ -641,66 +806,104 @@ async function activateHost(
   tracked: HostRelease,
   save: () => void,
 ) {
-  const previous = system.currentHost();
-  if (previous === tracked.version && system.hostActive()) {
+  const done = () => {
     tracked.phase = 'active';
     tracked.activated = system.now().toISOString();
-    save();
-    return;
-  }
-  // Restarting the host ends the replies it runs.
-  let running: number;
-  try {
-    running = system.runningReplies();
-  } catch {
-    running = 1;
-  }
-  if (running && system.now().getTime() - Date.parse(tracked.staged!) < config.deferLimit) {
-    if (tracked.waiting !== 'replies') {
-      tracked.waiting = 'replies';
-      save();
-      system.log(`The ${tracked.tag} host waits up to two hours for running replies.`);
-    }
-    return;
-  }
-  try {
-    await system.provisionHost();
-  } catch (error) {
-    tracked.phase = 'pending';
-    tracked.error = message(error);
-    tracked.retryAt = new Date(system.now().getTime() + retryDelays[0]).toISOString();
-    save();
-    throw new Error(`Could not prepare the server for its host: ${tracked.error}`);
-  }
-  if (previous !== tracked.version) tracked.previous = previous;
-  delete tracked.waiting;
-  save();
-  let ok = false;
-  try {
-    system.selectHost(tracked.version);
-    system.restartHost();
-    ok = await hostUp(system);
-  } catch (error) {
-    system.log(`Starting the ${tracked.tag} host failed: ${message(error)}`);
-  }
-  if (ok) {
-    tracked.phase = 'active';
-    tracked.activated = system.now().toISOString();
+    delete tracked.activation;
     delete tracked.error;
     save();
     system.pruneHost([tracked.version, ...(tracked.previous ? [tracked.previous] : [])]);
     system.log(`The host runs ${tracked.tag}.`);
-    return;
+  };
+  // The switch is written before anything of it is done, like the relay's: that the link
+  // selects a version shows nothing of the process that runs, which may be the one from before.
+  let begun = tracked.activation;
+  const resumed = !!begun;
+  if (begun) {
+    begun.resumed = (begun.resumed ?? 0) + 1;
+    save();
+    system.log(
+      `An updater ended while switching the host to ${tracked.tag}; the switch goes on from there, and nothing is taken for done.`,
+    );
+  } else {
+    const selected = system.currentHost();
+    // Selected and running it already, by hand or by an updater whose record was lost: it is
+    // recorded once it is seen to run this version and to stay up.
+    if (
+      selected === tracked.version &&
+      system.hostRuns(tracked.version) &&
+      (await hostUp(system, tracked.version))
+    )
+      return done();
+    // Restarting the host ends the replies it runs.
+    let running: number;
+    try {
+      running = system.runningReplies();
+    } catch {
+      running = 1;
+    }
+    if (running && system.now().getTime() - Date.parse(tracked.staged!) < config.deferLimit) {
+      if (tracked.waiting !== 'replies') {
+        tracked.waiting = 'replies';
+        save();
+        system.log(`The ${tracked.tag} host waits up to two hours for running replies.`);
+      }
+      return;
+    }
+    try {
+      await system.provisionHost();
+    } catch (error) {
+      tracked.phase = 'pending';
+      tracked.error = message(error);
+      tracked.retryAt = new Date(system.now().getTime() + retryDelays[0]).toISOString();
+      save();
+      throw new Error(`Could not prepare the server for its host: ${tracked.error}`);
+    }
+    if (selected !== tracked.version) tracked.previous = selected;
+    delete tracked.waiting;
+    begun = tracked.activation = { step: 'switch', entered: system.now().toISOString() };
+    save();
+  }
+  const activation = begun;
+  if (activation.step === 'switch') {
+    let ok = false;
+    try {
+      // A host the earlier updater started on this version goes on running, and is watched.
+      const runs =
+        resumed && system.currentHost() === tracked.version && system.hostRuns(tracked.version);
+      if (runs)
+        system.log(`The host already runs ${tracked.tag}; it is watched, not started again.`);
+      else {
+        system.selectHost(tracked.version);
+        system.restartHost();
+      }
+      ok = await hostUp(system, tracked.version);
+    } catch (error) {
+      system.log(`Starting the ${tracked.tag} host failed: ${message(error)}`);
+    }
+    if (ok) return done();
+    activation.step = 'back';
+    activation.entered = system.now().toISOString();
+    save();
   }
   tracked.phase = 'failed';
   if (tracked.previous) {
-    system.selectHost(tracked.previous);
-    system.restartHost();
-    tracked.error = `The ${tracked.tag} host did not stay up; it runs ${tracked.previous} again.`;
+    let back = false;
+    try {
+      system.selectHost(tracked.previous);
+      system.restartHost();
+      back = await hostUp(system, tracked.previous);
+    } catch (error) {
+      system.log(`Starting the ${tracked.previous} host again failed: ${message(error)}`);
+    }
+    tracked.error = back
+      ? `The ${tracked.tag} host did not stay up; it runs ${tracked.previous} again.`
+      : `The ${tracked.tag} host did not stay up, and ${tracked.previous}, which is selected again, does not stay up either.`;
   } else {
     system.stopHost();
     tracked.error = `The ${tracked.tag} host did not stay up and was stopped.`;
   }
+  delete tracked.activation;
   save();
   throw new Error(tracked.error);
 }
@@ -851,6 +1054,10 @@ export type Unit = {
   io?: number;
   /** How its last process ended, when it did not end well: `exit-code 1`, `oom-kill`. */
   result?: string;
+  /** When its main process began, in milliseconds, as the kernel tells it. */
+  started?: number;
+  /** The release directory its main process runs in. */
+  release?: string;
 };
 
 export type Health =
@@ -1006,7 +1213,8 @@ const stampOf = (date: Date) =>
 /**
  * Activates a staged release, or takes an activation up where an earlier updater left it. Each
  * step is recorded in the state before anything it does and can be done again from its start:
- * a step that starts a relay first stops whatever runs, and the data is replaced under a name
+ * a step that starts a relay first stops whatever runs, unless the relay that runs is the one
+ * the step itself started, which is then watched instead; and the data is replaced under a name
  * chosen and recorded beforehand. A release becomes active only after its relay passed the
  * health check in this process; that the current link selects it shows nothing.
  */
@@ -1051,19 +1259,13 @@ async function activate(
     const removed = state.history.splice(config.keep);
     save();
     for (const old of removed) if (!kept.has(old.commit)) system.prune(old.commit, old.backup);
-    if (!backup) return;
-    // The backup was written uncompressed, to keep the relay stopped a second instead of 24.
-    try {
-      const packed = system.compress(backup);
-      entry.backup = packed;
-      if (release.backup === backup) release.backup = packed;
-      save();
-    } catch (error) {
-      system.log(`Could not compress ${backup}, which stays as it is: ${message(error)}`);
-    }
+    // The backup was written uncompressed, to keep the relay stopped for less long. It is
+    // compressed now that the relay runs, and by later checks when this one does not finish.
+    tidy(system, state, save);
   };
 
   let begun = release.activation;
+  const resumed = !!begun;
   if (begun) {
     begun.resumed = (begun.resumed ?? 0) + 1;
     save();
@@ -1124,9 +1326,11 @@ async function activate(
         return fail(`${tag} was not activated: ${message(error)}`);
       }
     }
+    const began = system.now().toISOString();
     begun = release.activation = {
       step: current ? 'trial' : 'backup',
-      began: system.now().toISOString(),
+      began,
+      entered: began,
       ...(current ? { previous: current } : {}),
     };
     delete release.waiting;
@@ -1136,22 +1340,74 @@ async function activate(
   const previous = activation.previous;
   const enter = (step: Activation['step']) => {
     activation.step = step;
+    activation.entered = system.now().toISOString();
     save();
   };
   const keepAs = (commit: string) => `${commit.slice(0, 12)}-${stampOf(system.now())}`;
+  // Whether the relay that runs is the one an earlier updater started in the step this one
+  // takes up: the service is active and never started its process again, the process runs in
+  // the release's directory, which is the one selected, it began after the step was written
+  // (so after that updater's own stop), and the data the step puts in place is in place.
+  let taken = resumed;
+  const startedBefore = (commit: string, keep?: string): boolean => {
+    if (!taken) return false;
+    taken = false;
+    const unit = system.unit();
+    const entered = Date.parse(activation.entered ?? '');
+    return (
+      !!unit &&
+      unit.state === 'active' &&
+      unit.restarts === 0 &&
+      unit.pid > 0 &&
+      unit.release === commit &&
+      system.currentRelease() === commit &&
+      unit.started !== undefined &&
+      // The kernel tells a start to the second.
+      unit.started + 1000 >= entered &&
+      (!keep || system.restored(keep))
+    );
+  };
+  // Puts a backup back under the name written for it. A backup that cannot be put back leaves
+  // the data as it is, nothing moved aside, and the relay is started on that.
+  const putBack = (keep: string | undefined, record: (kept: string) => void) => {
+    if (!activation.backup || !keep || activation.restoreError) return;
+    try {
+      record(system.restore(activation.backup, keep));
+    } catch (error) {
+      if (!(error instanceof BackupError)) throw error;
+      activation.restoreError = message(error);
+      save();
+      system.log(
+        `The data backup ${activation.backup} cannot be put back: ${activation.restoreError}. The private data stays as it is, and nothing was moved aside.`,
+      );
+    }
+  };
   // Stops whatever relay runs, puts the data in place, selects a release, starts its relay and
   // waits for it. A part that fails is the relay's reason too, and all of it can be done again.
-  const start = async (commit: string, data?: () => void): Promise<Health> => {
+  const start = async (commit: string, data?: () => void, keep?: string): Promise<Health> => {
     try {
-      system.stopService();
-      data?.();
-      system.select(commit);
-      system.startService();
+      if (startedBefore(commit, keep)) {
+        // The restore that came before its start is whole: this only says where it kept things.
+        if (keep) data?.();
+        system.log(
+          `The relay of ${commit} that the updater started runs; it is checked, not started again.`,
+        );
+      } else {
+        system.stopService();
+        data?.();
+        system.select(commit);
+        system.startService();
+      }
       return await healthy(system);
     } catch (error) {
       return { ok: false, reason: `could not be started: ${message(error)}` };
     }
   };
+  // What is said of a backup that could not be put back.
+  const unrestored = () =>
+    activation.restoreError
+      ? ` The data backup ${activation.backup} could not be put back (${activation.restoreError}), so the private data stayed as it was, with nothing moved aside.`
+      : '';
 
   for (;;) {
     if (activation.step === 'trial') {
@@ -1191,8 +1447,11 @@ async function activate(
       enter('backup');
     } else if (activation.step === 'backup') {
       try {
+        // The earlier updater may have got further than the state says, when the state is the
+        // one from before: a release that is already selected may have written to this data.
+        const behind = resumed && system.currentRelease() === release.commit;
         system.stopService();
-        activation.backup = system.backup(release.commit);
+        activation.backup = system.backup(release.commit, activation.began, behind);
       } catch (error) {
         activation.backupError = message(error);
         if (!previous)
@@ -1234,19 +1493,19 @@ async function activate(
       try {
         system.deselect();
         system.stopService();
-        if (activation.backup && activation.keep)
-          activation.kept = system.restore(activation.backup, activation.keep);
+        putBack(activation.keep, (kept) => (activation.kept = kept));
       } catch (error) {
         system.log(`Stopping ${tag} failed: ${message(error)}`);
       }
       return fail(
-        `${tag} failed its health check, so the relay stays stopped.${activation.kept ? ` Data it wrote is kept in ${activation.kept}.` : ''} Its relay ${activation.failed}.`,
+        `${tag} failed its health check, so the relay stays stopped.${activation.kept ? ` Data it wrote is kept in ${activation.kept}.` : ''}${unrestored()} Its relay ${activation.failed}.`,
       );
     } else if (activation.step === 'previous') {
-      const back = await start(previous!, () => {
-        if (activation.backup && activation.keep)
-          activation.kept = system.restore(activation.backup, activation.keep);
-      });
+      const back = await start(
+        previous!,
+        () => putBack(activation.keep, (kept) => (activation.kept = kept)),
+        activation.restoreError ? undefined : activation.keep,
+      );
       const wrote = activation.kept
         ? ` Data the failed release wrote is kept in ${activation.kept}.`
         : '';
@@ -1254,38 +1513,48 @@ async function activate(
         return fail(
           activation.backupError
             ? `${tag} was not activated: private data could not be backed up (${activation.backupError}). ${previous} runs again on its data, which was not touched.`
-            : `${tag} failed its health check; ${previous} was restored.${wrote} Its relay ${activation.failed}.`,
+            : activation.restoreError
+              ? `${tag} failed its health check; ${previous} runs again, on the data as ${tag} left it.${unrestored()} Its relay ${activation.failed}.`
+              : `${tag} failed its health check; ${previous} was restored.${wrote} Its relay ${activation.failed}.`,
         );
       // The release that ran no longer starts, as one whose data outgrew it while it ran does
       // not. The new one read this data in its trial, so rather than leave the relay down it is
       // started, on the data as it was before the switch: the release that just ended may have
       // written to it, so what it left is kept aside and the backup put back once more.
       activation.back = back.reason;
-      if (activation.backup) activation.keepPrevious = keepAs(previous!);
+      if (activation.backup && !activation.restoreError)
+        activation.keepPrevious = keepAs(previous!);
       system.log(
         activation.backupError
           ? `${previous} did not come back: its relay ${back.reason}. Starting ${tag}, which read a copy of this data, on the data as it is, without a backup.`
-          : `${previous} did not come back: its relay ${back.reason}. Starting ${tag} once more, on the data as it was before the switch.`,
+          : activation.restoreError
+            ? `${previous} did not come back: its relay ${back.reason}. Starting ${tag} once more, on the data as it is, since the backup cannot be put back.`
+            : `${previous} did not come back: its relay ${back.reason}. Starting ${tag} once more, on the data as it was before the switch.`,
       );
       enter('again');
     } else {
-      const again = await start(release.commit, () => {
-        if (activation.backup && activation.keepPrevious)
-          activation.keptPrevious = system.restore(activation.backup, activation.keepPrevious);
-      });
+      const again = await start(
+        release.commit,
+        () => putBack(activation.keepPrevious, (kept) => (activation.keptPrevious = kept)),
+        activation.restoreError ? undefined : activation.keepPrevious,
+      );
       const wrote =
         (activation.kept ? ` Data the failed release wrote is kept in ${activation.kept}.` : '') +
         (activation.keptPrevious
           ? ` What ${previous} left when it did not start is kept in ${activation.keptPrevious}.`
-          : '');
+          : '') +
+        unrestored();
       const told = activation.backupError
         ? `Private data could not be backed up before activating ${tag} (${activation.backupError}) and ${previous} did not start again (its relay ${activation.back})`
         : `${tag} failed its first health check (its relay ${activation.failed}) and ${previous} did not start again (its relay ${activation.back})`;
       if (again.ok) {
         release.note = activation.backupError
           ? `${told}, so ${tag}, which read a copy of this data in its trial, was started on it and serves, without a backup. ${previous} can no longer be gone back to.`
-          : `${told}, so ${tag} was started once more, on the data as it was before the switch, and serves. ${previous} can no longer be gone back to.${wrote}`;
-        complete(activation.backup);
+          : activation.restoreError
+            ? `${told}, so ${tag} was started once more, on the data as it was left, and serves. ${previous} can no longer be gone back to.${wrote}`
+            : `${told}, so ${tag} was started once more, on the data as it was before the switch, and serves. ${previous} can no longer be gone back to.${wrote}`;
+        // A backup that cannot be put back is not kept as one.
+        complete(activation.restoreError ? undefined : activation.backup);
         system.log(release.note);
         return;
       }
@@ -1482,22 +1751,574 @@ export function trialArguments(trial: {
   ];
 }
 
+// What survives what. An updater that is killed loses nothing: every file below is written under
+// a name of its own and renamed into place, so a reader finds the file from before or the whole
+// new one. A power loss, or a kernel that stops, also loses what was written and not yet on the
+// disk, so the state, a backup with its manifest and each rename that replaces the data are
+// flushed (fsync of the file, then of its folder) before the next thing relies on them, in the
+// order a recovery reads them. What that leaves open: a disk that reports a flush it did not do,
+// and the journal generations both damaged, which a check reports as a lost state.
+
+/** Flushes a file's contents to the disk. */
+export function syncFile(path: string) {
+  const file = openSync(path, 'r+');
+  try {
+    fsyncSync(file);
+  } finally {
+    closeSync(file);
+  }
+}
+
+/** Flushes a folder's entries to the disk: the names created in it, renamed and removed. */
+export function syncFolder(path: string) {
+  // Windows, where only the unit tests run, has no handle to a folder that can be flushed.
+  if (process.platform === 'win32') return;
+  const folder = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY);
+  try {
+    fsyncSync(folder);
+  } finally {
+    closeSync(folder);
+  }
+}
+
+/** A name beside `path` that no other writer uses, for a file that is renamed into place. */
+const partialOf = (path: string) =>
+  `${path}.${process.pid}-${randomBytes(4).toString('hex')}.partial`;
+
+/** Removes what writers that were killed left beside `path`. The caller holds the lock. */
+function clearPartials(path: string) {
+  const folder = dirname(path);
+  const prefix = `${basename(path)}.`;
+  for (const name of existsSync(folder) ? readdirSync(folder) : [])
+    if (name.startsWith(prefix) && name.endsWith('.partial'))
+      rmSync(join(folder, name), { force: true });
+}
+
+/**
+ * Replaces a file with `data` so that it is whole and on the disk when this returns, and so that
+ * until then the file from before is.
+ */
+export function writeDurably(path: string, data: string | Buffer, mode: number) {
+  const partial = partialOf(path);
+  const file = openSync(partial, 'wx', mode);
+  try {
+    writeFileSync(file, data);
+    fsyncSync(file);
+  } catch (error) {
+    closeSync(file);
+    rmSync(partial, { force: true });
+    throw error;
+  }
+  closeSync(file);
+  renameSync(partial, path);
+  syncFolder(dirname(path));
+}
+
+const validState = (value: unknown): value is State =>
+  !!value &&
+  typeof value === 'object' &&
+  (value as State).version === 1 &&
+  Array.isArray((value as State).history);
+
+/** Reads one generation of the journal: the state, nothing when it is not there, or why not. */
+function readGeneration(file: string): State | undefined | Error {
+  let text: string;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    return error as Error;
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return new Error(`${file} is not whole (${text.length} characters)`);
+  }
+  // Written by another version of the updater: not damage, and never replaced by a guess.
+  if (value && typeof value === 'object' && typeof (value as State).version === 'number')
+    if ((value as State).version !== 1) throw new Error(`${file} has an unknown format.`);
+  return validState(value) ? value : new Error(`${file} does not hold a state`);
+}
+
+const previousOf = (file: string) => `${file}.previous`;
+
+/**
+ * Reads the updater's state. The journal is written whole and flushed, so it is missing or
+ * damaged only after something the writes do not cover; the generation before it is then used,
+ * and `recovered` says so. With neither where one of them was, the state is lost.
+ */
+export function readJournal(file: string): { state: State; recovered?: Recovered } {
+  const journal = readGeneration(file);
+  if (journal && !(journal instanceof Error)) return { state: journal };
+  const previous = readGeneration(previousOf(file));
+  // Nothing was ever written: a new server.
+  if (journal === undefined && previous === undefined) return { state: emptyState() };
+  const problem = journal instanceof Error ? journal.message : `${file} is missing`;
+  if (previous && !(previous instanceof Error))
+    return { state: previous, recovered: { from: 'previous', problem } };
+  return {
+    state: emptyState(),
+    recovered: {
+      from: 'lost',
+      problem: `${problem}, and ${previous instanceof Error ? previous.message : `${previousOf(file)} is missing`}`,
+    },
+  };
+}
+
+/**
+ * Writes the updater's state: whole and on the disk before this returns, with the generation it
+ * replaces kept as `<file>.previous`. A journal that cannot be read is kept aside for whoever
+ * looks into it, and never becomes the generation before.
+ */
+export function writeJournal(file: string, state: State) {
+  const folder = dirname(file);
+  mkdirSync(folder, { recursive: true, mode: 0o700 });
+  clearPartials(file);
+  const partial = partialOf(file);
+  const output = openSync(partial, 'wx', 0o600);
+  try {
+    writeFileSync(output, `${JSON.stringify(state, null, 2)}\n`);
+    fsyncSync(output);
+  } finally {
+    closeSync(output);
+  }
+  const current = readGeneration(file);
+  if (current instanceof Error) renameSync(file, `${file}.unreadable-${stampOf(new Date())}`);
+  else if (current) {
+    // The same file under a second name: the journal's name then moves on to the new one.
+    const link = partialOf(previousOf(file));
+    try {
+      linkSync(file, link);
+    } catch {
+      copyFileSync(file, link);
+      syncFile(link);
+    }
+    renameSync(link, previousOf(file));
+  }
+  renameSync(partial, file);
+  syncFolder(folder);
+}
+
+/** A backup that cannot be put back: missing, not the archive that was made, or not whole. */
+export class BackupError extends Error {}
+
+/** One thing a backup holds, by its path inside the data folder. */
+export type BackupEntry = {
+  path: string;
+  type: 'file' | 'folder' | 'link';
+  /** A file's bytes, and when it was last written. */
+  size?: number;
+  mtime?: number;
+  /** Where a link points. */
+  target?: string;
+};
+
+/**
+ * What was backed up and the archive that holds it, written beside the archive, on the disk
+ * before the state names the backup: enough to tell that an archive is the one that was made
+ * and that what it unpacks to is everything that was there.
+ */
+export type BackupManifest = {
+  version: 1;
+  commit: string;
+  /** The activation it was made for. */
+  began?: string;
+  made: string;
+  /** The archive as it was written, and its compressed copy once there is one. */
+  archive: { bytes: number; sha256: string };
+  compressed?: { bytes: number; sha256: string };
+  entries: BackupEntry[];
+};
+
+/** The manifest of a backup, whichever of its two files names it. */
+export const manifestOf = (backup: string) => `${backup.replace(/\.gz$/, '')}.manifest.json`;
+
+/** The files, folders and links of a folder, by their paths inside it, in a fixed order. */
+export function listTree(folder: string, skip: string[] = []): BackupEntry[] {
+  const entries: BackupEntry[] = [];
+  const walk = (directory: string, prefix: string) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (!prefix && skip.includes(entry.name)) continue;
+      const path = prefix + entry.name;
+      const full = join(directory, entry.name);
+      if (entry.isDirectory()) {
+        entries.push({ path, type: 'folder' });
+        walk(full, `${path}/`);
+      } else if (entry.isSymbolicLink())
+        entries.push({ path, type: 'link', target: readlinkSync(full) });
+      else if (entry.isFile()) {
+        const file = lstatSync(full);
+        entries.push({ path, type: 'file', size: file.size, mtime: Math.floor(file.mtimeMs) });
+      }
+      // Sockets and pipes are not data, and an archive does not hold them.
+    }
+  };
+  walk(folder, '');
+  return entries.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+}
+
+/**
+ * How a folder differs from what a manifest lists, or nothing when it holds exactly that: every
+ * path, as the same kind of thing, each file with its size (and its time, when asked).
+ */
+export function treeDifference(
+  expected: BackupEntry[],
+  actual: BackupEntry[],
+  times = false,
+): string | undefined {
+  const found = new Map(actual.map((entry) => [entry.path, entry]));
+  for (const entry of expected) {
+    const other = found.get(entry.path);
+    if (!other) return `${entry.path} is missing`;
+    if (other.type !== entry.type) return `${entry.path} is a ${other.type}, not a ${entry.type}`;
+    if (entry.type === 'file' && other.size !== entry.size)
+      return `${entry.path} holds ${other.size} bytes, not ${entry.size}`;
+    if (entry.type === 'file' && times && other.mtime !== entry.mtime)
+      return `${entry.path} was written since`;
+    if (entry.type === 'link' && other.target !== entry.target)
+      return `${entry.path} points elsewhere`;
+    found.delete(entry.path);
+  }
+  const extra = found.keys().next();
+  return extra.done ? undefined : `${extra.value} was not there`;
+}
+
+/** The size and SHA-256 of a file, read through once. */
+export function fileDigest(path: string): { bytes: number; sha256: string } {
+  const hash = createHash('sha256');
+  const buffer = Buffer.allocUnsafe(4 * 1024 * 1024);
+  const file = openSync(path, 'r');
+  let bytes = 0;
+  try {
+    for (;;) {
+      const read = readSync(file, buffer, 0, buffer.length, null);
+      if (!read) break;
+      hash.update(buffer.subarray(0, read));
+      bytes += read;
+    }
+  } finally {
+    closeSync(file);
+  }
+  return { bytes, sha256: hash.digest('hex') };
+}
+
+/** Reads the manifest of a backup, or says why the backup cannot be trusted without one. */
+export function readManifest(backup: string): BackupManifest {
+  let value: BackupManifest;
+  try {
+    value = JSON.parse(readFileSync(manifestOf(backup), 'utf8'));
+  } catch (error) {
+    throw new BackupError(
+      (error as NodeJS.ErrnoException).code === 'ENOENT'
+        ? `it has no manifest (${manifestOf(backup)}), so nothing says what it should hold`
+        : `its manifest cannot be read (${message(error)})`,
+    );
+  }
+  if (
+    value?.version !== 1 ||
+    !Array.isArray(value.entries) ||
+    typeof value.archive?.sha256 !== 'string' ||
+    typeof value.archive.bytes !== 'number'
+  )
+    throw new BackupError('its manifest is not one');
+  return value;
+}
+
+/** Throws unless the file of a backup is, byte for byte, the one its manifest recorded. */
+export function verifyBackup(backup: string, manifest: BackupManifest) {
+  const recorded = backup.endsWith('.gz') ? manifest.compressed : manifest.archive;
+  if (!recorded) throw new BackupError('its manifest does not record a compressed copy');
+  let size: number;
+  try {
+    size = lstatSync(backup).size;
+  } catch {
+    throw new BackupError('it is missing');
+  }
+  if (size !== recorded.bytes)
+    throw new BackupError(`it holds ${size} bytes where ${recorded.bytes} were written`);
+  if (fileDigest(backup).sha256 !== recorded.sha256)
+    throw new BackupError('it is not the archive that was written (its SHA-256 differs)');
+}
+
+/** What turns a folder into an archive and back; replaceable in tests. */
+export type Archiver = {
+  /** Writes the archive of the folder `name` in `parent`, without `skip` at its top, to `to`. */
+  archive(parent: string, name: string, skip: string[], to: string): void;
+  /** Unpacks an archive, compressed or not, into `into`, and flushes what it wrote. */
+  extract(backup: string, into: string): void;
+  /** Writes the compressed copy of an archive to the open file `to`. */
+  pack(archive: string, to: number): void;
+  /** The SHA-256 of what a compressed copy unpacks to; throws when it does not unpack. */
+  unpacked(packed: string): string;
+};
+
+/**
+ * Archives the folder `data` into `backups` as `pre-<commit>.tar` with its manifest, and returns
+ * the archive: flushed with its manifest and its folder, and named only once it is whole. The
+ * backup an earlier updater made for the same activation is returned instead while the data is
+ * as that backup holds it, or, when `behind`, whatever the data holds now.
+ */
+export function makeBackup(options: {
+  data: string;
+  backups: string;
+  commit: string;
+  began?: string;
+  behind?: boolean;
+  skip: string[];
+  made: Date;
+  archiver: Archiver;
+}): string {
+  const { data, backups, commit, began, skip, archiver } = options;
+  mkdirSync(backups, { recursive: true, mode: 0o700 });
+  const entries = listTree(data, skip);
+  const first = join(backups, `pre-${commit}.tar`);
+  if (began)
+    for (const name of readdirSync(backups).sort()) {
+      if (!name.startsWith(`pre-${commit}`) || !name.endsWith('.tar')) continue;
+      const made = join(backups, name);
+      try {
+        const manifest = readManifest(made);
+        if (manifest.commit !== commit || manifest.began !== began) continue;
+        if (lstatSync(made).size !== manifest.archive.bytes) continue;
+        if (options.behind || !treeDifference(manifest.entries, entries, true)) return made;
+      } catch {
+        // Not a backup of this activation that can be used.
+      }
+    }
+  let path = first;
+  if ([path, `${path}.gz`, manifestOf(path)].some((taken) => existsSync(taken)))
+    path = join(backups, `pre-${commit}-${stampOf(options.made)}.tar`);
+  clearPartials(path);
+  const partial = partialOf(path);
+  try {
+    archiver.archive(dirname(data), basename(data), skip, partial);
+    chmodSync(partial, 0o600);
+    syncFile(partial);
+    const manifest: BackupManifest = {
+      version: 1,
+      commit,
+      ...(began ? { began } : {}),
+      made: options.made.toISOString(),
+      archive: fileDigest(partial),
+      entries,
+    };
+    writeDurably(manifestOf(path), `${JSON.stringify(manifest)}\n`, 0o600);
+  } catch (error) {
+    rmSync(partial, { force: true });
+    throw error;
+  }
+  renameSync(partial, path);
+  syncFolder(backups);
+  return path;
+}
+
+/**
+ * Compresses an archive beside itself and returns the copy, published only once it is on the
+ * disk and unpacks to the very archive the manifest recorded. The archive itself stays: it is
+ * removed once the state names the copy. Done again, it returns the copy that was published.
+ */
+export function packBackup(backup: string, archiver: Archiver): string {
+  if (!backup.endsWith('.tar')) return backup;
+  const packed = `${backup}.gz`;
+  const manifest = readManifest(backup);
+  if (manifest.compressed && existsSync(packed)) {
+    try {
+      verifyBackup(packed, manifest);
+      return packed;
+    } catch {
+      // A copy that is not the one recorded is made again.
+    }
+  }
+  verifyBackup(backup, manifest);
+  clearPartials(packed);
+  const partial = partialOf(packed);
+  const output = openSync(partial, 'wx', 0o600);
+  try {
+    try {
+      archiver.pack(backup, output);
+      fsyncSync(output);
+    } finally {
+      closeSync(output);
+    }
+    if (archiver.unpacked(partial) !== manifest.archive.sha256)
+      throw new Error(`the compressed copy of ${backup} does not unpack to it`);
+    writeDurably(
+      manifestOf(backup),
+      `${JSON.stringify({ ...manifest, compressed: fileDigest(partial) })}\n`,
+      0o600,
+    );
+  } catch (error) {
+    rmSync(partial, { force: true });
+    throw error;
+  }
+  renameSync(partial, packed);
+  syncFolder(dirname(packed));
+  return packed;
+}
+
 /**
  * Replaces the folder `data` with the one of its name that `extract` puts into `staging`,
  * keeping the replaced folder as `kept`. It can be run again after ending anywhere: `kept`
- * exists only once the extraction finished, so an unfinished extraction is done again, a
- * finished one is not, and the data is never replaced twice.
+ * exists only once the extraction finished and `validate` accepted what it unpacked, so an
+ * unfinished extraction is done again, a finished one is not, and the data is never replaced
+ * twice. Each rename is flushed before the next, so a power loss leaves one of the same places
+ * to go on from. An extraction that fails or unpacks something else throws a BackupError, with
+ * the data untouched and nothing moved aside.
  */
-export function replaceData(data: string, staging: string, kept: string, extract: () => void) {
+export function replaceData(
+  data: string,
+  staging: string,
+  kept: string,
+  extract: () => void,
+  validate?: (unpacked: string) => void,
+) {
+  const parent = dirname(data);
   if (!existsSync(kept)) {
     rmSync(staging, { recursive: true, force: true });
     mkdirSync(staging, { mode: 0o700 });
-    extract();
+    try {
+      extract();
+      validate?.(join(staging, basename(data)));
+    } catch (error) {
+      rmSync(staging, { recursive: true, force: true });
+      throw error instanceof BackupError ? error : new BackupError(message(error));
+    }
+    syncFolder(staging);
+    syncFolder(parent);
     renameSync(data, kept);
+    syncFolder(parent);
   }
-  if (!existsSync(data)) renameSync(join(staging, basename(data)), data);
+  if (!existsSync(data)) {
+    if (!existsSync(join(staging, basename(data))))
+      throw new Error(
+        `${data} is missing and so is what was unpacked to replace it; what it held is in ${kept}.`,
+      );
+    renameSync(join(staging, basename(data)), data);
+    syncFolder(parent);
+  }
   rmSync(staging, { recursive: true, force: true });
+  syncFolder(parent);
 }
+
+/**
+ * Puts a backup back in place of the folder `data` and returns where the replaced folder is
+ * kept. Before anything moves, the backup must be the file its manifest recorded and unpack to
+ * everything that was backed up; otherwise it throws a BackupError and the data stays as it is.
+ */
+export function restoreBackup(options: {
+  data: string;
+  backup: string;
+  keep: string;
+  archiver: Archiver;
+}): string {
+  const { data, backup, keep, archiver } = options;
+  if (!/^[A-Za-z0-9_.-]+$/.test(keep)) throw new Error(`${keep} cannot name a folder.`);
+  const parent = dirname(data);
+  const name = basename(data);
+  const staging = join(parent, `.${name}-restore-${keep}`);
+  const kept = join(parent, `.${name}-failed-${keep}`);
+  // The data was moved aside already: what was unpacked then was checked then.
+  let manifest: BackupManifest | undefined;
+  if (!existsSync(kept)) {
+    manifest = readManifest(backup);
+    verifyBackup(backup, manifest);
+  }
+  replaceData(
+    data,
+    staging,
+    kept,
+    () => archiver.extract(backup, staging),
+    (unpacked) => {
+      const difference = treeDifference(manifest?.entries ?? [], listTree(unpacked));
+      if (difference)
+        throw new BackupError(`it does not unpack to what was backed up: ${difference}`);
+    },
+  );
+  return kept;
+}
+
+/** Whether the restore named `keep` replaced the folder `data`, all of it. */
+export function restoreDone(data: string, keep: string): boolean {
+  const parent = dirname(data);
+  const name = basename(data);
+  return (
+    existsSync(join(parent, `.${name}-failed-${keep}`)) &&
+    existsSync(data) &&
+    !existsSync(join(parent, `.${name}-restore-${keep}`))
+  );
+}
+
+/** What a folder of private data holds, as far as the room it takes goes. */
+export type TreeSize = { bytes: number; entries: number };
+
+/**
+ * Why the disks lack the room an activation can need at once, or nothing when they have it.
+ * The backup is the data once over, in an archive whose headers and padding take up to three
+ * blocks of 512 bytes for each entry. A restore unpacks the data beside itself, every file
+ * rounded up to a block of the disk, and what it replaces stays in a folder of its own; when the
+ * release before no longer starts there is a second restore, whose folder stays too. So the disk
+ * of the data needs the data twice over, the disk of the backups once, and a disk that holds
+ * both (`device` is the same) needs all three together.
+ */
+export function spaceShort(
+  tree: TreeSize,
+  data: { path: string; device: number; free: number },
+  backups: { path: string; device: number; free: number },
+): string | undefined {
+  const megabytes = (bytes: number) => `${Math.ceil(bytes / 1_000_000)} MB`;
+  const archive = tree.bytes + tree.entries * 1536 + 20_480;
+  const restores = 2 * (tree.bytes + tree.entries * 4096);
+  if (data.device === backups.device) {
+    const free = Math.min(data.free, backups.free);
+    return free < archive + restores
+      ? `${backups.path} and ${data.path} share a disk with ${megabytes(free)} free, less than the ${megabytes(archive + restores)} that a backup of the ${megabytes(tree.bytes)} of private data (${megabytes(archive)}) and the two restores an activation can need (${megabytes(restores)}) take together.`
+      : undefined;
+  }
+  if (backups.free < archive)
+    return `${backups.path} has ${megabytes(backups.free)} free, less than a backup of the ${megabytes(tree.bytes)} of private data takes (${megabytes(archive)}).`;
+  if (data.free < restores)
+    return `${data.path} has ${megabytes(data.free)} free, less than the two restores of the ${megabytes(tree.bytes)} of private data that an activation can need (${megabytes(restores)}).`;
+  return undefined;
+}
+
+/**
+ * Whether an updater shows signs of life: its own code ran (`beat`), or the commands it waits
+ * for used the CPU or the disk (`sample`, of the whole unit). An updater that for `limit` does
+ * neither is hung. No length of time ends one that works.
+ */
+export function liveness(limit: number, now: number, cpuNeeded = 5000, ioNeeded = 1_000_000) {
+  let seen = now;
+  let base: { cpu?: number; io?: number } = {};
+  return {
+    beat(at: number) {
+      seen = at;
+    },
+    sample(at: number, work: { cpu?: number; io?: number }) {
+      const progressed =
+        (work.cpu !== undefined && base.cpu !== undefined && work.cpu - base.cpu >= cpuNeeded) ||
+        (work.io !== undefined && base.io !== undefined && work.io - base.io >= ioNeeded);
+      const rebased =
+        (work.cpu === undefined) !== (base.cpu === undefined) ||
+        (work.io === undefined) !== (base.io === undefined);
+      if (progressed) seen = at;
+      if (progressed || rebased) base = { ...work };
+    },
+    alive: (at: number) => at - seen < limit,
+    idle: (at: number) => at - seen,
+  };
+}
+
+/** The flock(1) arguments that run a command while holding the deployment lock. */
+export function lockArguments(lock: string, wait: boolean, command: string[]): string[] {
+  return [
+    ...(wait ? [] : ['--nonblock', '--conflict-exit-code', String(lockHeld)]),
+    lock,
+    ...command,
+  ];
+}
+/** flock's exit status when something else holds the lock. */
+export const lockHeld = 75;
 
 // Installs a provider's CLI for the host's user with the provider's own installer, which verifies
 // what it downloads: positional arguments only, the whole installer before any of it runs.
@@ -1519,6 +2340,65 @@ function run(command: string, args: string[], options: SpawnSyncOptions = {}) {
   if (result.status !== 0)
     throw new Error(`${command} ${args[0]} exited with ${result.status ?? result.signal}.`);
 }
+
+/**
+ * Runs a command without holding this process's own code meanwhile, so that an updater waiting
+ * for a build goes on showing that it lives.
+ */
+function runFree(command: string, args: string[], stdio: (number | 'ignore' | 'inherit')[]) {
+  return new Promise<number | null>((done, failed) => {
+    const child = spawn(command, args, { stdio });
+    child.on('error', failed);
+    child.on('close', (status) => done(status));
+  });
+}
+
+/** When a process began, in milliseconds, from the kernel: its start since boot and the boot. */
+function processStart(pid: number): number | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const ticks = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]);
+    const boot = Number(/^btime (\d+)$/m.exec(readFileSync('/proc/stat', 'utf8'))?.[1]);
+    const started = boot * 1000 + ticks * 10;
+    return Number.isFinite(started) && started > 0 ? started : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The archives of the server: GNU tar and gzip, each flushed before anything relies on it. */
+const archiver: Archiver = {
+  archive(parent, name, skip, to) {
+    run('tar', [
+      '-cf',
+      to,
+      ...skip.map((entry) => `--exclude=${name}/${entry}`),
+      '-C',
+      parent,
+      name,
+    ]);
+  },
+  extract(backup, into) {
+    // As root, tar restores the original owners and modes; it reads either kind of archive.
+    run('tar', ['-xf', backup, '-C', into]);
+    // Everything it unpacked, on the disk before the data is replaced by it.
+    run('sync', ['--file-system', into]);
+  },
+  pack(archive, to) {
+    run('gzip', ['-c', archive], { stdio: ['ignore', to, 'inherit'] });
+  },
+  unpacked(packed) {
+    // One pass, which fails when gzip does: a copy that is cut short is not hashed as if whole.
+    const result = spawnSync(
+      'bash',
+      ['-o', 'pipefail', '-c', 'gzip -dc -- "$1" | sha256sum', 'bash', packed],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] },
+    );
+    const sha256 = /^[0-9a-f]{64}/.exec(result.stdout ?? '')?.[0];
+    if (result.status !== 0 || !sha256) throw new Error(`${packed} cannot be unpacked.`);
+    return sha256;
+  },
+};
 
 async function fetchBytes(url: string, limit: number, headers: Record<string, string> = {}) {
   const response = await fetch(url, {
@@ -1562,7 +2442,12 @@ export function createSystem(config: Config): System {
   // Runs one build step as the unprivileged build user, confined to the release directory and
   // its npm cache, without private data and at low priority beside other services. It has no
   // memory, task or time limit: a build stops only where the machine itself does.
-  const sandbox = (directory: string, command: string[], network: boolean, input?: number) => {
+  const sandbox = async (
+    directory: string,
+    command: string[],
+    network: boolean,
+    input?: number,
+  ) => {
     const hidden = [config.data, config.backups, config.stateDirectory, '/etc/agent-studio'];
     const properties = [
       'ProtectSystem=strict',
@@ -1583,7 +2468,7 @@ export function createSystem(config: Config): System {
       'TasksMax=infinity',
       ...(network ? [] : ['PrivateNetwork=yes']),
     ];
-    run(
+    const status = await runFree(
       'systemd-run',
       [
         '--quiet',
@@ -1602,8 +2487,9 @@ export function createSystem(config: Config): System {
         '--',
         ...command,
       ],
-      { stdio: [input ?? 'ignore', 'inherit', 'inherit'] },
+      [input ?? 'ignore', 'inherit', 'inherit'],
     );
+    if (status !== 0) throw new Error(`systemd-run --quiet exited with ${status ?? 'a signal'}.`);
   };
   // The same sandbox for a command whose output is the answer, ending it after `seconds`.
   const sandboxOutput = (directory: string, command: string[], seconds: number) => {
@@ -1639,8 +2525,8 @@ export function createSystem(config: Config): System {
   };
   // Runs a command outside this updater's own sandbox, where /home is hidden and files are
   // private: as root to set up the system, or as the host's user for what lives in its home.
-  const transient = (command: string[], user?: string, check = true) => {
-    const result = spawnSync(
+  const transient = async (command: string[], user?: string, check = true) => {
+    const status = await runFree(
       'systemd-run',
       [
         '--quiet',
@@ -1654,12 +2540,11 @@ export function createSystem(config: Config): System {
         '--',
         ...command,
       ],
-      { stdio: ['ignore', 'inherit', 'inherit'] },
+      ['ignore', 'inherit', 'inherit'],
     );
-    if (result.error) throw result.error;
-    if (check && result.status !== 0)
-      throw new Error(`${basename(command[0])} exited with ${result.status ?? result.signal}.`);
-    return result.status;
+    if (check && status !== 0)
+      throw new Error(`${basename(command[0])} exited with ${status ?? 'a signal'}.`);
+    return status;
   };
   // Replaces a root-owned file only when it changes, never through what its path points to.
   const place = (path: string, content: string, mode: number) => {
@@ -1714,20 +2599,31 @@ export function createSystem(config: Config): System {
       return undefined;
     }
   };
-  // The size of a folder's files.
-  const treeBytes = (folder: string, skip: string[] = []): number => {
-    let bytes = 0;
+  // The size of a folder's files and how many things it holds, while the relay writes in it.
+  const treeSize = (folder: string, skip: string[] = []): TreeSize => {
+    const size = { bytes: 0, entries: 1 };
     for (const entry of readdirSync(folder, { withFileTypes: true })) {
       if (skip.includes(entry.name)) continue;
       const path = join(folder, entry.name);
       try {
-        bytes += entry.isDirectory() ? treeBytes(path) : lstatSync(path).size;
+        if (entry.isDirectory()) {
+          const inner = treeSize(path);
+          size.bytes += inner.bytes;
+          size.entries += inner.entries;
+        } else {
+          size.bytes += lstatSync(path).size;
+          size.entries++;
+        }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       }
     }
-    return bytes;
+    return size;
   };
+  // What says whether the state just read is the journal as it was last written.
+  let recovered: Recovered | undefined;
+  // The host's process as this updater first saw it run a version.
+  let hostSeen: { version: string; pid: number } | undefined;
   // The trial of a release: its relay as a unit of its own, on a copy of the data beside it.
   const trialUnit = `${config.service}-trial`;
   const trialData = join(dirname(config.data), `.${basename(config.data)}-trial`);
@@ -1776,20 +2672,14 @@ export function createSystem(config: Config): System {
     log: (text) => console.log(text),
     sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
     readState() {
-      try {
-        const state = JSON.parse(readFileSync(stateFile, 'utf8')) as State;
-        if (state.version !== 1 || !Array.isArray(state.history))
-          throw new Error(`${stateFile} has an unknown format.`);
-        return state;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return emptyState();
-        throw error;
-      }
+      const journal = readJournal(stateFile);
+      recovered = journal.recovered;
+      return journal.state;
     },
+    recovered: () => recovered,
     writeState(state) {
-      mkdirSync(config.stateDirectory, { recursive: true, mode: 0o700 });
-      writeFileSync(`${stateFile}.tmp`, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
-      renameSync(`${stateFile}.tmp`, stateFile);
+      writeJournal(stateFile, state);
+      recovered = undefined;
     },
     async latestRelease() {
       const response = await fetch(`${config.api}/repos/${config.repo}/releases/latest`, {
@@ -1815,8 +2705,8 @@ export function createSystem(config: Config): System {
     savedInstaller: (commit) => (exists(saved(commit)) ? readFileSync(saved(commit)) : undefined),
     saveInstaller(commit, data) {
       mkdirSync(config.stateDirectory, { recursive: true, mode: 0o700 });
-      writeFileSync(`${saved(commit)}.tmp`, data, { mode: 0o600 });
-      renameSync(`${saved(commit)}.tmp`, saved(commit));
+      clearPartials(saved(commit));
+      writeDurably(saved(commit), data, 0o600);
     },
     discard(commit) {
       for (const path of [saved(commit), join(releases, `.building-${commit}`)])
@@ -1842,21 +2732,24 @@ export function createSystem(config: Config): System {
       const input = openSync(archive, 'r');
       try {
         const tar = ['--strip-components=1', '--no-same-owner', '--no-same-permissions'];
-        sandbox(building, ['/usr/bin/tar', '-xzf', '-', ...tar], false, input);
+        await sandbox(building, ['/usr/bin/tar', '-xzf', '-', ...tar], false, input);
       } finally {
         closeSync(input);
         rmSync(archive, { force: true });
       }
       const npm = join(dirname(process.execPath), 'npm');
-      sandbox(building, [npm, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], true);
-      sandbox(building, [npm, 'run', 'build'], false);
-      sandbox(building, [npm, 'test'], false);
+      await sandbox(building, [npm, 'ci', '--ignore-scripts', '--no-audit', '--no-fund'], true);
+      await sandbox(building, [npm, 'run', 'build'], false);
+      await sandbox(building, [npm, 'test'], false);
       // The relay runs these files, so only root may change them from now on.
       run('chown', ['-R', '-h', 'root:root', building]);
       run('chmod', ['-R', 'go-w', building]);
       create(join(building, '.built-by-updater'));
       create(join(building, '.deployment-ready'));
+      // A release that is ready is whole: its files are on the disk before its name says so.
+      run('sync', ['--file-system', building]);
       renameSync(building, target);
+      syncFolder(releases);
     },
     releaseKey(commit) {
       try {
@@ -1897,6 +2790,7 @@ export function createSystem(config: Config): System {
     newServer: () => !exists(current),
     deselect() {
       if (exists(current) && lstatSync(current).isSymbolicLink()) rmSync(current);
+      syncFolder(config.root);
     },
     serviceActive: () =>
       spawnSync('systemctl', ['is-active', '--quiet', config.service], { timeout: answerWithin })
@@ -1950,6 +2844,19 @@ export function createSystem(config: Config): System {
       }
       const status = Number(values.ExecMainStatus) || 0;
       const result = values.Result && values.Result !== 'success' ? values.Result : '';
+      // Where the process runs: the service's working directory is the current link, which
+      // the process resolved when it began, so this is the release it runs whatever the link
+      // selects by now.
+      let release: string | undefined;
+      const started = pid ? processStart(pid) : undefined;
+      if (pid && !trial) {
+        try {
+          const directory = realpathSync(`/proc/${pid}/cwd`);
+          if (dirname(directory) === realpathSync(releases)) release = basename(directory);
+        } catch {
+          // It ended meanwhile.
+        }
+      }
       return {
         state: values.ActiveState || 'unknown',
         restarts: Number(values.NRestarts) || 0,
@@ -1957,6 +2864,8 @@ export function createSystem(config: Config): System {
         ...(cpu === undefined ? {} : { cpu }),
         ...(io === undefined ? {} : { io }),
         ...(result ? { result: `${result}${status ? ` ${status}` : ''}` } : {}),
+        ...(started === undefined ? {} : { started }),
+        ...(release ? { release } : {}),
       };
     },
     lastWords(since, trial) {
@@ -2045,54 +2954,38 @@ export function createSystem(config: Config): System {
       } catch (error) {
         throw new Error(`a backup cannot be written to ${config.backups} (${message(error)}).`);
       }
-      // The backup is the data once over, and so is the folder a restore unpacks beside it.
-      const megabytes = (bytes: number) => `${Math.ceil(bytes / 1_000_000)} MB`;
-      const bytes = treeBytes(config.data, ['.npm']);
-      for (const [folder, what] of [
-        [config.backups, 'a backup of'],
-        [dirname(config.data), 'restoring'],
-      ]) {
-        const disk = statfsSync(folder);
-        const free = disk.bavail * disk.bsize;
-        if (free < bytes)
-          throw new Error(
-            `${folder} has ${megabytes(free)} free, less than ${what} the ${megabytes(bytes)} of private data takes.`,
-          );
-      }
+      // Both disks, which are often one: what they must hold at once is counted together.
+      const disk = (path: string) => {
+        const space = statfsSync(path);
+        return { path, device: statSync(path).dev, free: space.bavail * space.bsize };
+      };
+      const short = spaceShort(
+        treeSize(config.data, ['.npm']),
+        disk(dirname(config.data)),
+        disk(config.backups),
+      );
+      if (short) throw new Error(short);
     },
-    backup(commit) {
-      mkdirSync(config.backups, { recursive: true, mode: 0o700 });
-      // Uncompressed: compressing the owner's 785 MB took 24 seconds of a stopped relay, and
-      // writing them as they are takes one. The archive is compressed once the relay runs.
-      let path = join(config.backups, `pre-${commit}.tar`);
-      if (exists(path) || exists(`${path}.gz`))
-        path = join(config.backups, `pre-${commit}-${stamp()}.tar`);
-      const name = basename(config.data);
-      // Earlier manual builds left an npm cache in the service home; it is not private data.
-      const args = ['-cf', `${path}.partial`, `--exclude=${name}/.npm`];
-      rmSync(`${path}.partial`, { force: true });
-      run('tar', [...args, '-C', dirname(config.data), name]);
-      chmodSync(`${path}.partial`, 0o600);
-      renameSync(`${path}.partial`, path);
-      return path;
-    },
-    compress(backup) {
-      if (!backup.endsWith('.tar')) return backup;
-      const packed = `${backup}.gz`;
-      const partial = `${packed}.partial`;
-      rmSync(partial, { force: true });
-      const output = openSync(partial, 'wx', 0o600);
-      try {
-        run('gzip', ['-c', backup], { stdio: ['ignore', output, 'inherit'] });
-      } catch (error) {
-        rmSync(partial, { force: true });
-        throw error;
-      } finally {
-        closeSync(output);
-      }
-      renameSync(partial, packed);
-      rmSync(backup);
-      return packed;
+    // Uncompressed: compressing the owner's 785 MB took 24 seconds of a stopped relay, and
+    // writing them as they are, with their SHA-256 and flushed to the disk, takes a few. The
+    // archive is compressed once the relay runs. Earlier manual builds left an npm cache in the
+    // service home; it is not private data.
+    backup: (commit, began, behind) =>
+      makeBackup({
+        data: config.data,
+        backups: config.backups,
+        commit,
+        began,
+        behind,
+        skip: ['.npm'],
+        made: new Date(),
+        archiver,
+      }),
+    compress: (backup) => packBackup(backup, archiver),
+    removeBackup(backup) {
+      if (dirname(backup) !== config.backups || !backup.endsWith('.tar')) return;
+      rmSync(backup, { force: true });
+      syncFolder(config.backups);
     },
     select(release) {
       if (!/^[\w.-]+$/.test(release) || !lstatSync(join(releases, release)).isDirectory())
@@ -2101,17 +2994,10 @@ export function createSystem(config: Config): System {
       rmSync(next, { force: true });
       symlinkSync(join(releases, release), next);
       renameSync(next, current);
+      syncFolder(config.root);
     },
-    restore(backup, keep) {
-      if (!/^[A-Za-z0-9_.-]+$/.test(keep)) throw new Error(`${keep} cannot name a folder.`);
-      const parent = dirname(config.data);
-      const name = basename(config.data);
-      const staging = join(parent, `.${name}-restore-${keep}`);
-      const kept = join(parent, `.${name}-failed-${keep}`);
-      // As root, tar restores the original owners and modes; it reads either kind of archive.
-      replaceData(config.data, staging, kept, () => run('tar', ['-xf', backup, '-C', staging]));
-      return kept;
-    },
+    restore: (backup, keep) => restoreBackup({ data: config.data, backup, keep, archiver }),
+    restored: (keep) => restoreDone(config.data, keep),
     async probe(trial) {
       const url = `http://127.0.0.1:${config.port}/v1/state`;
       if (trial) {
@@ -2185,7 +3071,11 @@ export function createSystem(config: Config): System {
       run('chown', [`${config.buildUser}:${config.buildUser}`, image]);
       try {
         // The AppImage's own runtime unpacks it, as the build user and without network.
-        sandbox(extracting, ['/bin/sh', '-c', './app.AppImage --appimage-extract >/dev/null'], false);
+        await sandbox(
+          extracting,
+          ['/bin/sh', '-c', './app.AppImage --appimage-extract >/dev/null'],
+          false,
+        );
         rmSync(image, { force: true });
         const app = join(extracting, 'squashfs-root');
         // The host runs these files, so only root may change them from now on, while every user
@@ -2198,7 +3088,9 @@ export function createSystem(config: Config): System {
         create(join(app, '.built-by-updater'));
         create(join(app, '.deployment-ready'));
         rmSync(join(hosts, version), { recursive: true, force: true });
+        run('sync', ['--file-system', app]);
         renameSync(app, join(hosts, version));
+        syncFolder(hosts);
         return true;
       } finally {
         rmSync(extracting, { recursive: true, force: true });
@@ -2212,7 +3104,7 @@ export function createSystem(config: Config): System {
         return undefined;
       }
     },
-    hostPackages() {
+    async hostPackages() {
       const lib = '/usr/lib/x86_64-linux-gnu';
       // A virtual display, a session bus of its own, sudo, and curl for the CLIs' installers.
       // The AppImage leaves some libraries to the system, as every desktop has them, and WebKit
@@ -2236,8 +3128,8 @@ export function createSystem(config: Config): System {
       const missing = [...new Set(needs.filter(([file]) => !exists(file)).map(([, p]) => p))];
       if (missing.length) {
         system.log(`Installing ${missing.join(', ')} for the host.`);
-        transient(['/usr/bin/apt-get', 'update', '-q']);
-        transient([
+        await transient(['/usr/bin/apt-get', 'update', '-q']);
+        await transient([
           '/usr/bin/apt-get',
           'install',
           '-y',
@@ -2250,9 +3142,9 @@ export function createSystem(config: Config): System {
     async provisionHost() {
       const host = config.host;
       if (!host) return;
-      system.hostPackages();
+      await system.hostPackages();
       if (spawnSync('id', ['-u', host.user], { stdio: 'ignore' }).status !== 0) {
-        transient([
+        await transient([
           '/usr/sbin/useradd',
           '--create-home',
           '--shell',
@@ -2283,9 +3175,9 @@ export function createSystem(config: Config): System {
       }
       for (const [cli, url, runner] of clis) {
         const probe = `command -v ${cli} >/dev/null || test -x "$HOME/.local/bin/${cli}"`;
-        if (transient(['/bin/bash', '-lc', probe], host.user, false) === 0) continue;
+        if ((await transient(['/bin/bash', '-lc', probe], host.user, false)) === 0) continue;
         system.log(`Installing ${cli} for ${host.user}.`);
-        transient(['/bin/bash', '-c', cliInstaller, 'install', url, runner], host.user);
+        await transient(['/bin/bash', '-c', cliInstaller, 'install', url, runner], host.user);
       }
       const unit = join('/etc/systemd/system', `${host.service}.service`);
       const staging = place(unit, hostUnit(config, home), 0o644);
@@ -2302,6 +3194,50 @@ export function createSystem(config: Config): System {
       rmSync(next, { force: true });
       symlinkSync(join(hosts, version), next);
       renameSync(next, join(hosts, 'current'));
+      syncFolder(hosts);
+    },
+    hostRuns(version) {
+      if (!config.host || system.currentHost() !== version) return false;
+      const unit = show(config.host.service, [
+        'ActiveState',
+        'NRestarts',
+        'MainPID',
+        'ControlGroup',
+      ]);
+      const pid = Number(unit?.MainPID) || 0;
+      if (unit?.ActiveState !== 'active' || !pid) return false;
+      // Started again by its service since this updater restarted it: it did not stay up.
+      if (hostRestarts !== undefined && unit.NRestarts !== hostRestarts) return false;
+      // Another process than the one first seen running this version: it ended in between.
+      if (hostSeen?.version === version && hostSeen.pid !== pid) return false;
+      // The files its processes run: the app's own programs lie in its version's folder.
+      const running = new Set<string>();
+      try {
+        const folder = `${realpathSync(hosts)}/`;
+        const processes = readFileSync(`/sys/fs/cgroup${unit.ControlGroup}/cgroup.procs`, 'utf8');
+        for (const process of processes.split('\n').filter(Boolean)) {
+          try {
+            const program = readlinkSync(`/proc/${process}/exe`);
+            if (program.startsWith(folder)) running.add(program.slice(folder.length).split('/')[0]);
+          } catch {
+            // It ended meanwhile, or is not a program on a disk.
+          }
+        }
+      } catch {
+        // Without its processes, when it began says which version it runs.
+      }
+      let runs: boolean;
+      if (running.size) runs = running.size === 1 && running.has(version);
+      else {
+        // Its command names the link, which the process resolved when it began: one that began
+        // after the link last changed runs what the link selects. The kernel tells a start to
+        // the second.
+        const began = processStart(pid);
+        const selected = lstatSync(join(hosts, 'current')).ctimeMs;
+        runs = began !== undefined && began + 1000 >= selected;
+      }
+      if (runs) hostSeen = { version, pid };
+      return runs;
     },
     // A host that ended and was started again by its service since this updater started it did
     // not stay up, even when it runs again now.
@@ -2314,6 +3250,7 @@ export function createSystem(config: Config): System {
       spawnSync('systemctl', ['reset-failed', config.host.service], { stdio: 'ignore' });
       run('systemctl', ['restart', config.host.service]);
       hostRestarts = restartsOf(config.host.service);
+      hostSeen = undefined;
     },
     stopHost() {
       if (config.host) spawnSync('systemctl', ['stop', config.host.service], { stdio: 'ignore' });
@@ -2357,7 +3294,11 @@ export function createSystem(config: Config): System {
     prune(commit, backup) {
       if (system.currentRelease() !== commit)
         rmSync(join(releases, commit), { recursive: true, force: true });
-      if (backup && dirname(backup) === config.backups) rmSync(backup, { force: true });
+      if (backup && dirname(backup) === config.backups) {
+        // With its manifest, and the archive a compressed copy had not replaced yet.
+        for (const path of [backup, backup.replace(/\.gz$/, ''), manifestOf(backup)])
+          rmSync(path, { force: true });
+      }
       for (const entry of existsSync(config.backups) ? readdirSync(config.backups) : [])
         if (entry.startsWith(`pre-${commit}-windows-installer`))
           rmSync(join(config.backups, entry), { force: true });
@@ -2366,10 +3307,124 @@ export function createSystem(config: Config): System {
   return system;
 }
 
+/** What the unit of this updater used so far: CPU time in milliseconds, bytes read and written. */
+function ownWork(): { cpu?: number; io?: number } {
+  try {
+    const group = readFileSync('/proc/self/cgroup', 'utf8').trim().split('\n').at(-1) ?? '';
+    const folder = `/sys/fs/cgroup${group.slice(group.lastIndexOf(':') + 1)}`;
+    const work: { cpu?: number; io?: number } = {};
+    try {
+      const used = /^usage_usec (\d+)$/m.exec(readFileSync(join(folder, 'cpu.stat'), 'utf8'));
+      if (used) work.cpu = Number(used[1]) / 1000;
+    } catch {
+      // No CPU accounting for this unit.
+    }
+    try {
+      let bytes = 0;
+      for (const match of readFileSync(join(folder, 'io.stat'), 'utf8').matchAll(
+        /\b[rw]bytes=(\d+)/g,
+      ))
+        bytes += Number(match[1]);
+      work.io = bytes;
+    } catch {
+      // No IO accounting for this unit.
+    }
+    return work;
+  } catch {
+    return {};
+  }
+}
+
+const lockEnvironment = 'AGENT_STUDIO_UPDATE_LOCK';
+const beatEnvironment = 'AGENT_STUDIO_UPDATE_BEAT';
+
+/**
+ * Runs a command of this updater while holding the deployment lock, which everything that
+ * changes the state or a deployment holds: a check, retry, trust, install.sh and a deployment by
+ * hand. A check skips its run while the lock is held; retry and trust wait for it.
+ *
+ * As a service (agent-studio-update.service, Type=notify with a watchdog) the check has no
+ * deadline: this process tells systemd that it started, runs the check as a child, and answers
+ * the watchdog for as long as the check shows signs of life, which are its own code running (a
+ * byte on a pipe every ten seconds) or the commands it waits for using the CPU or the disk. One
+ * that for `hungAfter` does neither is no longer answered for, and systemd ends the unit, whose
+ * next run goes on from the state.
+ */
+async function locked(config: Config, argv: string[]): Promise<number> {
+  const [command = 'check'] = argv;
+  const lock = join(config.root, '.deploy.lock');
+  const self = [process.execPath, resolve(import.meta.filename), ...argv];
+  const environment = { ...process.env, [lockEnvironment]: 'held' };
+  if (command !== 'check') {
+    // Says so only when it has to wait.
+    const free = spawnSync('flock', lockArguments(lock, false, ['true']), { stdio: 'ignore' });
+    if (free.status === lockHeld)
+      console.log('A check or a deployment is running; waiting for it to end.');
+    const result = spawnSync('flock', lockArguments(lock, true, self), {
+      stdio: 'inherit',
+      env: environment,
+    });
+    if (result.error) throw result.error;
+    return result.status ?? 1;
+  }
+  const notify = (...what: string[]) => {
+    if (process.env.NOTIFY_SOCKET)
+      spawnSync('systemd-notify', what, { stdio: 'ignore', timeout: answerWithin });
+  };
+  notify('--ready', '--status=Checking for a release');
+  const child = spawn('flock', lockArguments(lock, false, self), {
+    stdio: ['ignore', 'inherit', 'inherit', 'pipe'],
+    env: { ...environment, [beatEnvironment]: '3' },
+  });
+  const life = liveness(config.hungAfter, Date.now());
+  (child.stdio[3] as NodeJS.ReadableStream).on('data', () => life.beat(Date.now()));
+  let said = false;
+  const watch = setInterval(
+    () => {
+      const now = Date.now();
+      life.sample(now, ownWork());
+      if (life.alive(now)) return notify('WATCHDOG=1');
+      if (said) return;
+      said = true;
+      console.log(
+        `This check neither ran nor had a command of its own work for ${seconds(life.idle(now))}: it is hung. Its watchdog is no longer answered, so systemd ends it, and the next check goes on from the state.`,
+      );
+    },
+    Math.min(30_000, config.hungAfter / 4),
+  );
+  const status = await new Promise<number>((done, failed) => {
+    child.on('error', failed);
+    child.on('close', (code) => done(code ?? 1));
+  }).finally(() => clearInterval(watch));
+  if (status !== lockHeld) return status;
+  console.log('A deployment holds the lock; this check is skipped.');
+  return 0;
+}
+
 async function main(argv: string[]) {
   const config = readConfig();
-  const system = createSystem(config);
   const [command = 'check', ...rest] = argv;
+  const usage = 'Usage: node update.ts [check | retry | trust <tauri.conf.json> [--replace]]';
+  if (!['check', 'retry', 'trust'].includes(command) || (command === 'trust' && !rest[0]))
+    throw new Error(usage);
+  if (process.env[lockEnvironment] !== 'held') {
+    process.exitCode = await locked(config, argv);
+    return;
+  }
+  // The check's own code runs: said to the process that answers the unit's watchdog.
+  const pipe = Number(process.env[beatEnvironment]);
+  if (pipe) {
+    const beat = () => {
+      try {
+        writeSync(pipe, '.');
+      } catch {
+        // Nobody listens.
+      }
+    };
+    beat();
+    setInterval(beat, 10_000).unref();
+  }
+  const system = createSystem(config);
   if (command === 'check') return check(system, config);
   const state = system.readState();
   if (command === 'retry') {
@@ -2389,7 +3444,7 @@ async function main(argv: string[]) {
     system.writeState(state);
     return system.log(`Trusting updater key ${id}.`);
   }
-  throw new Error('Usage: node update.ts [check | retry | trust <tauri.conf.json> [--replace]]');
+  throw new Error(usage);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {

@@ -11,9 +11,14 @@
 // seconds, start a release once more when the one before it no longer starts, refuse an
 // untrusted installer and ignore a downgrade. Updaters are killed while a trial runs and right
 // after a release was selected, and the next check must clear up and take nothing for done. The
-// QA relay's environment file names its data folder, which a trial must not follow. The first
-// release is built from source; the
-// others are that build with another relay/start.ts. Each release also runs as
+// QA relay's environment file names its data folder, which a trial must not follow. Every check
+// runs under the settings of the updater's own unit file (no deadline, a watchdog), and takes
+// the deployment lock itself. On three gigabytes of data, updaters are killed while the backup
+// is archived, while it is compressed and while it is put back; a backup cut short is refused
+// with the data left alone; a relay and a host that an updater started and could not record are
+// watched on, their processes unchanged; a check skips its run and a retry waits while the lock
+// is held; and an updater that hangs is ended by its watchdog. The first release is built from
+// source; the others are that build with another relay/start.ts. Each release also runs as
 // the server's host (agent-studio-qa-host.service): a stand-in AppImage that only stays up, or,
 // with --appimage, a real build of the app for the first release, which must pair with the QA
 // relay as a server and list a folder for another device. A host that does not stay up goes
@@ -26,11 +31,13 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -212,6 +219,11 @@ async function remote(upload) {
     '9.0.6': 'b7',
     '9.0.7': 'c8',
     '9.0.8': 'd9',
+    '9.0.9': 'a9',
+    '9.1.0': 'b0',
+    '9.1.1': 'c1',
+    '9.1.2': 'd2',
+    '9.1.3': 'f3',
     '8.0.0': 'e4',
   };
   // Something a relay can write that outlives a restored data folder.
@@ -487,6 +499,11 @@ await import('./relay-start.ts');
       ['9.0.6', good, qaKey, fakeAppImage(true)],
       ['9.0.7', good, qaKey, fakeAppImage(true)],
       ['9.0.8', good, qaKey, fakeAppImage(true)],
+      ['9.0.9', good, qaKey, fakeAppImage(true)],
+      ['9.1.0', good, qaKey, fakeAppImage(true)],
+      ['9.1.1', good, qaKey, fakeAppImage(true)],
+      ['9.1.2', good, qaKey, fakeAppImage(true)],
+      ['9.1.3', good, qaKey, fakeAppImage(true)],
       ['8.0.0', good, qaKey, fakeAppImage(true)],
     ]) {
       const installer = randomBytes(512 * 1024);
@@ -577,12 +594,40 @@ await import('./relay-start.ts');
     });
     await new Promise((done) => server.listen(qa.apiPort, '127.0.0.1', done));
 
-    // Run the updater the way its systemd unit does, pointed at the QA instance. It must run
-    // asynchronously so this process keeps answering as GitHub.
+    // Run the updater the way its systemd unit does, pointed at the QA instance: a check under
+    // every setting of the unit file install.sh installs, but for the program it runs. It must
+    // run asynchronously so this process keeps answering as GitHub.
+    const unitFile = readFileSync(
+      join(source, 'scripts', 'vps', 'agent-studio-update.service'),
+      'utf8',
+    );
+    const unitSettings = unitFile
+      .slice(unitFile.indexOf('[Service]'))
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => /^[A-Z][A-Za-z]*=/.test(line) && !line.startsWith('ExecStart='));
+    for (const setting of ['Type=notify', 'NotifyAccess=all', 'TimeoutStartSec=infinity'])
+      expect(unitSettings.includes(setting), `the updater's unit lacks ${setting}`);
+    expect(
+      unitSettings.some((line) => line.startsWith('WatchdogSec=')) &&
+        !unitSettings.some((line) => /^(RuntimeMaxSec|TimeoutSec)=/.test(line)),
+      "the updater's unit has a deadline, or no watchdog",
+    );
+    // What a scenario changes of them, and of the updater's settings.
+    let unitChanges = { env: {}, properties: [] };
     let launched = 0;
     const launch = (...args) => {
       const name = `${qa.service}-update-${++launched}`;
+      // retry and trust are run from a shell, which is not a unit that reports its start.
+      const settings =
+        args[0] === 'check'
+          ? [...unitSettings, ...unitChanges.properties]
+          : [
+              'Type=exec',
+              ...unitSettings.filter((line) => /^(UMask|Protect|Private|NoNew)/.test(line)),
+            ];
       const env = {
+        ...unitChanges.env,
         API: origin,
         REPO: 'qa/agent-studio',
         ROOT: qa.root,
@@ -603,11 +648,7 @@ await import('./relay-start.ts');
         '--wait',
         '--pipe',
         '--collect',
-        '--service-type=exec',
-        '--property=UMask=0077',
-        '--property=ProtectHome=yes',
-        '--property=PrivateTmp=yes',
-        '--property=NoNewPrivileges=yes',
+        ...settings.map((setting) => `--property=${setting}`),
         ...Object.entries(env).map(
           ([name, value]) => `--setenv=AGENT_STUDIO_UPDATE_${name}=${value}`,
         ),
@@ -632,7 +673,7 @@ await import('./relay-start.ts');
       const messages = output
         .split('\n')
         .filter((line) =>
-          /^(Found|Building|Staged|Waiting|Trying|Activat|Published|Not installing|Ignoring|Could not|Trusting|v\d|[0-9a-f]{40} |No |The |Extracting|Installing|Created|Starting|An updater|A trial)/.test(
+          /^(Found|Building|Staged|Waiting|Trying|Activat|Published|Not installing|Ignoring|Could not|Trusting|v\d|[0-9a-f]{40} |No |The |Extracting|Installing|Created|Starting|An updater|A trial|A check|A deployment|This check|Nothing)/.test(
             line,
           ),
         );
@@ -643,16 +684,16 @@ await import('./relay-start.ts');
     const trialCopy = `/var/lib/.${basename(qa.data)}-trial`;
     const settle = (ms) => new Promise((done) => setTimeout(done, ms));
     // Starts a check and kills its updater, as the kernel or a timeout would, once `when` holds.
-    const killed = async (when, what) => {
+    const killed = async (when, what, patience = 300) => {
       const check = launch('check');
       let met = false;
-      for (let waited = 0; waited < 300 && !met; waited++) {
+      for (let waited = 0; waited < patience && !met; waited++) {
         try {
           met = when();
         } catch {
           // The state is being replaced.
         }
-        if (!met) await settle(200);
+        if (!met) await settle(100);
       }
       if (!met) {
         const run = await finish(check);
@@ -1199,14 +1240,366 @@ await import('./relay-start.ts');
     );
     passed('an activation its updater was killed in is finished by the next check');
 
-    // 10. Older releases are never installed.
+    // The releases of the scenarios below, staged while the first release's build is still
+    // there to make them from: the updater keeps five releases.
+    for (const [version, relay] of [
+      ['9.0.9', 'plain'],
+      ['9.1.0', 'plain'],
+      ['9.1.1', 'liveBroken'],
+      ['9.1.2', 'dyingLate'],
+      ['9.1.3', 'slow'],
+    ])
+      prepare(version, relay);
+    const answers = async () => (await status(`http://127.0.0.1:${qa.port}/v1/state`)) === 401;
+    const backupFiles = (version) =>
+      readdirSync(qa.backups)
+        .filter((name) => name.startsWith(`pre-${commit[version]}.tar`))
+        .sort();
+    const manifest = (version) =>
+      JSON.parse(
+        readFileSync(join(qa.backups, `pre-${commit[version]}.tar.manifest.json`), 'utf8'),
+      );
+    const fileSha = (path) => sh('sha256sum', [path]).slice(0, 64);
+    const keptFolders = () =>
+      readdirSync('/var/lib').filter((name) => name.startsWith('.agent-studio-qa-failed-'));
+    const stagingFolders = () =>
+      readdirSync('/var/lib').filter((name) => name.startsWith('.agent-studio-qa-restore-'));
+
+    // 10. An updater killed once the relay it started answers. The next check finds the relay
+    // it started, checks it as it runs and records it: the same process, never stopped again.
+    latest = '9.0.9';
+    await killed(
+      () => state().release.activation?.step === 'candidate' && selected() === commit['9.0.9'],
+      'starting the release',
+    );
+    for (let waited = 0; waited < 100 && !(await answers()); waited++) await settle(200);
+    expect(await answers(), 'the relay the killed updater started does not answer');
+    pid = relayPid();
+    run = await update('check');
+    expect(
+      run.status === 0 &&
+        run.output.includes(
+          `The relay of ${commit['9.0.9']} that the updater started runs; it is checked, not started again.`,
+        ) &&
+        run.output.includes('Activated v9.0.9'),
+      `the running relay was not taken up:\n${run.output.slice(-4000)}`,
+    );
+    expect(relayPid() === pid, 'the relay an updater had started was started again');
+    expect(state().release.phase === 'active' && (await answers()), 'v9.0.9 is not active');
+    passed('a relay that a killed updater had started is checked as it runs, not restarted', {
+      pid,
+    });
+
+    // 11. The deployment lock, which every command of the updater takes itself. A check skips
+    // its run while something holds it; retry waits, and changes the state only afterwards.
+    const lockFile = join(qa.root, '.deploy.lock');
+    const holder = spawn('flock', [lockFile, 'sleep', '9'], { stdio: 'ignore' });
+    await settle(1000);
+    began = Date.now();
+    run = await update('check');
+    expect(
+      run.status === 0 &&
+        run.output.includes('A deployment holds the lock; this check is skipped.') &&
+        Date.now() - began < 5000,
+      `a check did not skip its run while the lock was held:\n${run.output}`,
+    );
+    const stateBefore = readFileSync(join(qa.state, 'state.json'), 'utf8');
+    began = Date.now();
+    const waiting = launch('retry');
+    await settle(2000);
+    expect(
+      readFileSync(join(qa.state, 'state.json'), 'utf8') === stateBefore,
+      'retry changed the state while the lock was held',
+    );
+    run = await finish(waiting);
+    expect(
+      run.status === 0 &&
+        run.output.includes('A check or a deployment is running; waiting for it to end.') &&
+        run.output.includes('Nothing failed; the latest release will be checked again.') &&
+        Date.now() - began > 4000,
+      `retry did not wait for the lock:\n${run.output}`,
+    );
+    await new Promise((done) => holder.on('close', done));
+    expect(
+      !readdirSync(qa.state).some((name) => name.endsWith('.tmp') || name.endsWith('.partial')) &&
+        existsSync(join(qa.state, 'state.json.previous')),
+      `the state folder holds ${readdirSync(qa.state).join(', ')}`,
+    );
+    passed('a check skips its run while the lock is held, and retry waits for it');
+
+    // 12. Three gigabytes of data, so that archiving, compressing and unpacking take seconds.
+    // An updater is killed while it archives them: the relay is stopped, no backup has its
+    // name yet, and the next updater clears what was left and goes on. That one is killed
+    // while it compresses the backup: the state still names the archive, which is whole and
+    // still there. The third finishes, and removes the archive only then.
+    const big = join(qa.data, 'qa-big.bin');
+    sh('fallocate', ['-l', '3G', big]);
+    sh('chown', [`${qa.user}:${qa.user}`, big]);
+    latest = '9.1.0';
+    await killed(
+      () =>
+        backupFiles('9.1.0').some(
+          (name) =>
+            /\.tar\.\d+-[0-9a-f]+\.partial$/.test(name) &&
+            statSync(join(qa.backups, name)).size > 0,
+        ),
+      'archiving the data',
+      3000,
+    );
+    expect(
+      state().release.activation?.step === 'backup' && !state().release.activation.backup,
+      `killed while archiving, the state names a backup: ${JSON.stringify(state().release)}`,
+    );
+    expect(
+      !backupFiles('9.1.0').some((name) => name.endsWith('.tar')) && !active(qa.service),
+      `an archive that was not finished has its name: ${backupFiles('9.1.0').join(', ')}`,
+    );
+    passed('an updater killed while it archives the data leaves no backup under its name', {
+      left: backupFiles('9.1.0'),
+    });
+    await killed(
+      () => backupFiles('9.1.0').some((name) => /\.tar\.gz\.\d+-[0-9a-f]+\.partial$/.test(name)),
+      'compressing the backup',
+      3000,
+    );
+    const archive = join(qa.backups, `pre-${commit['9.1.0']}.tar`);
+    expect(
+      state().release.phase === 'active' &&
+        state().history[0].backup === archive &&
+        state().release.backup === archive,
+      `killed while compressing, the state does not name the archive: ${JSON.stringify(state().history[0])}`,
+    );
+    expect(
+      existsSync(archive) && !existsSync(`${archive}.gz`),
+      `killed while compressing: ${backupFiles('9.1.0').join(', ')}`,
+    );
+    expect(
+      statSync(archive).size === manifest('9.1.0').archive.bytes &&
+        fileSha(archive) === manifest('9.1.0').archive.sha256 &&
+        manifest('9.1.0').entries.some(
+          (entry) => entry.path === 'qa-big.bin' && entry.size === 3 * 1024 ** 3,
+        ) &&
+        !manifest('9.1.0').entries.some((entry) => entry.path.startsWith('.npm')),
+      'the archive is not what its manifest recorded',
+    );
+    expect(selected() === commit['9.1.0'] && (await answers()), 'v9.1.0 does not serve');
+    run = await update('check');
+    expect(run.status === 0, `the check after the kills failed:\n${run.output.slice(-4000)}`);
+    expect(
+      backupFiles('9.1.0').join() ===
+        [`pre-${commit['9.1.0']}.tar.gz`, `pre-${commit['9.1.0']}.tar.manifest.json`].join(),
+      `after compressing: ${backupFiles('9.1.0').join(', ')}`,
+    );
+    expect(
+      state().history[0].backup === `${archive}.gz` &&
+        state().release.backup === `${archive}.gz` &&
+        !state().cleanup &&
+        fileSha(`${archive}.gz`) === manifest('9.1.0').compressed?.sha256,
+      `the state does not name the compressed backup: ${JSON.stringify(state().history[0])}`,
+    );
+    expect(
+      sh('bash', ['-o', 'pipefail', '-c', `gzip -dc ${archive}.gz | sha256sum`]).slice(0, 64) ===
+        manifest('9.1.0').archive.sha256,
+      'the compressed backup does not unpack to the archive that was made',
+    );
+    expect(hostVersion() === '9.1.0' && active(qa.hostService), 'host does not run v9.1.0');
+    passed('an updater killed while it compresses a backup leaves the archive, named and whole', {
+      backup: backupFiles('9.1.0'),
+    });
+
+    // 13. A release whose relay ends as the service, and an updater killed while it puts the
+    // backup back: half of it lies beside the data. The next check finishes the restore, once.
+    latest = '9.1.1';
+    const keptBefore = keptFolders();
+    await killed(() => stagingFolders().length > 0, 'putting the backup back', 3000);
+    expect(
+      state().release.activation?.step === 'previous' && state().release.activation.keep,
+      `killed in a restore: ${JSON.stringify(state().release.activation)}`,
+    );
+    const interrupted = {
+      staging: stagingFolders(),
+      kept: keptFolders().length - keptBefore.length,
+    };
+    run = await update('check');
+    expect(
+      run.status === 1 &&
+        run.output.includes(`v9.1.1 failed its health check; ${commit['9.1.0']} was restored.`),
+      `the interrupted restore was not finished:\n${run.output.slice(-4000)}`,
+    );
+    expect(
+      stagingFolders().length === 0 && keptFolders().length === keptBefore.length + 1,
+      `after the restore: ${stagingFolders().join(', ')} / ${keptFolders().join(', ')}`,
+    );
+    expect(
+      readFileSync(join(qa.data, 'qa-marker.txt'), 'utf8') === 'original data' &&
+        statSync(big).size === 3 * 1024 ** 3 &&
+        statSync(qa.data).uid === Number(sh('id', ['-u', qa.user])),
+      'the data is not the backup, whole',
+    );
+    expect(
+      selected() === commit['9.1.0'] && (await answers()),
+      'the release before does not serve',
+    );
+    passed('a restore its updater was killed in is finished by the next check, once', interrupted);
+    rmSync(big);
+
+    // 14. A backup that was cut short. GNU tar ends well where such an archive ends in the
+    // middle and would unpack a part of the data as if it were all of it. The release fails
+    // its check, and the release before is started on the data as it is: nothing was moved
+    // aside for a backup that is not the archive that was made.
+    latest = '9.1.2';
+    await killed(
+      () =>
+        state().release.activation?.step === 'candidate' &&
+        selected() === commit['9.1.2'] &&
+        active(qa.service),
+      'starting the release',
+      3000,
+    );
+    const short = join(qa.backups, `pre-${commit['9.1.2']}.tar`);
+    const written = statSync(short).size;
+    sh('truncate', ['-s', '1024', short]);
+    // What tar makes of it: it ends well.
+    const tarEnds = spawnSync('tar', ['-tf', short], { encoding: 'utf8' });
+    const keptThen = keptFolders();
+    run = await update('check');
+    expect(run.status === 1, `a cut backup did not fail:\n${run.output.slice(-4000)}`);
+    for (const text of [
+      `The data backup ${short} cannot be put back: it holds 1024 bytes where ${written} were written. The private data stays as it is, and nothing was moved aside.`,
+      `v9.1.2 failed its health check; ${commit['9.1.0']} runs again, on the data as v9.1.2 left it.`,
+    ])
+      expect(run.output.includes(text), `missing "${text}":\n${run.output.slice(-6000)}`);
+    expect(
+      keptFolders().length === keptThen.length && stagingFolders().length === 0,
+      'data was moved aside for a backup that cannot be put back',
+    );
+    expect(
+      readFileSync(join(qa.data, 'qa-marker.txt'), 'utf8') === 'original data' &&
+        selected() === commit['9.1.0'] &&
+        (await answers()),
+      'the release before does not serve the data that was there',
+    );
+    passed('a backup that was cut short is not put back, and the data is left as it is', {
+      tar: `exit ${tarEnds.status}, ${tarEnds.stdout.trim().split('\n').length} entries listed`,
+      written,
+    });
+
+    // 15. An updater that hangs. Its unit has no deadline; the updater answers the unit's
+    // watchdog while its own code runs or its commands work. Here its code is stopped while it
+    // waits for a trial, with the watchdog and the patience shortened to seconds: systemd ends
+    // the unit, the trial with it, and the next check, under the same short watchdog, runs for
+    // minutes without being ended, since it shows signs of life all the while.
+    latest = '9.1.3';
+    unitChanges = { env: { HUNG_AFTER: '20' }, properties: ['WatchdogSec=10'] };
+    const hung = launch('check');
+    for (let waited = 0; waited < 600 && !active(trialService); waited++) await settle(200);
+    expect(active(trialService), 'the check that is to hang never tried the release');
+    const group = sh('systemctl', [
+      'show',
+      `${hung.name}.service`,
+      '-p',
+      'ControlGroup',
+      '--value',
+    ]);
+    const worker = readFileSync(`/sys/fs/cgroup${group.trim()}/cgroup.procs`, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .find((process) => {
+        try {
+          return (
+            readFileSync(`/proc/${process}/environ`, 'utf8').includes(
+              'AGENT_STUDIO_UPDATE_LOCK=held',
+            ) && !readFileSync(`/proc/${process}/cmdline`, 'utf8').startsWith('flock')
+          );
+        } catch {
+          return false;
+        }
+      });
+    expect(worker, 'the check has no process of its own');
+    began = Date.now();
+    process.kill(Number(worker), 'SIGSTOP');
+    run = await finish(hung);
+    took = Date.now() - began;
+    expect(
+      run.status !== 0 && run.output.includes('it is hung. Its watchdog is no longer answered'),
+      `a hung updater was not ended:\n${run.output.slice(-4000)}`,
+    );
+    expect(took > 15_000 && took < 90_000, `a hung updater was ended after ${took} ms`);
+    expect(!existsSync(`/proc/${worker}`), 'the hung updater still runs');
+    for (let waited = 0; waited < 50 && active(trialService); waited++) await settle(200);
+    expect(!active(trialService), 'the trial outlived the hung updater');
+    began = Date.now();
+    run = await update('check');
+    expect(
+      run.status === 0 && run.output.includes('Activated v9.1.3'),
+      `the check after the hung one failed:\n${run.output.slice(-4000)}`,
+    );
+    expect(
+      Date.now() - began > 90_000,
+      'the check was too short to show that a working updater is not ended',
+    );
+    unitChanges = { env: {}, properties: [] };
+    passed('an updater that hangs is ended by its watchdog, and one that works is not', {
+      endedAfter: `${took} ms`,
+      workedFor: `${Date.now() - began} ms`,
+    });
+
+    // 16. A host switch that was interrupted. The state says a switch was begun; the host
+    // already runs the version, started after its link was set: it is watched, not restarted.
+    // Then the link is set again, as by an updater that ended before it restarted the host:
+    // the process is older than the link, so nothing shows that it runs what the link selects,
+    // and it is restarted.
+    expect(hostVersion() === '9.1.3' && active(qa.hostService), 'host does not run v9.1.3');
+    const hostPid = () =>
+      sh('systemctl', ['show', qa.hostService, '-p', 'MainPID', '--value']).trim();
+    const interrupt = () => {
+      const saved = state();
+      saved.host = {
+        ...saved.host,
+        phase: 'staged',
+        staged: new Date().toISOString(),
+        activation: { step: 'switch', entered: new Date().toISOString() },
+      };
+      delete saved.host.activated;
+      writeFileSync(join(qa.state, 'state.json'), JSON.stringify(saved, null, 2), { mode: 0o600 });
+    };
+    let hostProcess = hostPid();
+    interrupt();
+    run = await update('check');
+    expect(
+      run.status === 0 &&
+        run.output.includes('The host already runs v9.1.3; it is watched, not started again.') &&
+        run.output.includes('The host runs v9.1.3'),
+      `the running host was not taken up:\n${run.output.slice(-4000)}`,
+    );
+    expect(hostPid() === hostProcess, 'a host that ran the version was restarted');
+    await settle(1500);
+    const link = join(qa.root, 'host', 'current');
+    symlinkSync(join(qa.root, 'host', '9.1.3'), `${link}.again`);
+    renameSync(`${link}.again`, link);
+    expect(lstatSync(link).ctimeMs > Date.now() - 1000, 'the link was not set again');
+    interrupt();
+    run = await update('check');
+    expect(
+      run.status === 0 &&
+        !run.output.includes('The host already runs') &&
+        run.output.includes('The host runs v9.1.3'),
+      `a host older than its link was taken for the version:\n${run.output.slice(-4000)}`,
+    );
+    expect(
+      hostPid() !== hostProcess && active(qa.hostService) && state().host.phase === 'active',
+      'a host older than its link was not restarted',
+    );
+    passed('an interrupted host switch is finished by what the host process shows, not the link');
+
+    // 17. Older releases are never installed.
     latest = '8.0.0';
     run = await update('check');
     expect(
       run.status === 0 && run.output.includes('Not installing v8.0.0'),
       'downgrade not ignored',
     );
-    expect(selected() === commit['9.0.8'], 'downgraded');
+    expect(selected() === commit['9.1.3'], 'downgraded');
     passed('never downgrades');
 
     expect(
@@ -1230,6 +1623,7 @@ await import('./relay-start.ts');
     spawnSync('systemctl', ['disable', '--now', qa.hostService]);
     rmSync(hostUnit, { force: true });
     spawnSync('systemctl', ['reset-failed', qa.hostService]);
+    spawnSync('systemctl', ['kill', '--signal=KILL', '--kill-whom=all', `${qa.service}-update-*`]);
     spawnSync('systemctl', ['stop', `${qa.service}-update-*`]);
     spawnSync('systemctl', ['stop', qa.service, trialService]);
     spawnSync('systemctl', ['reset-failed', trialService]);

@@ -2,35 +2,57 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { createHash, generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
+import { gunzipSync, gzipSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   AuthenticityError,
+  BackupError,
   allowedUrl,
   authenticate,
   check,
   appImageName,
   busPath,
   emptyState,
+  fileDigest,
   healthy,
   hostUnit,
   installerName,
+  listTree,
+  liveness,
+  lockArguments,
+  makeBackup,
+  manifestOf,
+  packBackup,
   parseRelease,
   parseService,
   relayKeyIn,
   publicKeyId,
   readConfig,
+  readJournal,
+  readManifest,
   replaceData,
+  restoreBackup,
+  restoreDone,
   retry,
   runningReplies,
+  spaceShort,
   trialArguments,
+  treeDifference,
+  verifyBackup,
+  writeJournal,
+  type Archiver,
+  type Recovered,
   type State,
   type System,
   type Unit,
@@ -138,10 +160,19 @@ function fake() {
     );
   };
   const calls: string[] = [];
+  // What was done to backups once the relay ran: compressed, and the archive removed.
+  const tidied: string[] = [];
   const logs: string[] = [];
-  // Backups by their path, and the folders that keep replaced data by their name.
+  // How often the relay's service was started: each start is another process.
+  let started = 0;
+  // Backups by their path, and the folders that keep replaced data by their name. A backup is
+  // a file: one that was removed, or never finished, cannot be put back.
   const backups = new Map<string, string[]>();
   const kept = new Map<string, string[]>();
+  // The backup made for an activation, by when the activation began.
+  const made = new Map<string, string>();
+  // The host's process: the version it runs, which a new link alone does not change.
+  let hostProcess: string | undefined | null = null;
   const env = {
     state: { ...emptyState(), trustedKey: trusted.key } as State,
     latest: undefined as unknown,
@@ -160,6 +191,13 @@ function fake() {
     /** The private data: the releases whose relays wrote to it, each time one started. */
     data: [] as string[],
     kept,
+    backups,
+    /** Backups that are no longer the archive that was written. */
+    damaged: new Set<string>(),
+    /** The state just read is not the journal as it was last written. */
+    recovered: undefined as Recovered | undefined,
+    /** A command of the updater that never returns, by the method that runs it. */
+    hangs: undefined as string | undefined,
     /** systemd does not answer the next looks at the relay's service. */
     unseen: 0,
     lastWords: undefined as string | undefined,
@@ -188,8 +226,10 @@ function fake() {
       clock += ms;
     },
     readState: () => structuredClone(env.state),
+    recovered: () => env.recovered,
     writeState: (state) => {
       env.state = structuredClone(state);
+      env.recovered = undefined;
     },
     latestRelease: async () => env.latest,
     commitOf: async (tag) => env.commits[tag],
@@ -220,7 +260,8 @@ function fake() {
       calls.push('deselect');
       env.current = undefined;
     },
-    serviceActive: () => env.active,
+    // A service whose relay ended is being started again, which systemd does not call active.
+    serviceActive: () => env.active && !gone(),
     unit: (trial): Unit | undefined => {
       if (env.unseen > 0) {
         env.unseen--;
@@ -234,7 +275,17 @@ function fake() {
           : { state: 'activating', restarts: 1, pid: 0, result: 'exit-code 1' };
       const idle = behaviour(trial).idle;
       const worked = idle === true ? 0 : Math.min(age(trial), idle || Infinity);
-      return { state: 'active', restarts: 0, pid: 100, cpu: worked, io: worked * 1000 };
+      const process = trial ? tried : live;
+      return {
+        state: 'active',
+        restarts: 0,
+        // Each start is another process.
+        pid: 100 + (trial ? 0 : started),
+        cpu: worked,
+        io: worked * 1000,
+        started: process.since,
+        ...(trial || !process.release ? {} : { release: process.release }),
+      };
     },
     lastWords: () => env.lastWords,
     startTrial: (commit) => {
@@ -257,6 +308,7 @@ function fake() {
     },
     startService: () => {
       calls.push('start');
+      started++;
       env.active = true;
       live.release = env.current;
       live.since = clock;
@@ -268,16 +320,33 @@ function fake() {
     preflight: () => {
       if (env.preflightError) throw env.preflightError;
     },
-    backup: (commit) => {
+    backup: (commit, began, behind) => {
       calls.push(`backup ${commit}`);
       if (env.backupError) throw env.backupError;
-      const path = `/var/backups/agent-studio/pre-${commit}.tar`;
+      // The one an updater made for this activation and could not record, while the data is
+      // as it holds it, or whatever the data holds when the release may have run on it since.
+      const before = began ? made.get(began) : undefined;
+      const holds = before ? backups.get(before) : undefined;
+      if (before && holds && (behind || holds.join() === env.data.join())) return before;
+      let path = `/var/backups/agent-studio/pre-${commit}.tar`;
+      for (let copy = 2; backups.has(path) || backups.has(`${path}.gz`); copy++)
+        path = `/var/backups/agent-studio/pre-${commit}-${copy}.tar`;
       backups.set(path, [...env.data]);
+      if (began) made.set(began, path);
       return path;
     },
+    // Like gzip beside the archive: the copy is published, and the archive stays until it is
+    // removed. A state that names an archive the updater removed too early names nothing.
     compress: (backup) => {
-      backups.set(`${backup}.gz`, backups.get(backup) ?? []);
+      tidied.push(`compress ${backup}`);
+      const holds = backups.get(backup);
+      if (!holds || env.damaged.has(backup)) throw new Error(`${backup} cannot be read.`);
+      backups.set(`${backup}.gz`, holds);
       return `${backup}.gz`;
+    },
+    removeBackup: (backup) => {
+      tidied.push(`remove ${backup}`);
+      backups.delete(backup);
     },
     select: (release) => {
       calls.push(`select ${release}`);
@@ -288,11 +357,17 @@ function fake() {
       const folder = `/var/lib/.agent-studio-failed-${keep}`;
       // Done again under the same name, it replaces nothing a second time.
       if (!kept.has(folder)) {
+        const holds = backups.get(backup);
+        // Checked before anything moves: the data stays, and nothing is put aside.
+        if (!holds) throw new BackupError('it is missing');
+        if (env.damaged.has(backup))
+          throw new BackupError('it holds 1024 bytes where 20480 were written');
         kept.set(folder, env.data);
-        env.data = [...(backups.get(backup) ?? [])];
+        env.data = [...holds];
       }
       return folder;
     },
+    restored: (keep) => kept.has(`/var/lib/.agent-studio-failed-${keep}`),
     probe: async (trial) => {
       if (trial ? !tried.release : !env.active) return undefined;
       const relay = behaviour(trial);
@@ -329,7 +404,7 @@ function fake() {
       return true;
     },
     currentHost: () => env.host,
-    hostPackages: () => {
+    hostPackages: async () => {
       calls.push('host packages');
     },
     provisionHost: async () => {
@@ -338,11 +413,18 @@ function fake() {
     },
     selectHost: (version) => {
       calls.push(`select host ${version}`);
+      // The process that runs is the one from before, until the host is restarted.
+      if (hostProcess === null) hostProcess = env.host;
       env.host = version;
     },
     hostActive: () => !!env.host && env.hostUp(env.host),
+    hostRuns: (version) => {
+      const runs = hostProcess === null ? env.host : hostProcess;
+      return env.host === version && runs === version && env.hostUp(version);
+    },
     restartHost: () => {
       calls.push('restart host');
+      hostProcess = env.host;
     },
     stopHost: () => {
       calls.push('stop host');
@@ -361,12 +443,31 @@ function fake() {
   // Once dead, every call throws, so nothing it still tries happens and no state is written.
   let dead = false;
   let kill: { method: string; nth: number; before: boolean } | undefined;
+  // Its unit, which has no deadline and a watchdog: the updater's own code running is a sign
+  // of life, which it gives whenever it waits (a sleep, a probe) and not while a command it
+  // runs holds it. An updater without one for `hungAfter` is ended, as systemd ends the unit.
+  let unit: ReturnType<typeof liveness> | undefined;
   const counts = new Map<string, number>();
   const process = new Proxy(system, {
     get(target, name: string) {
       const method = target[name as keyof System] as (...args: unknown[]) => unknown;
       return (...args: unknown[]) => {
+        if (unit && !unit.alive(clock)) dead = true;
         if (dead) throw new Killed(`killed (${name})`);
+        if (env.hangs === name) {
+          // The command never returns: time passes, and nothing of the updater runs.
+          env.hangs = undefined;
+          clock += 60 * 60_000;
+          dead = !!unit;
+          if (dead) throw new Killed(`hung in ${name}`);
+        }
+        if (unit && (name === 'sleep' || name === 'probe')) {
+          const waited = method(...args) as Promise<unknown>;
+          return waited.then((result) => {
+            unit?.beat(clock);
+            return result;
+          });
+        }
         counts.set(name, (counts.get(name) ?? 0) + 1);
         const now = kill?.method === name && --kill.nth === 0 ? kill : undefined;
         if (now?.before) {
@@ -413,6 +514,7 @@ function fake() {
   return {
     system,
     calls,
+    tidied,
     logs,
     env,
     publish,
@@ -431,6 +533,10 @@ function fake() {
       live.release = release;
       live.since = clock;
     },
+    /** The host's process runs another version than its link selects, or none. */
+    hostProcess: (version: string | undefined) => {
+      hostProcess = version;
+    },
     /** A trial that an updater left running. */
     leaveTrial: (commit: string) => {
       tried.release = commit;
@@ -444,6 +550,11 @@ function fake() {
     revive: () => {
       dead = false;
       kill = undefined;
+      if (unit) unit = liveness(config.hungAfter, clock);
+    },
+    /** Runs the updater as its unit does: without a deadline, ended when it hangs. */
+    asUnit: () => {
+      unit = liveness(config.hungAfter, clock);
     },
     run: (options: Partial<typeof config> = {}) => check(process, { ...config, ...options }),
   };
@@ -728,7 +839,11 @@ describe('automatic updates', () => {
     expect(f.logs).toContain('v0.2.1 read the copy and listened after 45 s.');
 
     // No length of time ends a relay whose process works: three hours, said in the journal.
+    // The updater runs as its unit does, which until 2026-11-20 ended it after two hours
+    // (TimeoutStartSec=2h): the unit has no deadline, and its watchdog is answered all the
+    // while, since the updater's own code runs between the looks.
     const long = fake();
+    long.asUnit();
     long.publish('0.2.1', B);
     long.env.relay = () => ({ listens: 3 * 60 * 60_000 });
     await long.run();
@@ -1025,24 +1140,37 @@ describe('automatic updates', () => {
     expect(killed.calls.slice(0, 3)).toEqual(['end trial', `trial ${B}`, 'end trial']);
     expect(killed.env.state.release).toMatchObject({ phase: 'active' });
 
-    // A trial whose unit does not stop still reads its copy: the copy stays, the release is
-    // not failed for it, and no relay is stopped until a check clears it.
+    // A trial whose unit does not stop still reads its copy: the copy stays, and the check
+    // ends there, before it looks for a release, tries one or stops a relay.
     const stuck = fake();
     stuck.publish('0.2.1', B);
     stuck.leaveTrial(A);
     stuck.env.trialStuck = true;
     await expect(stuck.run()).rejects.toThrow(
-      `v0.2.1 is not activated while its trial cannot be removed: agent-studio-trial did not stop ${A} runs on and nothing changed.`,
+      'Nothing is activated while a trial left behind cannot be removed: agent-studio-trial did not stop',
     );
-    expect(stuck.logs).toContain(
-      'A trial left behind could not be removed: agent-studio-trial did not stop',
-    );
-    expect(stuck.calls).not.toContain('stop');
-    expect(stuck.calls).not.toContain('end trial');
-    expect(stuck.env.state.release).toMatchObject({ phase: 'staged' });
+    expect(stuck.calls).toEqual([]);
+    expect(stuck.env.state.release).toBeUndefined();
     stuck.env.trialStuck = false;
     await stuck.run();
     expect(stuck.env.state.release).toMatchObject({ phase: 'active' });
+
+    // The same for an activation that an updater left in the middle, whatever its step: it
+    // is not taken up beside a trial that still runs.
+    const begun = fake();
+    begun.publish('0.2.1', B);
+    begun.kill('select', 'after');
+    await expect(begun.run()).rejects.toThrow(Killed);
+    begun.revive();
+    begun.leaveTrial(B);
+    begun.env.trialStuck = true;
+    begun.calls.length = 0;
+    await expect(begun.run()).rejects.toThrow(/^Nothing is activated while a trial left behind/);
+    expect(begun.calls).toEqual([]);
+    expect(begun.env.state.release).toMatchObject({ activation: { step: 'candidate' } });
+    begun.env.trialStuck = false;
+    await begun.run();
+    expect(begun.env.state.release).toMatchObject({ phase: 'active' });
   });
 
   it('starts a new server’s relay with its first release', async () => {
@@ -1212,17 +1340,101 @@ describe('automatic updates', () => {
       // After the relay was stopped: it is not left down until someone looks.
       let f = await at('stopService', 'after', 1, 'backup');
       expect(f.calls.slice(0, 5)).toEqual(['stop', `backup ${B}`, 'stop', `select ${B}`, 'start']);
-      // After the backup was written but before the state named it: another one is taken.
+      // After the backup was written but before the state named it: the relay is stopped and
+      // the data as that backup holds it, so it is the one that is used, not a second one.
       f = await at('backup', 'after', 1, 'backup');
       expect(f.calls.slice(0, 2)).toEqual(['stop', `backup ${B}`]);
-      // After the release was selected, and after its relay was started.
+      expect([...f.env.backups.keys()]).toEqual([`/var/backups/agent-studio/pre-${B}.tar.gz`]);
+      // After the release was selected: its relay was never started, so it is now.
       f = await at('select', 'after', 1, 'candidate');
       expect(f.calls.slice(0, 3)).toEqual(['stop', `select ${B}`, 'start']);
+      // After its relay was started: the relay that runs is the one this step started, so it
+      // is checked as it runs, and no device is cut off a second time.
       f = await at('startService', 'after', 1, 'candidate');
-      expect(f.calls.slice(0, 3)).toEqual(['stop', `select ${B}`, 'start']);
-      // After its relay passed the check but before that was written: it is checked again.
+      expect(f.calls).toEqual([`publish ${B} ${installer.length}`, `discard ${B}`]);
+      expect(f.logs).toContain(
+        `The relay of ${B} that the updater started runs; it is checked, not started again.`,
+      );
+      // After its relay passed the check but before that was written: it is checked again,
+      // as it runs.
       f = await at('releaseKey', 'before', 1, 'candidate');
-      expect(f.calls.slice(0, 3)).toEqual(['stop', `select ${B}`, 'start']);
+      expect(f.calls).toEqual([`publish ${B} ${installer.length}`, `discard ${B}`]);
+    });
+
+    it('goes on watching the relay it started only when that is the relay that runs', async () => {
+      const killedAfterStart = async () => {
+        const f = fake();
+        f.publish('0.2.1', B);
+        f.kill('startService', 'after');
+        await expect(f.run()).rejects.toThrow(Killed);
+        f.revive();
+        f.calls.length = 0;
+        return f;
+      };
+      const restarted = ['stop', `select ${B}`, 'start'];
+      // The same process: it is watched through the whole check, and not touched.
+      let f = await killedAfterStart();
+      const process = f.system.unit()?.pid;
+      const began = f.now();
+      await f.run();
+      expect(f.system.unit()?.pid).toBe(process);
+      expect(f.calls).not.toContain('stop');
+      expect(f.now() - began).toBeGreaterThanOrEqual(25_000);
+      expect(f.env.state.release).toMatchObject({ phase: 'active' });
+
+      // A relay that began before the step was written is not the one the step started.
+      f = await killedAfterStart();
+      f.advance(60_000);
+      f.env.state.release!.activation!.entered = new Date(f.now()).toISOString();
+      await f.run();
+      expect(f.calls.slice(0, 3)).toEqual(restarted);
+
+      // A relay that runs another release than the one selected, as after a start by hand.
+      f = await killedAfterStart();
+      f.boot(A);
+      f.env.current = B;
+      await f.run();
+      expect(f.calls.slice(0, 3)).toEqual(restarted);
+
+      // A service that is not running.
+      f = await killedAfterStart();
+      f.env.active = false;
+      await f.run();
+      expect(f.calls.slice(0, 3)).toEqual(restarted);
+
+      // A relay that ended and that its service started again is not watched as if it had
+      // stayed up: the step is done again, and its check sees it end.
+      const crashed = fake();
+      crashed.publish('0.2.1', B);
+      crashed.env.relay = (release, trial) => (release === B && !trial ? { crash: true } : {});
+      crashed.kill('startService', 'after');
+      await expect(crashed.run()).rejects.toThrow(Killed);
+      crashed.revive();
+      crashed.advance(5000);
+      crashed.calls.length = 0;
+      await expect(crashed.run()).rejects.toThrow(`${A} was restored`);
+      expect(crashed.calls.slice(0, 3)).toEqual(restarted);
+
+      // The release before, started again after the backup was put back: what it was started
+      // on is in place, so it is watched too, and the data is not replaced a second time.
+      const back = fake();
+      back.publish('0.2.1', B);
+      back.env.relay = (release, trial) => (release === B && !trial ? { crash: true } : {});
+      back.kill('startService', 'after', 2);
+      await expect(back.run()).rejects.toThrow(Killed);
+      expect(back.env.state.release).toMatchObject({ activation: { step: 'previous' } });
+      back.revive();
+      back.calls.length = 0;
+      await expect(back.run()).rejects.toThrow(
+        new RegExp(
+          `^v0\\.2\\.1 failed its health check; ${A} was restored\\. Data the failed release wrote is kept in /var/lib/\\.agent-studio-failed-${B.slice(0, 12)}-`,
+        ),
+      );
+      // Asked only where the restore kept things; nothing was stopped, selected or started.
+      expect(back.calls).toEqual([`restore /var/backups/agent-studio/pre-${B}.tar`]);
+      expect(back.env.kept.size).toBe(1);
+      expect(back.env.data).toEqual([A]);
+      expect(back.serves()).toBe(A);
     });
 
     it('finishes a restore it was in the middle of, replacing the data once', async () => {
@@ -1274,7 +1486,7 @@ describe('automatic updates', () => {
       // a relay that was checked, or say that there is none, and never with a guess.
       const scenarios: {
         name: string;
-        relay: (release: string | undefined, trial: boolean) => Behaviour;
+        relay: (release: string | undefined, trial: boolean, start: number) => Behaviour;
         ends: 'active' | 'restored' | 'down';
       }[] = [
         { name: 'goes through', relay: () => ({}), ends: 'active' },
@@ -1285,7 +1497,8 @@ describe('automatic updates', () => {
         },
         {
           name: 'neither starts',
-          relay: (_release, trial) => (trial ? {} : { crash: true }),
+          // The relay that runs goes on running until it is stopped; no start after that does.
+          relay: (_release, trial, start) => (trial || start === 0 ? {} : { crash: true }),
           ends: 'down',
         },
       ];
@@ -1300,6 +1513,7 @@ describe('automatic updates', () => {
         'startService',
         'restore',
         'compress',
+        'removeBackup',
         'probe',
       ] as const;
       let kills = 0;
@@ -1325,7 +1539,15 @@ describe('automatic updates', () => {
               }
               const release = f.env.state.release;
               expect(release?.activation, where).toBeUndefined();
+              // The state names no backup that is not there, and leaves no archive behind
+              // whose compressed copy took its place.
+              for (const named of [release?.backup, ...f.env.state.history.map((e) => e.backup)])
+                if (named) expect(f.env.backups.has(named), `${where}: ${named}`).toBe(true);
+              expect(f.env.state.cleanup, where).toBeUndefined();
               if (release?.phase === 'active') {
+                expect([...f.env.backups.keys()], where).toEqual([
+                  `/var/backups/agent-studio/pre-${B}.tar.gz`,
+                ]);
                 // Only a relay that was checked: it runs the release and answers.
                 expect(f.serves(), where).toBe(B);
                 expect(f.env.current, where).toBe(B);
@@ -1896,5 +2118,861 @@ describe('server setup', () => {
       expect(unit).toContain(line);
     expect(unit.some((line) => /^(MemoryMax|MemoryHigh|CPUQuota)=/.test(line))).toBe(false);
     expect(file('scripts/vps/setup.sh')).toMatch(new RegExp(`^port=${relay.port}$`, 'm'));
+  });
+});
+
+describe('the updater’s journal', () => {
+  const folder = () => {
+    const root = mkdtempSync(join(tmpdir(), 'studio-vps-journal-'));
+    temporary.push(root);
+    return join(root, 'state.json');
+  };
+  const state = (tag: string): State => ({ ...emptyState(), ignored: tag });
+
+  it('is written whole under a name of its own, and keeps the generation before it', () => {
+    const file = folder();
+    expect(readJournal(file)).toEqual({ state: emptyState() });
+    writeJournal(file, state('one'));
+    expect(existsSync(`${file}.previous`)).toBe(false);
+    writeJournal(file, state('two'));
+    writeJournal(file, state('three'));
+    expect(readJournal(file)).toEqual({ state: state('three') });
+    expect(JSON.parse(readFileSync(`${file}.previous`, 'utf8'))).toEqual(state('two'));
+    // What a writer that was killed left, under whatever name it had, goes with the next write.
+    writeFileSync(`${file}.4242-0a0b0c0d.partial`, '{ "version": 1, "hist');
+    writeJournal(file, state('four'));
+    expect(readdirSync(join(file, '..')).sort()).toEqual(['state.json', 'state.json.previous']);
+  });
+
+  it('goes on from the generation before when the journal is missing or not whole', () => {
+    const file = folder();
+    writeJournal(file, state('one'));
+    writeJournal(file, state('two'));
+    rmSync(file);
+    expect(readJournal(file)).toEqual({
+      state: state('one'),
+      recovered: { from: 'previous', problem: `${file} is missing` },
+    });
+    // Cut short, as a file is whose blocks never reached the disk.
+    writeFileSync(file, '{\n  "version": 1,\n  "histo');
+    const cut = readJournal(file);
+    expect(cut.state).toEqual(state('one'));
+    expect(cut.recovered).toEqual({
+      from: 'previous',
+      problem: `${file} is not whole (26 characters)`,
+    });
+    // The next write keeps what could not be read aside, and never makes it the generation
+    // before: that stays the last one that was whole.
+    writeJournal(file, state('three'));
+    expect(readJournal(file)).toEqual({ state: state('three') });
+    expect(JSON.parse(readFileSync(`${file}.previous`, 'utf8'))).toEqual(state('one'));
+    expect(
+      readdirSync(join(file, '..')).some((name) => /^state\.json\.unreadable-\d{8}T/.test(name)),
+    ).toBe(true);
+  });
+
+  it('says that the state is lost when neither generation can be read, and only then', () => {
+    const file = folder();
+    writeJournal(file, state('one'));
+    writeJournal(file, state('two'));
+    writeFileSync(file, '');
+    writeFileSync(`${file}.previous`, '[]');
+    const lost = readJournal(file);
+    expect(lost.state).toEqual(emptyState());
+    expect(lost.recovered).toEqual({
+      from: 'lost',
+      problem: `${file} is not whole (0 characters), and ${file}.previous does not hold a state`,
+    });
+    rmSync(`${file}.previous`);
+    expect(readJournal(file).recovered?.from).toBe('lost');
+    // A state another version of the updater wrote is not damage, and is never replaced.
+    writeFileSync(file, '{ "version": 2, "history": [] }');
+    expect(() => readJournal(file)).toThrow('has an unknown format');
+    expect(() => writeJournal(file, state('three'))).toThrow('has an unknown format');
+  });
+
+  it('takes up an activation from the generation before, a step behind', async () => {
+    // The newest journal said the release was selected and started; the one before it still
+    // says that the data is to be backed up. The release may have written to the data since,
+    // so the backup made for this activation is used, not a new one of what the data holds
+    // now: when the release fails, the release before gets its own data back.
+    const f = fake();
+    f.publish('0.2.1', B);
+    f.env.relay = (release, trial) => (release === B && !trial ? { crash: true } : {});
+    f.kill('startService', 'after');
+    await expect(f.run()).rejects.toThrow(Killed);
+    expect(f.env.data).toEqual([B]);
+    const activation = f.env.state.release!.activation!;
+    activation.step = 'backup';
+    delete activation.backup;
+    delete f.env.state.release!.backup;
+    f.env.recovered = { from: 'previous', problem: '/var/lib/x/state.json is missing' };
+    f.revive();
+    f.calls.length = 0;
+    await expect(f.run()).rejects.toThrow(`v0.2.1 failed its health check; ${A} was restored.`);
+    expect(f.logs).toContain(
+      "The updater's state could not be used (/var/lib/x/state.json is missing); the one written before it is, which may be a step behind. Every step is done again from its start.",
+    );
+    expect(f.env.backups.size).toBe(1);
+    expect(f.env.data).toEqual([A]);
+    expect(f.serves()).toBe(A);
+    expect(f.env.recovered).toBeUndefined();
+  });
+
+  it('starts and checks what is selected when a relay is stopped and no state says why', async () => {
+    // The generation before knows of no activation, and the relay does not run: an updater
+    // may have stopped it. What is selected is started and checked before anything else.
+    const f = fake();
+    f.env.active = false;
+    f.env.recovered = { from: 'previous', problem: 'state.json is not whole (12 characters)' };
+    await f.run();
+    expect(f.calls).toEqual(['start']);
+    expect(f.serves()).toBe(A);
+    expect(f.logs).toContain(`${A}, which is selected, was started and its relay answers.`);
+    expect(f.env.recovered).toBeUndefined();
+
+    // With no state at all the same, and then the check says what is left to do by hand.
+    const lost = fake();
+    lost.env.state = emptyState();
+    lost.env.active = false;
+    lost.env.recovered = { from: 'lost', problem: 'state.json is missing, and so on' };
+    lost.publish('0.2.1', B);
+    await expect(lost.run()).rejects.toThrow(
+      `The updater's state was lost (state.json is missing, and so on). ${A}, which is selected, was started and its relay answers. No updater key is trusted any more, so no release is installed: run scripts/vps/install.sh again.`,
+    );
+    expect(lost.serves()).toBe(A);
+    expect(lost.calls).toEqual(['start']);
+    // Later checks install nothing until a key is trusted again, and say so.
+    await expect(lost.run()).rejects.toThrow('No updater key is trusted yet');
+    expect(lost.calls).toEqual(['start']);
+
+    // A relay that does not start is said at every check, and nothing is written over it.
+    const down = fake();
+    down.env.active = false;
+    down.env.healthy = () => false;
+    down.env.recovered = { from: 'previous', problem: 'state.json is missing' };
+    for (let checks = 0; checks < 2; checks++)
+      await expect(down.run()).rejects.toThrow(
+        new RegExp(
+          `^The updater's state was not usable and agent-studio does not run: the relay of ${A}, which is selected, ended .* Intervene manually\\.$`,
+        ),
+      );
+    expect(down.env.recovered).toBeDefined();
+
+    // A relay that runs is left alone.
+    const up = fake();
+    up.env.recovered = { from: 'previous', problem: 'state.json is missing' };
+    await up.run();
+    expect(up.calls).toEqual([]);
+  });
+});
+
+describe('private data backups', () => {
+  // An archive of lines, one for each thing it holds. Like tar, it unpacks what it holds and
+  // ends well where the archive ends, also when that is in the middle.
+  let archived = 0;
+  let packs = 0;
+  const lines: Archiver = {
+    archive(parent, name, skip, to) {
+      archived++;
+      const out = listTree(join(parent, name), skip).map((entry) =>
+        JSON.stringify({
+          ...entry,
+          ...(entry.type === 'file'
+            ? { data: readFileSync(join(parent, name, entry.path)).toString('base64') }
+            : {}),
+        }),
+      );
+      writeFileSync(to, `${out.join('\n')}\n`);
+    },
+    extract(backup, into) {
+      const raw = readFileSync(backup);
+      const text = (backup.endsWith('.gz') ? gunzipSync(raw) : raw).toString('utf8');
+      const name = 'agent-studio';
+      mkdirSync(join(into, name), { recursive: true });
+      for (const line of text.split('\n')) {
+        let entry: { path: string; type: string; data?: string; mtime?: number };
+        try {
+          entry = JSON.parse(line);
+        } catch {
+          // The archive ends here.
+          return;
+        }
+        const path = join(into, name, entry.path);
+        if (entry.type === 'folder') mkdirSync(path, { recursive: true });
+        else if (entry.type === 'file')
+          writeFileSync(path, Buffer.from(entry.data ?? '', 'base64'));
+      }
+    },
+    pack(archive, to) {
+      packs++;
+      writeFileSync(to, gzipSync(readFileSync(archive)));
+    },
+    unpacked: (packed) => sha(gunzipSync(readFileSync(packed))),
+  };
+  const folders = () => {
+    const root = mkdtempSync(join(tmpdir(), 'studio-vps-backup-'));
+    temporary.push(root);
+    const data = join(root, 'agent-studio');
+    const backups = join(root, 'backups');
+    mkdirSync(join(data, 'images'), { recursive: true });
+    mkdirSync(join(data, '.npm'));
+    writeFileSync(join(data, '.npm', 'cache'), 'not private data');
+    writeFileSync(join(data, 'workspace.json'), 'the chats '.repeat(400));
+    writeFileSync(join(data, 'images', 'one'), 'an image '.repeat(200));
+    writeFileSync(join(data, 'web-push.json'), 'keys');
+    archived = 0;
+    packs = 0;
+    const backup = (options: { began?: string; behind?: boolean; archiver?: Archiver } = {}) =>
+      makeBackup({
+        data,
+        backups,
+        commit: B,
+        skip: ['.npm'],
+        made: new Date('2026-11-20T12:00:00Z'),
+        archiver: lines,
+        ...options,
+      });
+    const untouched = () => {
+      expect(readFileSync(join(data, 'workspace.json'), 'utf8')).toBe('what the release wrote');
+      expect(readdirSync(root).sort()).toEqual(['agent-studio', 'backups']);
+    };
+    const restore = (path: string, keep = 'b-1') =>
+      restoreBackup({ data, backup: path, keep, archiver: lines });
+    return { root, data, backups, backup, restore, untouched };
+  };
+
+  it('records what was backed up and the archive that holds it, before the archive has its name', () => {
+    const f = folders();
+    const path = f.backup();
+    expect(path).toBe(join(f.backups, `pre-${B}.tar`));
+    const manifest = readManifest(path);
+    expect(manifest).toMatchObject({ version: 1, commit: B, archive: fileDigest(path) });
+    expect(manifest.entries.map((entry) => `${entry.type} ${entry.path}`)).toEqual([
+      'folder images',
+      'file images/one',
+      'file web-push.json',
+      'file workspace.json',
+    ]);
+    expect(manifest.entries.find((entry) => entry.path === 'workspace.json')?.size).toBe(4000);
+    verifyBackup(path, manifest);
+    expect(readdirSync(f.backups).sort()).toEqual([`pre-${B}.tar`, `pre-${B}.tar.manifest.json`]);
+    // A second backup for the same release takes another name; neither replaces the other.
+    expect(f.backup()).toBe(join(f.backups, `pre-${B}-20261120T120000Z.tar`));
+  });
+
+  it('names no archive that was not finished, and clears what a killed updater left', () => {
+    const f = folders();
+    const killed: Archiver = {
+      ...lines,
+      archive(parent, name, skip, to) {
+        writeFileSync(to, '{"path":"images","type":"folder"}\n{"path":"ima');
+        throw new Error('killed while archiving');
+      },
+    };
+    expect(() => f.backup({ archiver: killed })).toThrow('killed while archiving');
+    expect(readdirSync(f.backups)).toEqual([]);
+    // Killed for good, its file stays: under a name of its own, which nothing takes for a
+    // backup, and which the next one removes.
+    writeFileSync(join(f.backups, `pre-${B}.tar.77-00112233.partial`), 'half an archive');
+    const path = f.backup();
+    expect(readdirSync(f.backups).sort()).toEqual([`pre-${B}.tar`, `pre-${B}.tar.manifest.json`]);
+    verifyBackup(path, readManifest(path));
+  });
+
+  it('uses the backup an updater made for the activation and could not record', () => {
+    const f = folders();
+    const began = '2026-11-20T11:59:00.000Z';
+    const path = f.backup({ began });
+    // The relay is stopped and the data as the backup holds it: it is that backup.
+    expect(f.backup({ began })).toBe(path);
+    expect(archived).toBe(1);
+    // Another activation makes its own.
+    expect(f.backup({ began: '2026-11-21T00:00:00.000Z' })).not.toBe(path);
+    expect(archived).toBe(2);
+    // The data was written since, as by a relay that ran in between: what it holds now is
+    // backed up, unless it was the release itself that may have written to it.
+    writeFileSync(join(f.data, 'workspace.json'), 'what a relay wrote since'.padEnd(4000));
+    utimesSync(join(f.data, 'workspace.json'), new Date(), new Date(Date.now() + 5000));
+    expect(f.backup({ began, behind: true })).toBe(path);
+    expect(archived).toBe(2);
+    const third = f.backup({ began });
+    expect(third).not.toBe(path);
+    expect(archived).toBe(3);
+  });
+
+  it('puts a backup back only when it is the archive that was made', () => {
+    // Cut short where tar still ends well: one file of two would be unpacked and installed.
+    const cut = folders();
+    let path = cut.backup();
+    writeFileSync(join(cut.data, 'workspace.json'), 'what the release wrote');
+    const whole = readFileSync(path);
+    writeFileSync(path, whole.subarray(0, whole.indexOf('\n', 40) + 1));
+    expect(() => cut.restore(path)).toThrow(BackupError);
+    expect(() => cut.restore(path)).toThrow(
+      `it holds ${lstatSync(path).size} bytes where ${whole.length} were written`,
+    );
+    cut.untouched();
+
+    // The same bytes, one of them another.
+    const changed = folders();
+    path = changed.backup();
+    writeFileSync(join(changed.data, 'workspace.json'), 'what the release wrote');
+    const bytes = readFileSync(path);
+    bytes[100] ^= 1;
+    writeFileSync(path, bytes);
+    expect(() => changed.restore(path)).toThrow(
+      'it is not the archive that was written (its SHA-256 differs)',
+    );
+    changed.untouched();
+
+    // Removed, or without the manifest that says what it should hold.
+    const gone = folders();
+    path = gone.backup();
+    writeFileSync(join(gone.data, 'workspace.json'), 'what the release wrote');
+    rmSync(manifestOf(path));
+    expect(() => gone.restore(path)).toThrow(/^it has no manifest/);
+    rmSync(path);
+    expect(() => gone.restore(path)).toThrow(BackupError);
+    gone.untouched();
+  });
+
+  it('checks what a backup unpacked to before the data makes way for it', () => {
+    // The archive is the one that was written, and still does not unpack to everything that
+    // was backed up (it was cut before its manifest was made, or the disk filled while it
+    // was unpacked): what was unpacked is removed, and the data never moved.
+    const f = folders();
+    const cutting: Archiver = {
+      ...lines,
+      archive(parent, name, skip, to) {
+        lines.archive(parent, name, skip, to);
+        const whole = readFileSync(to);
+        writeFileSync(to, whole.subarray(0, whole.lastIndexOf('\n', whole.length - 2) + 1));
+      },
+    };
+    const path = f.backup({ archiver: cutting });
+    verifyBackup(path, readManifest(path));
+    writeFileSync(join(f.data, 'workspace.json'), 'what the release wrote');
+    expect(() => f.restore(path)).toThrow(
+      'it does not unpack to what was backed up: workspace.json is missing',
+    );
+    f.untouched();
+    expect(restoreDone(f.data, 'b-1')).toBe(false);
+
+    expect(treeDifference(listTree(f.data, ['.npm']), listTree(f.data, ['.npm']))).toBeUndefined();
+    const listed = listTree(f.data, ['.npm']);
+    expect(treeDifference(listed, listed.slice(1))).toBe('images is missing');
+    expect(treeDifference(listed.slice(1), listed)).toBe('images was not there');
+    expect(
+      treeDifference(
+        listed,
+        listed.map((entry) => (entry.path === 'web-push.json' ? { ...entry, size: 3 } : entry)),
+      ),
+    ).toBe('web-push.json holds 3 bytes, not 4');
+  });
+
+  it('restores a whole backup, once, wherever the restore was interrupted', () => {
+    const f = folders();
+    const path = f.backup();
+    writeFileSync(join(f.data, 'workspace.json'), 'what the release wrote');
+    const kept = f.restore(path);
+    expect(readFileSync(join(kept, 'workspace.json'), 'utf8')).toBe('what the release wrote');
+    expect(readFileSync(join(f.data, 'workspace.json'), 'utf8')).toBe('the chats '.repeat(400));
+    expect(existsSync(join(f.data, '.npm'))).toBe(false);
+    expect(restoreDone(f.data, 'b-1')).toBe(true);
+    // Again under the same name, with the backup gone meanwhile: nothing is replaced, and
+    // nothing needs the backup any more.
+    writeFileSync(join(f.data, 'workspace.json'), 'what the restored relay wrote');
+    rmSync(path);
+    expect(f.restore(path)).toBe(kept);
+    expect(readFileSync(join(f.data, 'workspace.json'), 'utf8')).toBe(
+      'what the restored relay wrote',
+    );
+
+    // Killed while unpacking: half of it lies beside the data, which was not touched, and
+    // the restore starts over.
+    const g = folders();
+    const again = g.backup();
+    writeFileSync(join(g.data, 'workspace.json'), 'what the release wrote');
+    const staging = join(g.root, '.agent-studio-restore-b-1');
+    mkdirSync(join(staging, 'agent-studio', 'images'), { recursive: true });
+    expect(restoreDone(g.data, 'b-1')).toBe(false);
+    g.restore(again);
+    expect(readFileSync(join(g.data, 'workspace.json'), 'utf8')).toBe('the chats '.repeat(400));
+    expect(existsSync(staging)).toBe(false);
+
+    // Killed after the data was moved aside, before the backup took its place: no data
+    // folder at all, which no relay may be started on, and the restore is not done.
+    const h = folders();
+    const third = h.backup();
+    lines.extract(third, join(h.root, '.agent-studio-restore-b-1'));
+    renameSync(h.data, join(h.root, '.agent-studio-failed-b-1'));
+    expect(restoreDone(h.data, 'b-1')).toBe(false);
+    h.restore(third);
+    expect(restoreDone(h.data, 'b-1')).toBe(true);
+    expect(readFileSync(join(h.data, 'images', 'one'), 'utf8')).toBe('an image '.repeat(200));
+  });
+
+  it('compresses a backup beside itself, and names the copy only once it is the archive', () => {
+    const f = folders();
+    const path = f.backup();
+    const original = readFileSync(path);
+    const listing = () => readdirSync(f.backups).sort();
+    const both = [`pre-${B}.tar`, `pre-${B}.tar.manifest.json`];
+
+    // Killed while compressing, and when the copy is compared: the archive stays as it is,
+    // no copy has its name, and the manifest records none.
+    for (const broken of [
+      {
+        ...lines,
+        pack(archive: string, to: number) {
+          writeFileSync(to, gzipSync(readFileSync(archive)).subarray(0, 60));
+          throw new Error('killed while compressing');
+        },
+      },
+      {
+        ...lines,
+        unpacked() {
+          throw new Error('killed while comparing');
+        },
+      },
+      // A copy that is cut short, or holds something else, is never published.
+      { ...lines, pack: (archive: string, to: number) => writeFileSync(to, gzipSync('else')) },
+    ] as Archiver[]) {
+      expect(() => packBackup(path, broken)).toThrow();
+      expect(listing()).toEqual(both);
+      expect(readManifest(path).compressed).toBeUndefined();
+      expect(readFileSync(path).equals(original)).toBe(true);
+    }
+    // A file a compressor that was killed for good left behind goes with the next one.
+    writeFileSync(`${path}.gz.99-aabbccdd.partial`, 'half a copy');
+
+    const packed = packBackup(path, lines);
+    expect(packed).toBe(`${path}.gz`);
+    // The archive is still there: it goes only once the state names the copy.
+    expect(listing()).toEqual([both[0], `pre-${B}.tar.gz`, both[1]]);
+    const manifest = readManifest(packed);
+    expect(manifest.compressed).toEqual(fileDigest(packed));
+    verifyBackup(packed, manifest);
+    verifyBackup(path, manifest);
+
+    // Done again, as by a check after an updater that was killed before it wrote the state:
+    // the copy that is there is the one, and nothing is compressed twice.
+    packs = 0;
+    expect(packBackup(path, lines)).toBe(packed);
+    expect(packs).toBe(0);
+    // Unless it is not the copy that was recorded.
+    writeFileSync(packed, 'something else');
+    expect(packBackup(path, lines)).toBe(packed);
+    expect(packs).toBe(1);
+    verifyBackup(packed, readManifest(packed));
+
+    // The copy alone restores the data, checked against the same manifest.
+    rmSync(path);
+    writeFileSync(join(f.data, 'workspace.json'), 'what the release wrote');
+    f.restore(packed);
+    expect(readFileSync(join(f.data, 'workspace.json'), 'utf8')).toBe('the chats '.repeat(400));
+    // And one that is cut short does not.
+    const g = folders();
+    const cut = packBackup(g.backup(), lines);
+    writeFileSync(cut, readFileSync(cut).subarray(0, 40));
+    writeFileSync(join(g.data, 'workspace.json'), 'what the release wrote');
+    expect(() => g.restore(cut)).toThrow(/^it holds 40 bytes where \d+ were written$/);
+    g.untouched();
+  });
+
+  it('removes the archive only after the state names its compressed copy', async () => {
+    const tar = `/var/backups/agent-studio/pre-${B}.tar`;
+    const f = fake();
+    f.publish('0.2.1', B);
+    await f.run();
+    expect(f.tidied).toEqual([`compress ${tar}`, `remove ${tar}`]);
+    expect(f.env.state.history[0].backup).toBe(`${tar}.gz`);
+    expect(f.env.state.release?.backup).toBe(`${tar}.gz`);
+    expect([...f.env.backups.keys()]).toEqual([`${tar}.gz`]);
+
+    // Killed once the copy is there, before the state says so: the state still names the
+    // archive, which is still there, and the next check finishes.
+    const before = fake();
+    before.publish('0.2.1', B);
+    before.kill('compress', 'after');
+    await expect(before.run()).rejects.toThrow(Killed);
+    expect(before.env.state.history[0]).toMatchObject({ backup: tar, packing: 1 });
+    expect(before.env.backups.has(tar)).toBe(true);
+    before.revive();
+    await before.run();
+    expect(before.env.state.history[0]).toEqual(expect.objectContaining({ backup: `${tar}.gz` }));
+    expect(before.env.state.history[0].packing).toBeUndefined();
+    expect([...before.env.backups.keys()]).toEqual([`${tar}.gz`]);
+
+    // Killed once the state names the copy, before the archive is removed: the state says
+    // what is left to remove, and the next check removes it.
+    const after = fake();
+    after.publish('0.2.1', B);
+    after.kill('removeBackup', 'before');
+    await expect(after.run()).rejects.toThrow(Killed);
+    expect(after.env.state).toMatchObject({ cleanup: [tar], history: [{ backup: `${tar}.gz` }] });
+    expect([...after.env.backups.keys()].sort()).toEqual([tar, `${tar}.gz`]);
+    after.revive();
+    await after.run();
+    expect(after.env.state.cleanup).toBeUndefined();
+    expect([...after.env.backups.keys()]).toEqual([`${tar}.gz`]);
+
+    // A backup that cannot be compressed stays as it is, and is tried three times in all.
+    const failing = fake();
+    failing.publish('0.2.1', B);
+    failing.env.damaged.add(tar);
+    for (let checks = 0; checks < 5; checks++) await failing.run();
+    expect(failing.tidied).toEqual([`compress ${tar}`, `compress ${tar}`, `compress ${tar}`]);
+    expect(failing.env.state.history[0]).toMatchObject({ backup: tar, packing: 3 });
+    expect(failing.env.state.release).toMatchObject({ phase: 'active' });
+  });
+
+  it('leaves the data as it is, nothing moved aside, when the backup cannot be put back', async () => {
+    const tar = `/var/backups/agent-studio/pre-${B}.tar`;
+    const why = 'it holds 1024 bytes where 20480 were written';
+    const said = ` The data backup ${tar} could not be put back (${why}), so the private data stayed as it was, with nothing moved aside.`;
+    // The release fails its check and its backup was cut short meanwhile: the release before
+    // is started on the data as it is, and the error says exactly that.
+    const f = fake();
+    f.publish('0.2.1', B);
+    f.env.relay = (release, trial) => (release === B && !trial ? { crash: true } : {});
+    f.env.damaged.add(tar);
+    await expect(f.run()).rejects.toThrow(
+      new RegExp(
+        `^v0\\.2\\.1 failed its health check; ${A} runs again, on the data as v0\\.2\\.1 left it\\.${said.replace(/[.()]/g, '\\$&')} Its relay ended`,
+      ),
+    );
+    expect(f.logs).toContain(
+      `The data backup ${tar} cannot be put back: ${why}. The private data stays as it is, and nothing was moved aside.`,
+    );
+    expect(f.env.kept.size).toBe(0);
+    expect(f.env.data).toEqual([B, A]);
+    expect(f.serves()).toBe(A);
+    expect(f.env.state.release).toMatchObject({ phase: 'failed' });
+
+    // The release before no longer starts either: the new one is started once more on the
+    // same data, and when it serves, the note says what it runs on. No backup is kept as one.
+    const outgrown = fake();
+    outgrown.publish('0.2.1', B);
+    // Its backup is removed once the release is started the first time.
+    outgrown.env.relay = (release, trial, start) => {
+      if (release === B && !trial && start < 2) outgrown.env.backups.delete(tar);
+      return (release === B && !trial && start < 2) || release === A ? { crash: true } : {};
+    };
+    await outgrown.run();
+    expect(outgrown.env.state.release).toMatchObject({ phase: 'active' });
+    expect(outgrown.env.state.release?.note).toContain(
+      `so v0.2.1 was started once more, on the data as it was left, and serves. ${A} can no longer be gone back to. The data backup ${tar} could not be put back (it is missing)`,
+    );
+    expect(outgrown.env.kept.size).toBe(0);
+    expect(outgrown.calls.filter((call) => call.startsWith('restore'))).toHaveLength(1);
+    expect(outgrown.env.state.history[0].backup).toBeUndefined();
+    expect(outgrown.serves()).toBe(B);
+
+    // Whole at the first restore and cut short by the second: what the first one kept stays,
+    // and the second moves nothing.
+    const second = fake();
+    second.publish('0.2.1', B);
+    second.env.relay = (release, trial, start) => {
+      if (release === A) second.env.damaged.add(tar);
+      return (release === B && !trial && start < 2) || release === A ? { crash: true } : {};
+    };
+    await second.run();
+    expect(second.env.kept.size).toBe(1);
+    expect(second.env.data).toEqual([A, B]);
+    expect(second.env.state.release?.note).toContain('on the data as it was left, and serves');
+    expect(second.env.state.release?.note).toContain('Data the failed release wrote is kept in');
+
+    // A new server's first release: the relay stays stopped, and the error says what the
+    // data holds.
+    const first = fake();
+    first.env.current = undefined;
+    first.env.active = false;
+    first.env.healthy = () => false;
+    first.env.damaged.add(tar);
+    first.publish('0.2.1', B);
+    await expect(first.run()).rejects.toThrow(
+      `v0.2.1 failed its health check, so the relay stays stopped.${said} Its relay ended`,
+    );
+    expect(first.env.kept.size).toBe(0);
+
+    // Killed while it goes back, the next updater does not try the backup again.
+    const killed = fake();
+    killed.publish('0.2.1', B);
+    killed.env.relay = (release, trial) => (release === B && !trial ? { crash: true } : {});
+    killed.env.damaged.add(tar);
+    killed.kill('select', 'before', 2);
+    await expect(killed.run()).rejects.toThrow(Killed);
+    expect(killed.env.state.release?.activation).toMatchObject({
+      step: 'previous',
+      restoreError: why,
+    });
+    killed.revive();
+    killed.calls.length = 0;
+    await expect(killed.run()).rejects.toThrow(`${A} runs again, on the data as v0.2.1 left it.`);
+    expect(killed.calls).toEqual(['stop', `select ${A}`, 'start']);
+  });
+
+  it('counts what the disks must hold at once, together where they are one disk', () => {
+    const tree = { bytes: 800_000_000, entries: 2000 };
+    const disk = (device: number, free: number, path = device === 1 ? '/var/lib' : '/backups') => ({
+      path,
+      device,
+      free,
+    });
+    // One disk: the archive and the two restores an activation can need, 2.4 GB and more.
+    // Each alone would fit in 1.7 GB, which is what was asked for before.
+    expect(spaceShort(tree, disk(1, 1_700_000_000), disk(1, 1_700_000_000, '/var/backups'))).toBe(
+      '/var/backups and /var/lib share a disk with 1700 MB free, less than the 2420 MB that a backup of the 800 MB of private data (804 MB) and the two restores an activation can need (1617 MB) take together.',
+    );
+    expect(
+      spaceShort(tree, disk(1, 2_500_000_000), disk(1, 2_500_000_000, '/var/backups')),
+    ).toBeUndefined();
+    // Two disks: each needs its own share, and no more.
+    expect(spaceShort(tree, disk(1, 1_700_000_000), disk(2, 900_000_000))).toBeUndefined();
+    expect(spaceShort(tree, disk(1, 1_700_000_000), disk(2, 700_000_000))).toBe(
+      '/backups has 700 MB free, less than a backup of the 800 MB of private data takes (804 MB).',
+    );
+    expect(spaceShort(tree, disk(1, 1_500_000_000), disk(2, 900_000_000))).toBe(
+      '/var/lib has 1500 MB free, less than the two restores of the 800 MB of private data that an activation can need (1617 MB).',
+    );
+  });
+});
+
+describe('the updater’s own unit', () => {
+  const minutes = (count: number) => count * 60_000;
+  const file = (path: string) =>
+    readFileSync(new URL(`../../${path}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+
+  it('has no deadline, and a watchdog that the updater answers while it shows signs of life', () => {
+    const unit = file('scripts/vps/agent-studio-update.service').split('\n');
+    for (const line of [
+      'Type=notify',
+      'NotifyAccess=all',
+      'WatchdogSec=5min',
+      'TimeoutStartSec=infinity',
+    ])
+      expect(unit).toContain(line);
+    expect(unit.some((line) => /^(RuntimeMaxSec|TimeoutSec)=/.test(line))).toBe(false);
+    // The updater takes the lock itself: a unit that runs it under flock would end without
+    // having said that it started whenever the lock is held.
+    expect(unit.find((line) => line.startsWith('ExecStart='))).toBe(
+      'ExecStart=/opt/agent-studio/runtimes/node-v24.20.0-linux-x64/bin/node /opt/agent-studio/updater/vps/update.ts check',
+    );
+    // A unit that says it started at once is waited for with --wait.
+    expect(file('scripts/vps/setup.sh')).toContain(
+      'systemctl start --wait agent-studio-update.service',
+    );
+  });
+
+  it('counts the updater’s own code running, or its commands working, as signs of life', () => {
+    const limit = minutes(15);
+    // Its own code runs every ten seconds, for three hours: never hung.
+    let life = liveness(limit, 0);
+    for (let at = 10_000; at <= minutes(180); at += 10_000) {
+      life.beat(at);
+      expect(life.alive(at)).toBe(true);
+    }
+    // A command holds it for an hour and works all the while: the unit's CPU time grows.
+    life = liveness(limit, 0);
+    life.sample(0, { cpu: 100, io: 0 });
+    for (let at = 30_000; at <= minutes(60); at += 30_000) {
+      life.sample(at, { cpu: 100 + at / 2, io: 0 });
+      expect(life.alive(at)).toBe(true);
+    }
+    // Or the disk, with next to no CPU time: an archive being flushed.
+    life = liveness(limit, 0);
+    life.sample(0, { cpu: 100, io: 0 });
+    for (let at = 30_000; at <= minutes(60); at += 30_000) {
+      life.sample(at, { cpu: 100, io: at * 100 });
+      expect(life.alive(at)).toBe(true);
+    }
+    // Neither: hung after the limit, and not before. What answering the watchdog itself
+    // costs, a few milliseconds of CPU time each half minute, is not work.
+    life = liveness(limit, 0);
+    life.sample(0, { cpu: 100, io: 0 });
+    for (let at = 30_000; at < limit; at += 30_000) {
+      life.sample(at, { cpu: 100 + at / 3000, io: 0 });
+      expect(life.alive(at)).toBe(true);
+    }
+    life.sample(limit, { cpu: 400, io: 0 });
+    expect(life.alive(limit)).toBe(false);
+    expect(life.idle(limit)).toBe(limit);
+    // A unit without accounting says nothing either way.
+    life = liveness(limit, 0);
+    life.sample(minutes(20), {});
+    expect(life.alive(minutes(20))).toBe(false);
+  });
+
+  it('is ended when it hangs, wherever that is, and the next check goes on', async () => {
+    for (const method of ['stopService', 'backup', 'startService', 'restore'] as const) {
+      const f = fake();
+      f.asUnit();
+      f.publish('0.2.1', B);
+      f.env.relay = (release, trial, start) =>
+        release === B && !trial && start < 2 && method === 'restore' ? { crash: true } : {};
+      f.env.hangs = method;
+      await expect(f.run()).rejects.toThrow(Killed);
+      expect(f.env.state.release?.activation).toBeDefined();
+      // The timer starts the next one, which goes on from the state.
+      for (let checks = 0; checks < 3; checks++) {
+        f.revive();
+        await f.run().catch(() => undefined);
+      }
+      expect(f.env.state.release?.activation, method).toBeUndefined();
+      expect(f.serves(), method).toBe(method === 'restore' ? A : B);
+    }
+  });
+
+  it('holds the deployment lock for everything that changes the state', () => {
+    const lock = '/opt/agent-studio/.deploy.lock';
+    // A check skips its run while the lock is held; retry and trust wait for it.
+    expect(lockArguments(lock, false, ['node', 'update.ts', 'check'])).toEqual([
+      '--nonblock',
+      '--conflict-exit-code',
+      '75',
+      lock,
+      'node',
+      'update.ts',
+      'check',
+    ]);
+    expect(lockArguments(lock, true, ['node', 'update.ts', 'retry'])).toEqual([
+      lock,
+      'node',
+      'update.ts',
+      'retry',
+    ]);
+    const install = file('scripts/vps/install.sh');
+    // install.sh waits for a running check before it replaces the updater or trusts a key,
+    // and tells update.ts that the lock is held already.
+    expect(install).toContain('exec 9>"$root/.deploy.lock"');
+    expect(install.indexOf('flock 9')).toBeLessThan(install.indexOf('install -m 0644'));
+    expect(install).toContain(
+      'AGENT_STUDIO_UPDATE_LOCK=held "$node" "$updater/vps/update.ts" trust "$config"',
+    );
+  });
+});
+
+describe('an interrupted host switch', () => {
+  const ready = async () => {
+    const f = fake();
+    f.env.host = '0.8.9';
+    f.publish('0.9.0', B, { linux: true });
+    return f;
+  };
+
+  it('never takes a link that selects the version for a host that runs it', async () => {
+    // Killed between the link and the restart: the link selects the new version, and the
+    // process that runs is still the one from before.
+    const f = await ready();
+    f.kill('selectHost', 'after');
+    await expect(f.run({ host })).rejects.toThrow(Killed);
+    expect(f.env.host).toBe('0.9.0');
+    expect(f.env.state.host).toMatchObject({
+      phase: 'staged',
+      previous: '0.8.9',
+      activation: { step: 'switch' },
+    });
+    f.revive();
+    f.calls.length = 0;
+    await f.run({ host });
+    expect(f.calls).toEqual(['select host 0.9.0', 'restart host', 'prune host 0.9.0 0.8.9']);
+    expect(f.logs).toContain(
+      'An updater ended while switching the host to v0.9.0; the switch goes on from there, and nothing is taken for done.',
+    );
+    expect(f.env.state.host).toMatchObject({ phase: 'active', previous: '0.8.9' });
+    expect(f.env.state.host?.activation).toBeUndefined();
+
+    // The same with no record of a switch at all, as after a link changed by hand.
+    const g = await ready();
+    g.env.current = B;
+    await g.run({ host }).catch(() => undefined);
+    g.env.state.host = { ...g.env.state.host!, phase: 'staged', staged: g.env.state.host!.seen };
+    delete g.env.state.host.activated;
+    g.env.host = '0.9.0';
+    g.hostProcess('0.8.9');
+    g.calls.length = 0;
+    await g.run({ host });
+    expect(g.calls).toContain('restart host');
+    expect(g.env.state.host).toMatchObject({ phase: 'active' });
+  });
+
+  it('goes on watching a host it had already restarted', async () => {
+    const f = await ready();
+    f.kill('restartHost', 'after');
+    await expect(f.run({ host })).rejects.toThrow(Killed);
+    f.revive();
+    f.calls.length = 0;
+    const began = f.now();
+    await f.run({ host });
+    expect(f.calls).toEqual(['prune host 0.9.0 0.8.9']);
+    expect(f.logs).toContain('The host already runs v0.9.0; it is watched, not started again.');
+    expect(f.now() - began).toBeGreaterThanOrEqual(20_000);
+    expect(f.env.state.host).toMatchObject({ phase: 'active' });
+  });
+
+  it('finishes going back to the host before, and says when that one does not stay up either', async () => {
+    const f = await ready();
+    f.env.hostUp = (version) => version !== '0.9.0';
+    // The second selection is the one that goes back.
+    f.kill('selectHost', 'after', 2);
+    await expect(f.run({ host })).rejects.toThrow(Killed);
+    expect(f.env.state.host).toMatchObject({ phase: 'staged', activation: { step: 'back' } });
+    f.revive();
+    f.calls.length = 0;
+    await expect(f.run({ host })).rejects.toThrow(
+      'The v0.9.0 host did not stay up; it runs 0.8.9 again.',
+    );
+    expect(f.calls).toEqual(['select host 0.8.9', 'restart host']);
+    expect(f.env.state.host).toMatchObject({ phase: 'failed' });
+    expect(f.env.state.host?.activation).toBeUndefined();
+
+    const g = await ready();
+    g.env.hostUp = () => false;
+    await expect(g.run({ host })).rejects.toThrow(
+      'The v0.9.0 host did not stay up, and 0.8.9, which is selected again, does not stay up either.',
+    );
+    expect(g.env.host).toBe('0.8.9');
+  });
+
+  it('ends with the host on one version, checked, wherever the updater is killed', async () => {
+    const methods = [
+      'writeState',
+      'provisionHost',
+      'selectHost',
+      'restartHost',
+      'hostRuns',
+      'sleep',
+    ];
+    let kills = 0;
+    for (const up of [true, false]) {
+      const whole = await ready();
+      whole.env.current = B;
+      whole.env.hostUp = (version) => up || version !== '0.9.0';
+      await whole.run({ host }).catch(() => undefined);
+      for (const method of methods as (keyof System)[])
+        for (let nth = 1; nth <= (whole.counts.get(method) ?? 0); nth++)
+          for (const when of ['before', 'after'] as const) {
+            const f = await ready();
+            f.env.current = B;
+            f.env.hostUp = (version) => up || version !== '0.9.0';
+            f.kill(method, when, nth);
+            const where = `${up ? 'stays up' : 'does not stay up'}: killed ${when} ${method} #${nth}`;
+            await f.run({ host }).catch(() => undefined);
+            kills++;
+            for (let checks = 0; checks < 4; checks++) {
+              f.revive();
+              await f.run({ host }).catch(() => undefined);
+            }
+            const tracked = f.env.state.host;
+            expect(tracked?.activation, where).toBeUndefined();
+            expect(tracked?.phase, where).toBe(up ? 'active' : 'failed');
+            // The link and the process agree, on the version the state says.
+            expect(f.env.host, where).toBe(up ? '0.9.0' : '0.8.9');
+            expect(f.system.hostRuns(up ? '0.9.0' : '0.8.9'), where).toBe(true);
+          }
+    }
+    expect(kills).toBeGreaterThan(40);
   });
 });

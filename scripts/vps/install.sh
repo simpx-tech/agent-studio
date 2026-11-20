@@ -19,6 +19,14 @@ test -f "$source/release.ts"
 test -f "$source/vps/update.ts"
 test -f "$source/vps/state-file.ts"
 
+# A check that is running holds this lock: its files and its state are not replaced under it.
+# The installation waits for it to end, and no check starts while it goes on.
+exec 9>"$root/.deploy.lock"
+if ! flock --nonblock 9; then
+  echo 'A check or a deployment is running; waiting for it to end.'
+  flock 9
+fi
+
 # Builds run as this account, which cannot read the relay's private data.
 if ! id agent-studio-build >/dev/null 2>&1; then
   useradd --system --user-group --home-dir /var/cache/agent-studio-build --no-create-home \
@@ -60,8 +68,9 @@ fi
 systemd-analyze verify /etc/systemd/system/agent-studio-update.service \
   /etc/systemd/system/agent-studio-update.timer
 
-# Seed the key installed desktop apps trust; later releases rotate it the same way.
-"$node" "$updater/vps/update.ts" trust "$config"
+# Seed the key installed desktop apps trust; later releases rotate it the same way. This script
+# holds the lock that update.ts would otherwise take itself.
+AGENT_STUDIO_UPDATE_LOCK=held "$node" "$updater/vps/update.ts" trust "$config"
 systemctl daemon-reload
 systemctl enable --now agent-studio-update.timer
 systemctl list-timers agent-studio-update.timer --no-pager

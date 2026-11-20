@@ -5,12 +5,21 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-Type=oneshot
-# Skip this run while a manual deployment holds the same lock.
-ExecStart=/usr/bin/flock --nonblock --conflict-exit-code 0 /opt/agent-studio/.deploy.lock /opt/agent-studio/runtimes/node-v24.20.0-linux-x64/bin/node /opt/agent-studio/updater/vps/update.ts check
-# A run that is killed here, or any other way, loses nothing: update.ts writes each step of an
-# activation to its state before it takes it, and the next run goes on from there.
-TimeoutStartSec=2h
+# update.ts takes the deployment lock itself (/opt/agent-studio/.deploy.lock) and skips this run
+# while a manual deployment, a retry or an installation holds it.
+ExecStart=/opt/agent-studio/runtimes/node-v24.20.0-linux-x64/bin/node /opt/agent-studio/updater/vps/update.ts check
+# A check has no deadline: a build, a relay reading a large state and a trial take as long as
+# they take, and a run that was ended in the middle would only begin them again. What ends a
+# check is that it hangs: update.ts says that it started and then answers this watchdog for as
+# long as its own code runs or the commands it waits for use the CPU or the disk, and stops
+# answering after fifteen minutes of neither. A run that is ended here, or any other way, loses
+# nothing: each step of an activation is written to the state before it is taken, and the next
+# run goes on from there.
+Type=notify
+NotifyAccess=all
+WatchdogSec=5min
+WatchdogSignal=SIGKILL
+TimeoutStartSec=infinity
 UMask=0077
 ProtectHome=yes
 PrivateTmp=yes
