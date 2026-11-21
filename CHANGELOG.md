@@ -5,6 +5,28 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 1.3.4 - 2026-11-20
+
+### Fixed
+
+- A server that installs releases by itself no longer goes back to the earlier release because
+  the new relay was still starting: a relay reading a large workspace on a slow day took longer
+  than the 30 seconds it was given, which rolled back 1.3.2 and 1.3.3. The updater now waits
+  while the relay's process runs and works, and ends it only when it stopped or neither answers
+  nor works for two minutes
+- That updater first starts the new relay on a copy of the data, without network, and a release
+  that cannot read it never stops the running relay
+- It puts a data backup back only when the backup is the archive it made, checked file by file,
+  and otherwise leaves the data as it is
+- An update interrupted in the middle, by a restart or a power loss, goes on from the step it
+  had reached at the next check, and a check that hangs is ended instead of blocking later ones
+- A file opened again right after its viewer was closed with Escape stays open with newer
+  WebView2 and Edge versions, where it closed again at once
+- Agent Studio no longer asks Claude or Codex to use sub-agents; starting one is the agent's own
+  call or yours
+- Codex chats send fewer of Agent Studio's tools with every request and keep the same Default
+  reasoning on every reply
+
 ## 1.3.3 - 2026-11-13
 
 ### Fixed
