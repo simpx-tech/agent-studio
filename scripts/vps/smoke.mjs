@@ -17,8 +17,12 @@
 // is archived, while it is compressed and while it is put back; a backup cut short is refused
 // with the data left alone; a relay and a host that an updater started and could not record are
 // watched on, their processes unchanged; a check skips its run and a retry waits while the lock
-// is held; and an updater that hangs is ended by its watchdog. The first release is built from
-// source; the others are that build with another relay/start.ts. Each release also runs as
+// is held; and an updater that hangs is ended by its watchdog, as is one whose own code runs
+// while the build step it waits for does nothing, with that step; a build step that works is
+// waited for, a command an earlier updater left running is stopped before the next begins, and a
+// check that cannot tell systemd of its start begins nothing. The first release is built from
+// source; the others are that build with another relay/start.ts, or a build that only waits or
+// only works. Each release also runs as
 // the server's host (agent-studio-qa-host.service): a stand-in AppImage that only stays up, or,
 // with --appimage, a real build of the app for the first release, which must pair with the QA
 // relay as a server and list a folder for another device. A host that does not stay up goes
@@ -185,24 +189,58 @@ async function remote(upload) {
   };
   const active = (service) =>
     spawnSync('systemctl', ['is-active', '--quiet', service]).status === 0;
-  const pids = () =>
-    sh('systemctl', [
-      'show',
-      'agent-studio',
-      'caddy',
-      'deck-server',
-      'minecraft',
-      'atm10sky',
-      '-p',
-      'Id',
-      '-p',
-      'MainPID',
-    ]);
-  const productionBefore = {
-    current: realpathSync('/opt/agent-studio/current'),
-    pids: pids(),
-    host: spawnSync('systemctl', ['is-active', '--quiet', 'agent-studio-host']).status === 0,
+  // Production as this check must leave it: the release and the host version selected, the
+  // installed updater's files, and each service of the server in the state it was in, run by
+  // the same process, begun at the same time. The Minecraft server is stopped on purpose, so
+  // only its state is compared. A service that restarts by itself meanwhile also shows here.
+  const production = () => {
+    const link = (path) => {
+      try {
+        return realpathSync(path);
+      } catch {
+        return '';
+      }
+    };
+    const digest = (path) => {
+      try {
+        return sha256(readFileSync(path));
+      } catch {
+        return '';
+      }
+    };
+    const process = ['ActiveState', 'MainPID', 'ExecMainStartTimestampMonotonic'];
+    const seen = {
+      current: link('/opt/agent-studio/current'),
+      host: link('/opt/agent-studio/host/current'),
+    };
+    for (const [service, properties] of [
+      ['agent-studio.service', process],
+      ['agent-studio-host.service', process],
+      ['bluevox-server.service', process],
+      ['gravitas2-new.service', ['ActiveState']],
+    ])
+      seen[service] = sh('systemctl', [
+        'show',
+        service,
+        ...properties.map((property) => `--property=${property}`),
+      ])
+        .trim()
+        .split('\n')
+        .sort()
+        .join(' ');
+    for (const path of [
+      '/opt/agent-studio/updater/vps/update.ts',
+      '/opt/agent-studio/updater/vps/state-file.ts',
+      '/opt/agent-studio/updater/release.ts',
+      '/etc/systemd/system/agent-studio-update.service',
+      '/etc/systemd/system/agent-studio-update.timer',
+      '/etc/systemd/system/agent-studio.service',
+      '/etc/systemd/system/agent-studio-host.service',
+    ])
+      seen[path] = digest(path);
+    return seen;
   };
+  const productionBefore = production();
   let createdUser = false;
   let createdHostUser = false;
   let server;
@@ -224,6 +262,8 @@ async function remote(upload) {
     '9.1.1': 'c1',
     '9.1.2': 'd2',
     '9.1.3': 'f3',
+    '9.1.4': 'a4',
+    '9.1.5': 'b5',
     '8.0.0': 'e4',
   };
   // Something a relay can write that outlives a restored data folder.
@@ -330,6 +370,10 @@ async function remote(upload) {
     sh('chown', ['-R', `${qa.user}:${qa.user}`, qa.data]);
     const initial = basename(productionBefore.current);
     sh('cp', ['-a', productionBefore.current, join(qa.root, 'releases', initial)]);
+    expect(
+      !sh('systemctl', ['list-units', '--all', '--plain', '--no-legend', `${qa.service}-*`]).trim(),
+      `units of an earlier QA run are still loaded (${qa.service}-*); stop them first.`,
+    );
     symlinkSync(join(qa.root, 'releases', initial), join(qa.root, 'current'));
     writeFileSync(
       join(qa.root, 'downloads', 'agent-studio-windows-x64-setup.exe'),
@@ -400,6 +444,32 @@ TasksMax=infinity
       return readFileSync(archive);
     };
     const good = variant('good');
+    // Releases whose build is nothing but one command: no dependencies to install, and a build
+    // script that says it began and then only waits, or only works for 75 seconds and fails.
+    const buildBegan = 'qa-build-began';
+    const building = (name, script) =>
+      variant(name, (tree) => {
+        const identity = { name: 'qa-build', version: '0.0.0' };
+        writeFileSync(
+          join(tree, 'package.json'),
+          JSON.stringify({ ...identity, private: true, scripts: { build: script } }),
+        );
+        writeFileSync(
+          join(tree, 'package-lock.json'),
+          JSON.stringify({
+            ...identity,
+            lockfileVersion: 3,
+            requires: true,
+            packages: { '': identity },
+          }),
+        );
+        writeFileSync(
+          join(tree, 'qa-busy.mjs'),
+          'for (const until = Date.now() + 75_000; Date.now() < until; );\nprocess.exit(1);\n',
+        );
+      });
+    const stuckBuild = building('stuck', `touch ${buildBegan} && exec sleep 100000`);
+    const busyBuild = building('busy', `touch ${buildBegan} && node qa-busy.mjs`);
     // Relays that behave otherwise: the first release's build with a start.ts that does
     // something before, instead of or after starting the relay (relay-start.ts, the original).
     const onTrial = "/-trial$/.test(process.env.AGENT_STUDIO_RELAY_DATA ?? '')";
@@ -504,6 +574,8 @@ await import('./relay-start.ts');
       ['9.1.1', good, qaKey, fakeAppImage(true)],
       ['9.1.2', good, qaKey, fakeAppImage(true)],
       ['9.1.3', good, qaKey, fakeAppImage(true)],
+      ['9.1.4', stuckBuild, qaKey, fakeAppImage(true)],
+      ['9.1.5', busyBuild, qaKey, fakeAppImage(true)],
       ['8.0.0', good, qaKey, fakeAppImage(true)],
     ]) {
       const installer = randomBytes(512 * 1024);
@@ -614,7 +686,7 @@ await import('./relay-start.ts');
       "the updater's unit has a deadline, or no watchdog",
     );
     // What a scenario changes of them, and of the updater's settings.
-    let unitChanges = { env: {}, properties: [] };
+    let unitChanges = { env: {}, properties: [], arguments: [] };
     let launched = 0;
     const launch = (...args) => {
       const name = `${qa.service}-update-${++launched}`;
@@ -649,6 +721,7 @@ await import('./relay-start.ts');
         '--pipe',
         '--collect',
         ...settings.map((setting) => `--property=${setting}`),
+        ...(unitChanges.arguments ?? []),
         ...Object.entries(env).map(
           ([name, value]) => `--setenv=AGENT_STUDIO_UPDATE_${name}=${value}`,
         ),
@@ -673,7 +746,7 @@ await import('./relay-start.ts');
       const messages = output
         .split('\n')
         .filter((line) =>
-          /^(Found|Building|Staged|Waiting|Trying|Activat|Published|Not installing|Ignoring|Could not|Trusting|v\d|[0-9a-f]{40} |No |The |Extracting|Installing|Created|Starting|An updater|A trial|A check|A deployment|This check|Nothing)/.test(
+          /^(Found|Building|Staged|Waiting|Trying|Activat|Published|Not installing|Ignoring|Could not|Trusting|v\d|[0-9a-f]{40} |No |The |Extracting|Installing|Created|Starting|An updater|A trial|A check|A deployment|This check|Nothing|Stopped|systemd )/.test(
             line,
           ),
         );
@@ -1593,7 +1666,119 @@ await import('./relay-start.ts');
     );
     passed('an interrupted host switch is finished by what the host process shows, not the link');
 
-    // 17. Older releases are never installed.
+    // 17. A check that cannot tell systemd that it started. Its unit would count as starting
+    // for ever and have no watchdog, so it begins nothing: a release that was just published is
+    // not even found. Here systemd-notify is not on the unit's PATH.
+    latest = '9.1.4';
+    const stateFile = join(qa.state, 'state.json');
+    const stateThen = readFileSync(stateFile, 'utf8');
+    unitChanges = { env: {}, properties: [], arguments: ['--setenv=PATH=/nonexistent'] };
+    run = await update('check');
+    unitChanges = { env: {}, properties: [] };
+    expect(
+      run.status !== 0 &&
+        run.output.includes('could not tell systemd that it started') &&
+        !run.output.includes('Found v9.1.4'),
+      `a check that systemd did not hear of went on:\n${run.output.slice(-4000)}`,
+    );
+    expect(
+      readFileSync(stateFile, 'utf8') === stateThen && selected() === commit['9.1.3'],
+      'a check that systemd did not hear of changed the state',
+    );
+    passed('a check that cannot tell systemd of its start begins nothing');
+
+    // 18. A build step that hangs. The updater's own code runs all the while, since it only
+    // waits for the step, which runs as a unit of its own; so the sign of life is the step's:
+    // one that neither uses the CPU nor the disk lets the check fall silent, its watchdog ends
+    // it (shortened to seconds here), and the step ends with it.
+    const stepUnits = () =>
+      sh('systemctl', [
+        'list-units',
+        '--all',
+        '--plain',
+        '--no-legend',
+        '--full',
+        `${qa.service}-step-*.service`,
+      ])
+        .split('\n')
+        .map((line) => line.trim().split(/\s+/))
+        .filter((fields) => fields.length >= 3)
+        .map(([unit, , state]) => ({ unit, state }));
+    const stepsRunning = () =>
+      stepUnits().filter((entry) => !['inactive', 'failed'].includes(entry.state));
+    const buildOf = (version) =>
+      join(qa.root, 'releases', `.building-${commit[version]}`, buildBegan);
+    unitChanges = { env: { HUNG_AFTER: '20' }, properties: ['WatchdogSec=10'] };
+    const stuck = launch('check');
+    for (let waited = 0; waited < 600 && !existsSync(buildOf('9.1.4')); waited++) await settle(200);
+    expect(existsSync(buildOf('9.1.4')), 'the build that is to hang never began');
+    began = Date.now();
+    const stuckSteps = stepsRunning();
+    expect(stuckSteps.length === 1, `the build runs as ${JSON.stringify(stuckSteps)}`);
+    const bound = sh('systemctl', ['show', stuckSteps[0].unit, '-p', 'BindsTo', '--value']).trim();
+    expect(
+      bound === `${stuck.name}.service`,
+      `the build step is bound to "${bound}", not to its updater`,
+    );
+    run = await finish(stuck);
+    took = Date.now() - began;
+    expect(
+      run.status !== 0 && run.output.includes('it is hung. Its watchdog is no longer answered'),
+      `an updater waiting for a build that does nothing was not ended:\n${run.output.slice(-4000)}`,
+    );
+    expect(took > 15_000 && took < 90_000, `it was ended after ${took} ms`);
+    for (let waited = 0; waited < 50 && stepsRunning().length; waited++) await settle(200);
+    expect(
+      stepsRunning().length === 0,
+      `the build step outlived its updater: ${JSON.stringify(stepUnits())}`,
+    );
+    passed('an updater whose build step does nothing is ended with that step', {
+      endedAfter: `${took} ms`,
+      step: stuckSteps[0].unit,
+    });
+
+    // 19. A build step that works, and a command an earlier updater left. Under the same short
+    // watchdog a build that uses the CPU for 75 seconds, almost four times the patience, is
+    // waited for until it ends by itself (it fails, which is the build's own end). Before it
+    // begins, a unit of the updater's own pattern that still runs, as one would that a killed
+    // updater ran outside a unit, is stopped.
+    const leftover = `${qa.service}-step-left`;
+    sh('systemd-run', [
+      '--quiet',
+      `--unit=${leftover}`,
+      '--service-type=exec',
+      'sleep',
+      'infinity',
+    ]);
+    expect(active(leftover), 'the command that is to be left running did not start');
+    latest = '9.1.5';
+    began = Date.now();
+    run = await update('check');
+    took = Date.now() - began;
+    expect(
+      run.output.includes(
+        `Stopped ${leftover}.service, which an earlier updater had left running.`,
+      ) && !active(leftover),
+      `a command an earlier updater left was not stopped:\n${run.output.slice(-4000)}`,
+    );
+    expect(
+      !run.output.includes('it is hung') &&
+        run.output.includes('Building and testing v9.1.5') &&
+        run.output.includes('Could not stage v9.1.5; retrying after'),
+      `an updater waiting for a build that works was ended:\n${run.output.slice(-4000)}`,
+    );
+    expect(took > 75_000, `the build that works was over after ${took} ms`);
+    expect(stepUnits().length === 0, `steps are left: ${JSON.stringify(stepUnits())}`);
+    expect(selected() === commit['9.1.3'] && (await answers()), 'the relay no longer serves');
+    unitChanges = { env: {}, properties: [] };
+    passed(
+      'a build step that works is waited for, after what an earlier updater left was stopped',
+      {
+        workedFor: `${took} ms`,
+      },
+    );
+
+    // 20. Older releases are never installed.
     latest = '8.0.0';
     run = await update('check');
     expect(
@@ -1603,17 +1788,20 @@ await import('./relay-start.ts');
     expect(selected() === commit['9.1.3'], 'downgraded');
     passed('never downgrades');
 
-    expect(
-      realpathSync('/opt/agent-studio/current') === productionBefore.current,
-      'production release changed',
+    const productionAfter = production();
+    const changed = Object.keys(productionBefore).filter(
+      (name) => productionAfter[name] !== productionBefore[name],
     );
-    expect(pids() === productionBefore.pids, 'a production service restarted');
     expect(
-      spawnSync('systemctl', ['is-active', '--quiet', 'agent-studio-host']).status !== 0 ||
-        productionBefore.host,
-      'a production host started',
+      changed.length === 0,
+      `production changed: ${changed.map((name) => `${name} was "${productionBefore[name]}" and is "${productionAfter[name]}"`).join('; ')}`,
     );
-    passed('production release and service processes unchanged');
+    passed(
+      'production release, host version, installed updater and service processes unchanged',
+      Object.fromEntries(
+        Object.entries(productionAfter).filter(([name]) => name.endsWith('.service')),
+      ),
+    );
     result.ok = true;
   } catch (error) {
     result.error = error instanceof Error ? error.message : String(error);
@@ -1626,6 +1814,8 @@ await import('./relay-start.ts');
     spawnSync('systemctl', ['reset-failed', qa.hostService]);
     spawnSync('systemctl', ['kill', '--signal=KILL', '--kill-whom=all', `${qa.service}-update-*`]);
     spawnSync('systemctl', ['stop', `${qa.service}-update-*`]);
+    spawnSync('systemctl', ['stop', `${qa.service}-step-*`]);
+    spawnSync('systemctl', ['reset-failed', `${qa.service}-step-*`]);
     spawnSync('systemctl', ['stop', qa.service, trialService]);
     spawnSync('systemctl', ['reset-failed', trialService]);
     rmSync(secondStart, { force: true });

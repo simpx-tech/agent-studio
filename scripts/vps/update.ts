@@ -1111,9 +1111,17 @@ const seconds = (ms: number) => `${Math.round(ms / 1000)} s`;
  * unauthenticated state request with 401, six times. Answers are waited for as long as the
  * relay's own process runs and works, by what systemd and the kernel report of it, with no limit
  * of time: a relay that ended is known at once from its service, so a crash loop fails within
- * seconds, and one that neither answers nor works for two minutes fails as stuck. When systemd
- * does not answer about the service, that says nothing of the relay: the check goes on asking
- * both and never fails for it. `reason` says what the relay did, after "its relay".
+ * seconds, and one that neither answers nor works for two minutes fails as stuck.
+ *
+ * While systemd cannot be observed (it does not answer about the service), nothing is known of
+ * the relay's process, so neither rule can apply: the check waits. It goes on asking systemd and
+ * the relay, passes as soon as the relay answers as it must, and until then has no limit of its
+ * own and does not fail or roll back; it says so in the journal once a minute. A relay that
+ * never answers under a service manager that never answers is therefore waited for until
+ * someone ends the check, which the watchdog does not do, since the check's own code runs.
+ *
+ * `reason` says what the relay did, after "its relay"; the relay's last journal line is added
+ * to it as `redact` leaves it.
  */
 export async function healthy(system: System, trial = false): Promise<Health> {
   const began = system.now();
@@ -2289,24 +2297,124 @@ export function spaceShort(
  */
 export function liveness(limit: number, now: number, cpuNeeded = 5000, ioNeeded = 1_000_000) {
   let seen = now;
-  let base: { cpu?: number; io?: number } = {};
+  const moved = progress(cpuNeeded, ioNeeded);
   return {
     beat(at: number) {
       seen = at;
     },
-    sample(at: number, work: { cpu?: number; io?: number }) {
-      const progressed =
-        (work.cpu !== undefined && base.cpu !== undefined && work.cpu - base.cpu >= cpuNeeded) ||
-        (work.io !== undefined && base.io !== undefined && work.io - base.io >= ioNeeded);
-      const rebased =
-        (work.cpu === undefined) !== (base.cpu === undefined) ||
-        (work.io === undefined) !== (base.io === undefined);
-      if (progressed) seen = at;
-      if (progressed || rebased) base = { ...work };
+    sample(at: number, work: Work) {
+      if (moved(work)) seen = at;
     },
     alive: (at: number) => at - seen < limit,
     idle: (at: number) => at - seen,
   };
+}
+
+/** What a unit used so far: CPU time in milliseconds, bytes read and written. */
+export type Work = { cpu?: number; io?: number };
+
+/**
+ * Tells, look by look, whether a unit worked: whether what it used grew by `cpuNeeded`
+ * milliseconds of CPU time or `ioNeeded` bytes since the look that last said so. A unit without
+ * accounting, or one that is gone, says nothing and so never worked.
+ */
+export function progress(cpuNeeded = 5000, ioNeeded = 1_000_000) {
+  let base: Work = {};
+  return (work: Work): boolean => {
+    const progressed =
+      (work.cpu !== undefined && base.cpu !== undefined && work.cpu - base.cpu >= cpuNeeded) ||
+      (work.io !== undefined && base.io !== undefined && work.io - base.io >= ioNeeded);
+    const rebased =
+      (work.cpu === undefined) !== (base.cpu === undefined) ||
+      (work.io === undefined) !== (base.io === undefined);
+    if (progressed || rebased) base = { ...work };
+    return progressed;
+  };
+}
+
+/**
+ * When a check may say that it lives. While it waits for nothing outside itself, that its own
+ * code runs is the sign. While it waits for a command that runs as a unit of its own (a build
+ * step, an installer), its own code runs whatever that command does, so the sign is then the
+ * command's: the check says that it lives only when the unit it waits for worked since it last
+ * did (`read`: the unit's CPU time and the bytes it read and wrote). A command that hangs thus
+ * lets the check fall silent, and its watchdog ends both; one that works runs as long as it
+ * likes.
+ */
+export function heartbeat(read: (unit: string) => Work) {
+  const waiting = new Map<string, (work: Work) => boolean>();
+  return {
+    begin(unit: string) {
+      const moved = progress();
+      // What it had used when the wait began is what later looks are compared with.
+      moved(read(unit));
+      waiting.set(unit, moved);
+    },
+    end(unit: string) {
+      waiting.delete(unit);
+    },
+    beats(): boolean {
+      if (!waiting.size) return true;
+      let any = false;
+      for (const [unit, moved] of waiting) if (moved(read(unit))) any = true;
+      return any;
+    },
+  };
+}
+
+/**
+ * How systemd-run starts every command this updater waits for as a unit of its own: under a
+ * name the updater can find again (`<service>-step-…`), with the accounting that says whether
+ * it works, and bound to the updater's own unit, so that it ends with an updater that was
+ * killed instead of running on under the next one.
+ */
+export function stepArguments(step: { unit: string; updater?: string }): string[] {
+  return [
+    '--quiet',
+    '--wait',
+    '--pipe',
+    '--collect',
+    '--service-type=exec',
+    `--unit=${step.unit}`,
+    ...(step.updater ? [`--property=BindsTo=${step.updater}`] : []),
+    '--property=CPUAccounting=yes',
+    '--property=IOAccounting=yes',
+  ];
+}
+
+/** The units `systemctl list-units --all --plain --no-legend` printed, with their ActiveState. */
+export function listedUnits(output: string): { unit: string; active: string }[] {
+  return output
+    .split('\n')
+    .map((line) => line.trim().split(/\s+/))
+    .filter((fields) => fields.length >= 3 && fields[0].endsWith('.service'))
+    .map(([unit, , active]) => ({ unit, active }));
+}
+
+/**
+ * A line of a relay's journal as it may be copied into an error, the state and this updater's
+ * own log: without the values that look like secrets. What follows a name such as token, key,
+ * secret, password, authorization, bearer or cookie is left out, and so is every run of 32 or
+ * more characters of a key's alphabet (hexadecimal, base64, base64url) that holds a part of 16
+ * or more characters with a digit in it, which a pairing key, a session, a digest and a signature
+ * are and the words of a message or of a path are not. This goes by what a value looks like: it
+ * is a precaution for a line the relay should not have logged, not a proof that none passes.
+ */
+export function redact(line: string): string {
+  const hidden = '[redacted]';
+  return line
+    .replace(/\bbearer\s+[^\s,;"']+/gi, `Bearer ${hidden}`)
+    .replace(
+      /(authorization["']?\s*[:=]\s*["']?)(?:(?:basic|digest)\s+)?[^\s,;"']+/gi,
+      `$1${hidden}`,
+    )
+    .replace(
+      /((?:token|secret|password|passwd|authorization|cookie|credential|session|api[-_]?key|key)s?["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      `$1${hidden}`,
+    )
+    .replace(/[A-Za-z0-9+/_=-]{32,}/g, (run) =>
+      run.split('/').some((part) => part.length >= 16 && /\d/.test(part)) ? hidden : run,
+    );
 }
 
 /** The flock(1) arguments that run a command while holding the deployment lock. */
@@ -2341,15 +2449,60 @@ function run(command: string, args: string[], options: SpawnSyncOptions = {}) {
     throw new Error(`${command} ${args[0]} exited with ${result.status ?? result.signal}.`);
 }
 
+/** What a control group used so far, from its own files. */
+function groupWork(folder: string): Work {
+  const work: Work = {};
+  try {
+    const used = /^usage_usec (\d+)$/m.exec(readFileSync(join(folder, 'cpu.stat'), 'utf8'));
+    if (used) work.cpu = Number(used[1]) / 1000;
+  } catch {
+    // No CPU accounting for this unit, or no such unit.
+  }
+  try {
+    let bytes = 0;
+    for (const match of readFileSync(join(folder, 'io.stat'), 'utf8').matchAll(
+      /\b[rw]bytes=(\d+)/g,
+    ))
+      bytes += Number(match[1]);
+    work.io = bytes;
+  } catch {
+    // No IO accounting for this unit, or no such unit.
+  }
+  return work;
+}
+
+/** The commands this check waits for that run as units of their own, by systemd-run as root. */
+const waits = heartbeat((unit) => groupWork(`/sys/fs/cgroup/system.slice/${unit}.service`));
+/** Says to the process that answers the unit's watchdog that this check lives, when it may. */
+let pulse = () => {};
+
 /**
- * Runs a command without holding this process's own code meanwhile, so that an updater waiting
- * for a build goes on showing that it lives.
+ * Runs a command without holding this process's own code meanwhile and waits for it. `unit` is
+ * the unit the command runs as: while it is waited for, this check shows that it lives only as
+ * that unit works (`heartbeat`), so one that hangs is ended with the check by its watchdog.
  */
-function runFree(command: string, args: string[], stdio: (number | 'ignore' | 'inherit')[]) {
+function runFree(
+  command: string,
+  args: string[],
+  stdio: (number | 'ignore' | 'inherit')[],
+  unit: string,
+) {
   return new Promise<number | null>((done, failed) => {
+    pulse();
     const child = spawn(command, args, { stdio });
-    child.on('error', failed);
-    child.on('close', (status) => done(status));
+    waits.begin(unit);
+    const over = () => {
+      waits.end(unit);
+      pulse();
+    };
+    child.on('error', (error) => {
+      over();
+      failed(error);
+    });
+    child.on('close', (status) => {
+      over();
+      done(status);
+    });
   });
 }
 
@@ -2439,6 +2592,39 @@ export function createSystem(config: Config): System {
       return false;
     }
   };
+  // The commands this updater waits for run as units of their own, one at a time, each under a
+  // name of this pattern. One that is found before the next begins was left by an updater that
+  // ended without it (they are bound to the updater's unit, so only one run outside a unit, or
+  // a service manager that did not follow, leaves any): it is stopped, and nothing is begun over
+  // it until systemd says that it ended, since it may still write where the next one would.
+  const stepPrefix = `${config.service}-step-`;
+  let steps = 0;
+  const stepUnits = () => {
+    const result = spawnSync(
+      'systemctl',
+      ['list-units', '--all', '--plain', '--no-legend', '--full', `${stepPrefix}*.service`],
+      { encoding: 'utf8', timeout: answerWithin },
+    );
+    return result.error || result.status !== 0 ? undefined : listedUnits(result.stdout ?? '');
+  };
+  const step = () => {
+    const found = stepUnits();
+    if (!found)
+      throw new Error('systemd does not say whether a command of an earlier updater still runs.');
+    if (found.length) {
+      const names = found.map((entry) => entry.unit);
+      const quiet = { stdio: 'ignore', timeout: actWithin } as const;
+      spawnSync('systemctl', ['stop', ...names], quiet);
+      spawnSync('systemctl', ['reset-failed', ...names], quiet);
+      const left = stepUnits()?.filter((entry) => !['inactive', 'failed'].includes(entry.active));
+      if (!left || left.length)
+        throw new Error(
+          `${(left ?? found).map((entry) => entry.unit).join(', ')}, which an earlier updater left running, did not stop, so nothing is begun beside it.`,
+        );
+      system.log(`Stopped ${names.join(', ')}, which an earlier updater had left running.`);
+    }
+    return `${stepPrefix}${process.pid}-${++steps}`;
+  };
   // Runs one build step as the unprivileged build user, confined to the release directory and
   // its npm cache, without private data and at low priority beside other services. It has no
   // memory, task or time limit: a build stops only where the machine itself does.
@@ -2468,14 +2654,11 @@ export function createSystem(config: Config): System {
       'TasksMax=infinity',
       ...(network ? [] : ['PrivateNetwork=yes']),
     ];
+    const unit = step();
     const status = await runFree(
       'systemd-run',
       [
-        '--quiet',
-        '--wait',
-        '--pipe',
-        '--collect',
-        '--service-type=exec',
+        ...stepArguments({ unit, updater: ownUnit() }),
         `--uid=${config.buildUser}`,
         `--gid=${config.buildUser}`,
         `--working-directory=${directory}`,
@@ -2488,6 +2671,7 @@ export function createSystem(config: Config): System {
         ...command,
       ],
       [input ?? 'ignore', 'inherit', 'inherit'],
+      unit,
     );
     if (status !== 0) throw new Error(`systemd-run --quiet exited with ${status ?? 'a signal'}.`);
   };
@@ -2496,11 +2680,7 @@ export function createSystem(config: Config): System {
     const result = spawnSync(
       'systemd-run',
       [
-        '--quiet',
-        '--wait',
-        '--pipe',
-        '--collect',
-        '--service-type=exec',
+        ...stepArguments({ unit: step(), updater: ownUnit() }),
         `--uid=${config.buildUser}`,
         `--gid=${config.buildUser}`,
         `--working-directory=${directory}`,
@@ -2526,14 +2706,11 @@ export function createSystem(config: Config): System {
   // Runs a command outside this updater's own sandbox, where /home is hidden and files are
   // private: as root to set up the system, or as the host's user for what lives in its home.
   const transient = async (command: string[], user?: string, check = true) => {
+    const unit = step();
     const status = await runFree(
       'systemd-run',
       [
-        '--quiet',
-        '--wait',
-        '--pipe',
-        '--collect',
-        '--service-type=exec',
+        ...stepArguments({ unit, updater: ownUnit() }),
         ...(user ? [`--uid=${user}`, '--property=WorkingDirectory=~'] : []),
         '--setenv=DEBIAN_FRONTEND=noninteractive',
         '--property=UMask=0022',
@@ -2541,6 +2718,7 @@ export function createSystem(config: Config): System {
         ...command,
       ],
       ['ignore', 'inherit', 'inherit'],
+      unit,
     );
     if (check && status !== 0)
       throw new Error(`${basename(command[0])} exited with ${status ?? 'a signal'}.`);
@@ -2885,7 +3063,8 @@ export function createSystem(config: Config): System {
         .split('\n')
         .map((line) => line.trim())
         .filter(Boolean);
-      return (lines.findLast((line) => /error/i.test(line)) ?? lines.at(-1))?.slice(0, 300);
+      const last = lines.findLast((line) => /error/i.test(line)) ?? lines.at(-1);
+      return last === undefined ? undefined : redact(last).slice(0, 300);
     },
     startTrial(commit) {
       const release = join(releases, commit);
@@ -3308,28 +3487,10 @@ export function createSystem(config: Config): System {
 }
 
 /** What the unit of this updater used so far: CPU time in milliseconds, bytes read and written. */
-function ownWork(): { cpu?: number; io?: number } {
+function ownWork(): Work {
   try {
     const group = readFileSync('/proc/self/cgroup', 'utf8').trim().split('\n').at(-1) ?? '';
-    const folder = `/sys/fs/cgroup${group.slice(group.lastIndexOf(':') + 1)}`;
-    const work: { cpu?: number; io?: number } = {};
-    try {
-      const used = /^usage_usec (\d+)$/m.exec(readFileSync(join(folder, 'cpu.stat'), 'utf8'));
-      if (used) work.cpu = Number(used[1]) / 1000;
-    } catch {
-      // No CPU accounting for this unit.
-    }
-    try {
-      let bytes = 0;
-      for (const match of readFileSync(join(folder, 'io.stat'), 'utf8').matchAll(
-        /\b[rw]bytes=(\d+)/g,
-      ))
-        bytes += Number(match[1]);
-      work.io = bytes;
-    } catch {
-      // No IO accounting for this unit.
-    }
-    return work;
+    return groupWork(`/sys/fs/cgroup${group.slice(group.lastIndexOf(':') + 1)}`);
   } catch {
     return {};
   }
@@ -3344,11 +3505,13 @@ const beatEnvironment = 'AGENT_STUDIO_UPDATE_BEAT';
  * hand. A check skips its run while the lock is held; retry and trust wait for it.
  *
  * As a service (agent-studio-update.service, Type=notify with a watchdog) the check has no
- * deadline: this process tells systemd that it started, runs the check as a child, and answers
- * the watchdog for as long as the check shows signs of life, which are its own code running (a
- * byte on a pipe every ten seconds) or the commands it waits for using the CPU or the disk. One
- * that for `hungAfter` does neither is no longer answered for, and systemd ends the unit, whose
- * next run goes on from the state.
+ * deadline: this process tells systemd that it started, and begins nothing when systemd did not
+ * take that; then it runs the check as a child and answers the watchdog for as long as the check
+ * shows signs of life. Those are its own code running (a byte on a pipe every ten seconds) or
+ * the commands in its unit using the CPU or the disk; while the check waits for a command that
+ * runs as a unit of its own (a build step, an installer), the byte is sent only as that unit
+ * works (`heartbeat`). One that for `hungAfter` shows none is no longer answered for, and systemd
+ * ends the unit and the units bound to it, whose next run goes on from the state.
  */
 async function locked(config: Config, argv: string[]): Promise<number> {
   const [command = 'check'] = argv;
@@ -3367,11 +3530,19 @@ async function locked(config: Config, argv: string[]): Promise<number> {
     if (result.error) throw result.error;
     return result.status ?? 1;
   }
-  const notify = (...what: string[]) => {
-    if (process.env.NOTIFY_SOCKET)
-      spawnSync('systemd-notify', what, { stdio: 'ignore', timeout: answerWithin });
-  };
-  notify('--ready', '--status=Checking for a release');
+  // Whether systemd took what this process told it, when a unit's manager listens at all.
+  const notify = (...what: string[]) =>
+    !process.env.NOTIFY_SOCKET ||
+    spawnSync('systemd-notify', what, { stdio: 'ignore', timeout: answerWithin }).status === 0;
+  // A unit that never heard of its start has no watchdog that could end a check that hangs, and
+  // systemd counts it as still starting: nothing is begun, so nothing is left half done.
+  if (!notify('--ready', '--status=Checking for a release')) {
+    console.error(
+      'This check could not tell systemd that it started (systemd-notify failed), so its watchdog would not work: nothing was begun.',
+    );
+    return 1;
+  }
+  let unheard = false;
   const child = spawn('flock', lockArguments(lock, false, self), {
     stdio: ['ignore', 'inherit', 'inherit', 'pipe'],
     env: { ...environment, [beatEnvironment]: '3' },
@@ -3383,7 +3554,18 @@ async function locked(config: Config, argv: string[]): Promise<number> {
     () => {
       const now = Date.now();
       life.sample(now, ownWork());
-      if (life.alive(now)) return notify('WATCHDOG=1');
+      if (life.alive(now)) {
+        const heard = notify('WATCHDOG=1');
+        // Said when it begins and when it ends, not every half minute.
+        if (heard === unheard)
+          console.log(
+            heard
+              ? 'systemd takes the answers to the watchdog of this check again.'
+              : 'systemd did not take an answer to the watchdog of this check (systemd-notify failed); when none arrives for as long as the watchdog waits, systemd ends this check, and the next goes on from the state.',
+          );
+        unheard = !heard;
+        return;
+      }
       if (said) return;
       said = true;
       console.log(
@@ -3414,15 +3596,17 @@ async function main(argv: string[]) {
   // The check's own code runs: said to the process that answers the unit's watchdog.
   const pipe = Number(process.env[beatEnvironment]);
   if (pipe) {
-    const beat = () => {
+    // While it waits for a command that runs as a unit of its own, only as that unit works.
+    pulse = () => {
+      if (!waits.beats()) return;
       try {
         writeSync(pipe, '.');
       } catch {
         // Nobody listens.
       }
     };
-    beat();
-    setInterval(beat, 10_000).unref();
+    pulse();
+    setInterval(pulse, 10_000).unref();
   }
   const system = createSystem(config);
   if (command === 'check') return check(system, config);

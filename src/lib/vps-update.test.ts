@@ -26,9 +26,11 @@ import {
   emptyState,
   fileDigest,
   healthy,
+  heartbeat,
   hostUnit,
   installerName,
   listTree,
+  listedUnits,
   liveness,
   lockArguments,
   makeBackup,
@@ -41,12 +43,14 @@ import {
   readConfig,
   readJournal,
   readManifest,
+  redact,
   replaceData,
   restoreBackup,
   restoreDone,
   retry,
   runningReplies,
   spaceShort,
+  stepArguments,
   trialArguments,
   treeDifference,
   verifyBackup,
@@ -56,6 +60,7 @@ import {
   type State,
   type System,
   type Unit,
+  type Work,
 } from '../../scripts/vps/update.ts';
 
 const temporary: string[] = [];
@@ -2823,6 +2828,158 @@ describe('the updater’s own unit', () => {
       expect(f.env.state.release?.activation, method).toBeUndefined();
       expect(f.serves(), method).toBe(method === 'restore' ? A : B);
     }
+  });
+
+  it('shows life by the command it waits for while that runs as a unit of its own', () => {
+    const limit = minutes(15);
+    const used = new Map<string, Work>();
+    const beats = heartbeat((unit) => used.get(unit) ?? {});
+    const run = (hours: number, each: (at: number) => void) => {
+      const life = liveness(limit, 0);
+      let ended: number | undefined;
+      // The check's own code runs every ten seconds all the while, whatever its command does.
+      for (let at = 10_000; at <= minutes(hours * 60) && ended === undefined; at += 10_000) {
+        each(at);
+        if (beats.beats()) life.beat(at);
+        if (!life.alive(at)) ended = at;
+      }
+      return ended;
+    };
+    // Nothing outside is waited for: its own code is the sign, for as long as it runs.
+    expect(run(4, () => undefined)).toBeUndefined();
+    // A build step that does nothing for four hours, with the check's code running: hung after
+    // the limit, as an updater whose own code stopped is.
+    used.set('step-1', { cpu: 2000, io: 4096 });
+    beats.begin('step-1');
+    expect(run(4, () => undefined)).toBe(limit);
+    beats.end('step-1');
+    // What an idle command costs, a few milliseconds a minute, is not work either.
+    used.set('step-2', { cpu: 0, io: 0 });
+    beats.begin('step-2');
+    expect(run(4, (at) => used.set('step-2', { cpu: at / 20_000, io: 0 }))).toBe(limit);
+    beats.end('step-2');
+    // One that works runs as long as it likes: by the CPU, slowly (a second each minute)…
+    used.set('step-3', { cpu: 0, io: 0 });
+    beats.begin('step-3');
+    expect(run(4, (at) => used.set('step-3', { cpu: at / 60, io: 0 }))).toBeUndefined();
+    beats.end('step-3');
+    // …or by the disk alone, as a download being written is.
+    used.set('step-4', { cpu: 0, io: 0 });
+    beats.begin('step-4');
+    expect(run(4, (at) => used.set('step-4', { cpu: 0, io: at * 10 }))).toBeUndefined();
+    beats.end('step-4');
+    // What it had used before the wait began does not count for the wait.
+    used.set('step-5', { cpu: 900_000, io: 5_000_000_000 });
+    beats.begin('step-5');
+    expect(beats.beats()).toBe(false);
+    // A unit that is gone, or has no accounting, says nothing: silence, not life.
+    used.delete('step-5');
+    expect(beats.beats()).toBe(false);
+    used.set('step-5', { cpu: 6000 });
+    expect(beats.beats()).toBe(false);
+    used.set('step-5', { cpu: 12_000 });
+    expect(beats.beats()).toBe(true);
+    // Once the command returned, the check's own code is the sign again.
+    beats.end('step-5');
+    expect(beats.beats()).toBe(true);
+    // The worker asks before it says that it lives, and around every command it waits for.
+    const source = file('scripts/vps/update.ts');
+    expect(source).toContain('if (!waits.beats()) return;');
+    expect(source).toMatch(/waits\.begin\(unit\);[\s\S]{0,200}waits\.end\(unit\);/);
+  });
+
+  it('runs the commands it waits for as units that end with it and that it finds again', () => {
+    const args = stepArguments({
+      unit: 'agent-studio-step-812-3',
+      updater: 'agent-studio-update.service',
+    });
+    expect(args).toEqual([
+      '--quiet',
+      '--wait',
+      '--pipe',
+      '--collect',
+      '--service-type=exec',
+      '--unit=agent-studio-step-812-3',
+      '--property=BindsTo=agent-studio-update.service',
+      '--property=CPUAccounting=yes',
+      '--property=IOAccounting=yes',
+    ]);
+    // Run by hand, outside a unit, there is nothing to bind to.
+    expect(stepArguments({ unit: 'agent-studio-step-812-3' }).join(' ')).not.toContain('BindsTo');
+    // Every command the updater waits for is started this way: the build steps, the commands
+    // that set the system up, and the app's answer to --server-check.
+    const source = file('scripts/vps/update.ts');
+    expect(
+      source.match(/\.\.\.stepArguments\(\{ unit(: step\(\))?, updater: ownUnit\(\) \}\)/g),
+    ).toHaveLength(3);
+    expect(source.match(/'--wait',/g)).toHaveLength(1);
+    // What systemd lists of the units an earlier updater left.
+    expect(
+      listedUnits(
+        [
+          'agent-studio-step-640-2.service loaded active   running [systemd-run] /usr/bin/npm run build',
+          '  agent-studio-step-640-1.service loaded failed   failed  [systemd-run] /usr/bin/tar -xzf -',
+          'agent-studio-step-11-1.service  loaded inactive dead    [systemd-run] /bin/sh -c x',
+          '',
+        ].join('\n'),
+      ),
+    ).toEqual([
+      { unit: 'agent-studio-step-640-2.service', active: 'active' },
+      { unit: 'agent-studio-step-640-1.service', active: 'failed' },
+      { unit: 'agent-studio-step-11-1.service', active: 'inactive' },
+    ]);
+    expect(listedUnits('')).toEqual([]);
+    // They are looked for, stopped and seen to have ended before the next command begins.
+    expect(source).toMatch(/const step = \(\) => \{\s+const found = stepUnits\(\);/);
+    expect(source).toContain("!['inactive', 'failed'].includes(entry.active)");
+  });
+
+  it('begins nothing when systemd did not hear that the check started', () => {
+    const source = file('scripts/vps/update.ts');
+    const ready = source.indexOf("if (!notify('--ready'");
+    const worker = source.indexOf("spawn('flock', lockArguments(lock, false, self)");
+    expect(ready).toBeGreaterThan(0);
+    expect(worker).toBeGreaterThan(ready);
+    expect(source.slice(ready, worker)).toContain('return 1;');
+    // An answer to the watchdog that systemd did not take is said in the journal.
+    expect(source).toContain("const heard = notify('WATCHDOG=1');");
+  });
+
+  it('leaves out what looks like a secret from a relay’s line', () => {
+    const key = 'a3f1'.repeat(16);
+    const base64 = 'Zm9vYmFyMTIzNDU2Nzg5MGFiY2RlZmdoaWprbG1ub3A9PQ==';
+    const hidden = (line: string, secret: string) => {
+      const said = redact(line);
+      expect(said, line).not.toContain(secret);
+      expect(said, line).toContain('[redacted]');
+      return said;
+    };
+    hidden(`Error: pairing failed for ${key}`, key);
+    hidden(`Error: bad signature ${base64} on push`, base64.slice(0, 40));
+    hidden('Error: session 550e8400-e29b-41d4-a716-446655440000 expired', '550e8400-e29b');
+    hidden('Error: AGENT_STUDIO_RELAY_TOKEN=hunter2 is too short', 'hunter2');
+    hidden('Error: refused {"token":"abc def","id":7}', 'abc def');
+    hidden("Error: password: 'p w' was wrong", 'p w');
+    hidden('Error: Authorization: Bearer abc.def.ghi rejected', 'abc.def.ghi');
+    hidden('Error: sent Bearer abcdef to the push service', 'abcdef');
+    hidden(`Error: fetch https://push.example/send/${key}/x failed`, key);
+    expect(hidden('Error: set-cookie=studio=1; next', 'studio=1')).toBe(
+      'Error: set-cookie=[redacted]; next',
+    );
+    // What says why a relay ended stays as it is.
+    for (const line of [
+      'Error: Relay data is unreadable; preserved without overwriting.',
+      'Error: listen EADDRINUSE: address already in use 127.0.0.1:4317',
+      "Error: ENOENT: no such file or directory, open '/var/lib/agent-studio/workspace.json'",
+      'RangeError [ERR_STRING_TOO_LONG]: Cannot create a string longer than 0x1fffffe8 characters',
+      'Error: Cannot find module /opt/agent-studio/current/relay/start.ts imported from there',
+      'FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory',
+    ])
+      expect(redact(line)).toBe(line);
+    // The relay's line reaches an error only through it.
+    const source = file('scripts/vps/update.ts');
+    expect(source).toContain('redact(last).slice(0, 300)');
+    expect(source.match(/journalctl/g)).toHaveLength(1);
   });
 
   it('holds the deployment lock for everything that changes the state', () => {
