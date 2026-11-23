@@ -5,6 +5,15 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 1.3.5 - 2026-11-23
+
+### Fixed
+
+- Open sign-in for a Claude account no longer keeps loading without opening anything. Claude
+  Code 2.1.330 shows its sign-in page in a new form the app did not read, so an account in WSL
+  never got its page and one on Windows ended with an error after signing in. A sign-in page
+  shown in a form the app cannot read now ends the sign-in at once with a message
+
 ## 1.3.4 - 2026-11-20
 
 ### Fixed
