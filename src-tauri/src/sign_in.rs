@@ -110,8 +110,9 @@ struct Entry {
     view: View,
     account: String,
     cancel: CancellationToken,
-    /// Claude's input, where a pasted code goes, and the state that code must carry.
-    input: Option<(Arc<tokio::sync::Mutex<ChildStdin>>, String)>,
+    /// Claude's input, where a pasted code goes, and the state that code must carry when its
+    /// page names one.
+    input: Option<(Arc<tokio::sync::Mutex<ChildStdin>>, Option<String>)>,
     /// A code was pasted, which explains a failure that follows.
     pasted: bool,
     /// Why another sign-in ended this one.
@@ -198,16 +199,16 @@ impl SignIns {
             (false, _, true) => "",
             (false, _, false) => "Your browser did not open. Open the sign-in page to continue.",
         };
-        let state = page_state(&page).filter(|_| start.provider == "claude");
+        // Only Claude takes a pasted code. Its page names the state that code repeats, unless
+        // Claude Code shortened it (`claude`); the CLI then checks the code alone.
+        let state = page_state(&page);
         let view = self.entries.lock().unwrap().get_mut(&id).map(|entry| {
             entry.view.url = Some(page);
-            entry.view.code = state.is_some() && input.is_some();
+            entry.view.code = input.is_some();
             entry.view.code_expected = entry.view.code && (wsl || start.remote);
             entry.view.user_code = user_code;
             entry.view.message = message.into();
-            entry.input = input
-                .zip(state)
-                .map(|(input, state)| (Arc::new(tokio::sync::Mutex::new(input)), state));
+            entry.input = input.map(|input| (Arc::new(tokio::sync::Mutex::new(input)), state));
             entry.view.clone()
         });
         let Some(view) = view else {
@@ -231,7 +232,7 @@ impl SignIns {
             .input
             .clone()
             .ok_or("This sign-in finishes in the browser and takes no code.")?;
-        let line = pasted_code(text, &state)?;
+        let line = pasted_code(text, state.as_deref())?;
         {
             let mut input = input.lock().await;
             input
@@ -403,18 +404,22 @@ type Started = (Flow, String, Option<ChildStdin>, Option<String>);
 
 async fn claude(start: &Start, cancel: &CancellationToken) -> Result<Started, String> {
     let mut command = start.exe.command();
+    // Claude Code 2.1.330 shortens its page to fit a narrow terminal, leaving out the state the
+    // code it ends with repeats, unless asked for the whole page.
     command
         .args(["auth", "login"])
         .env_remove("CLAUDECODE")
+        .env(FULL_PAGE, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     if start.exe.wsl.is_some() {
         // Claude Code in WSL cannot reach the Windows browser, so it opens none (`true` stands
         // in for a browser) and this app opens the page instead.
-        command
-            .env("BROWSER", "true")
-            .env("WSLENV", crate::wsl::passing("BROWSER/u"));
+        command.env("BROWSER", "true").env(
+            "WSLENV",
+            crate::wsl::passing(&format!("BROWSER/u:{FULL_PAGE}/u")),
+        );
     } else {
         // The device that opened this sign-in opens its page, not this computer.
         if start.remote {
@@ -433,10 +438,11 @@ async fn claude(start: &Start, cancel: &CancellationToken) -> Result<Started, St
     let errors = Arc::new(Mutex::new(String::new()));
     let collector = tokio::spawn(collect(stderr, errors.clone()));
     let found = tokio::select! {
-        _ = cancel.cancelled() => Err(CANCELLED.to_string()),
+        _ = cancel.cancelled() => Err(CANCELLED),
         found = claude_page_in(&mut stdout) => match found {
-            Some(page) => Ok(page),
-            None => Err("Claude Code ended before it showed its sign-in page.".to_string()),
+            Shown::Page(page) => Ok(page),
+            Shown::Unreadable => Err(UNREADABLE),
+            Shown::Ended => Err(NO_PAGE),
         },
     };
     match found {
@@ -457,28 +463,44 @@ async fn claude(start: &Start, cancel: &CancellationToken) -> Result<Started, St
         Err(error) => {
             start.exe.kill(&mut child).await;
             let _ = tokio::time::timeout(Duration::from_secs(2), collector).await;
+            // A CLI that ended by itself says why on its error output.
             let reason = last_error(&errors.lock().unwrap());
             Err(match reason {
-                Some(reason) if !cancel.is_cancelled() => {
+                Some(reason) if error == NO_PAGE && !cancel.is_cancelled() => {
                     format!("Claude Code could not sign in: {reason}")
                 }
-                _ => error,
+                _ => error.to_string(),
             })
         }
     }
 }
+const NO_PAGE: &str = "Claude Code ended before it showed its sign-in page.";
+const UNREADABLE: &str = "Claude Code did not show a sign-in page this app can open.";
 
-async fn claude_page_in(stdout: &mut ChildStdout) -> Option<String> {
+/// What Claude Code's `auth login` showed before it asked for a code.
+enum Shown {
+    Page(String),
+    /// It asked for a code without naming a page this app reads, as a version that words its
+    /// page otherwise would: waiting longer would wait for good (2026-11-23).
+    Unreadable,
+    Ended,
+}
+
+async fn claude_page_in(stdout: &mut ChildStdout) -> Shown {
     let mut text = String::new();
     let mut buffer = [0u8; 4096];
     loop {
-        let read = stdout.read(&mut buffer).await.ok()?;
-        if read == 0 {
-            return None;
-        }
+        let read = match stdout.read(&mut buffer).await {
+            Ok(0) | Err(_) => return Shown::Ended,
+            Ok(read) => read,
+        };
         text.push_str(&String::from_utf8_lossy(&buffer[..read]));
         if let Some(page) = claude_page(&text) {
-            return Some(page);
+            return Shown::Page(page);
+        }
+        // Every version writes its page before this prompt, so the page has come by now.
+        if text.contains(CODE_PROMPT) {
+            return Shown::Unreadable;
         }
         keep_tail(&mut text);
     }
@@ -661,10 +683,24 @@ static ESCAPES: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-?]*[ -/]*[@-~]|\x1b[@-_]").unwrap()
 });
 
+/// Asks Claude Code for its whole sign-in page rather than the short one 2.1.330 shows by default,
+/// which leaves out the state a pasted code repeats.
+const FULL_PAGE: &str = "CLAUDE_CODE_FULL_SIGN_IN_LINK";
+/// What Claude Code's `auth login` writes before its page: "visit:" with the page after it on the
+/// same line (up to 2.1.32x) or on the next one (2.1.330), or "Sign in at:" and the page on the
+/// next line when its terminal cannot take the browser's return.
+const PAGE_LEADS: [&str; 2] = ["visit:", "Sign in at:"];
+/// The prompt Claude Code writes once its page is out.
+const CODE_PROMPT: &str = "Paste code here";
+
 /// The page Claude Code's `auth login` names, once its whole line has arrived.
 fn claude_page(text: &str) -> Option<String> {
     let text = ESCAPES.replace_all(text, "");
-    let rest = &text[text.find("visit: ")? + "visit: ".len()..];
+    let (at, lead) = PAGE_LEADS
+        .iter()
+        .filter_map(|lead| text.find(lead).map(|at| (at, lead.len())))
+        .min()?;
+    let rest = text[at + lead..].trim_start_matches([' ', '\t', '\r', '\n']);
     let end = rest.find(['\r', '\n'])?;
     sign_in_page(&rest[..end])
 }
@@ -701,8 +737,9 @@ fn page_state(page: &str) -> Option<String> {
         .filter(|state| !state.is_empty())
 }
 
-/// The line Claude Code takes for a pasted code: the code, `#`, and this sign-in's state.
-fn pasted_code(text: &str, state: &str) -> Result<String, String> {
+/// The line Claude Code takes for a pasted code: the code, `#`, and this sign-in's state, which
+/// only a page that names it lets this app check.
+fn pasted_code(text: &str, state: Option<&str>) -> Result<String, String> {
     let shape = |part: &str| {
         !part.is_empty()
             && part.len() <= 2048
@@ -715,7 +752,7 @@ fn pasted_code(text: &str, state: &str) -> Result<String, String> {
         .split_once('#')
         .filter(|(code, pasted)| shape(code) && shape(pasted))
         .ok_or("Paste the whole code the sign-in page shows, including the part after #.")?;
-    if pasted != state {
+    if state.is_some_and(|state| pasted != state) {
         return Err(
             "This code is from another sign-in. Open the sign-in page again and paste the code it shows."
                 .into(),
@@ -929,6 +966,115 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, "Claude Code could not sign in: Managed settings on this machine configure a Cloud gateway sign-in; run interactive /login to authenticate.");
         assert!(signs.tokens().is_empty());
+    }
+
+    // Claude Code 2.1.330: its page on the line after "visit:", written after a moment, and
+    // shortened without its state unless the whole page is asked for (`WHOLE` reads the variable;
+    // a version that ignores it always shortens). It checks a pasted code but not its state.
+    const CLAUDE_NEXT_LINE: &str = r#"
+      import { createInterface } from 'node:readline';
+      if (process.argv.slice(2).join(' ') !== 'auth login') { console.error('Unexpected arguments'); process.exit(2); }
+      const page = WHOLE
+        ? 'https://claude.com/cai/oauth/authorize?code=true&client_id=c&state=st4te'
+        : 'https://claude.ai/oauth/authorize?z-mFQVMdkMp0nkRTqrCH9m-_56q5_FAT1bpJaHpHLoN3E';
+      process.stdout.write("Opening browser to sign in…\nIf the browser didn't open, visit:\n");
+      setTimeout(() => process.stdout.write(page + '\nPaste code here if prompted > '), 100);
+      createInterface({ input: process.stdin }).on('line', (line) => {
+        if (line.startsWith('good#')) { process.stdout.write('Login successful.\n'); process.exit(0); }
+        process.stderr.write('Login failed: Request failed with status code 400\n');
+        process.exit(1);
+      });
+    "#;
+
+    #[tokio::test]
+    async fn claude_reads_its_page_on_the_next_line_and_asks_for_the_whole_page() {
+        let source = CLAUDE_NEXT_LINE.replace("WHOLE", "process.env.CLAUDE_CODE_FULL_SIGN_IN_LINK");
+        let (exe, dir) = cli("claude", &source);
+        let signs = SignIns::default();
+        let (notify, views) = recorder();
+        let view = signs
+            .start(
+                request(exe, dir.path(), "account"),
+                notify.clone(),
+                browser(true).0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            view.url.as_deref(),
+            Some("https://claude.com/cai/oauth/authorize?code=true&client_id=c&state=st4te")
+        );
+        assert!(view.code);
+        // The whole page names its state, so a code from another sign-in never reaches the CLI.
+        assert!(signs
+            .code(&view.id, "good#an0ther", &notify)
+            .await
+            .unwrap_err()
+            .contains("another sign-in"));
+        signs.code(&view.id, "good#st4te", &notify).await.unwrap();
+        assert_eq!(end_of(&views, &view.id).await.phase, Phase::Connected);
+    }
+
+    #[tokio::test]
+    async fn a_short_page_without_its_state_still_takes_the_code_it_shows() {
+        let (exe, dir) = cli("claude", &CLAUDE_NEXT_LINE.replace("WHOLE", "false"));
+        let signs = SignIns::default();
+        let (notify, views) = recorder();
+        let (open, pages) = browser(true);
+        let view = signs
+            .start(
+                from_elsewhere(exe, dir.path(), "server"),
+                notify.clone(),
+                open,
+            )
+            .await
+            .unwrap();
+        assert!(pages.lock().unwrap().is_empty());
+        assert_eq!(
+            view.url.as_deref(),
+            Some("https://claude.ai/oauth/authorize?z-mFQVMdkMp0nkRTqrCH9m-_56q5_FAT1bpJaHpHLoN3E")
+        );
+        assert!(view.code && view.code_expected);
+        // Without a state to compare, only the code's shape is checked here and the CLI does
+        // the rest.
+        assert!(signs
+            .code(&view.id, "good", &notify)
+            .await
+            .unwrap_err()
+            .contains("including the part after #"));
+        signs.code(&view.id, "good#5tate", &notify).await.unwrap();
+        assert_eq!(end_of(&views, &view.id).await.phase, Phase::Connected);
+    }
+
+    #[tokio::test]
+    async fn a_page_this_app_cannot_read_ends_the_sign_in_instead_of_waiting() {
+        // A version that words its page otherwise asks for a code and then waits for good.
+        let (exe, dir) = cli(
+            "claude",
+            r#"
+              process.stderr.write('A warning that explains nothing\n');
+              process.stdout.write('Opening browser to sign in…\nGo to https://claude.ai/oauth/authorize?z-1 to continue\n');
+              process.stdout.write('Paste code here if prompted > ');
+              process.stdin.resume();
+            "#,
+        );
+        let signs = SignIns::default();
+        let error = tokio::time::timeout(
+            Duration::from_secs(20),
+            signs.start(
+                request(exe, dir.path(), "account"),
+                recorder().0,
+                browser(true).0,
+            ),
+        )
+        .await
+        .expect("the sign-in kept waiting for a page")
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "Claude Code did not show a sign-in page this app can open."
+        );
+        assert!(signs.list().is_empty() && signs.tokens().is_empty());
     }
 
     // Codex's app-server, whose sign-in ends as `outcome` says: success, fail or never.
@@ -1214,6 +1360,8 @@ mod tests {
                 assert_eq!(*pages.lock().unwrap(), [view.url.clone().unwrap()]);
                 if provider == "claude" {
                     assert!(view.code && view.code_expected);
+                    // The request for the whole page reached the Linux CLI.
+                    assert!(page_state(view.url.as_deref().unwrap()).is_some());
                     assert_eq!(
                         view.message,
                         "Sign in on the page that opened, then paste the code it shows."
@@ -1278,23 +1426,72 @@ mod tests {
             Some("s+1")
         );
         assert_eq!(page_state("https://claude.com/a?code=true"), None);
+        // Claude Code 2.1.330's short page names no state.
+        assert_eq!(
+            page_state("https://claude.ai/oauth/authorize?z-mFQVMdkMp0nkRTqrCH9m"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_page_on_the_line_after_its_lead_is_read_once_whole() {
+        // As Claude Code 2.1.330 writes it, with its prompt after the page.
+        let text = "Opening browser to sign in…\nIf the browser didn't open, visit:\nhttps://claude.ai/oauth/authorize?z-mFQVMdkMp0nkRTqrCH9m\nPaste code here if prompted > ";
+        assert_eq!(
+            claude_page(text).as_deref(),
+            Some("https://claude.ai/oauth/authorize?z-mFQVMdkMp0nkRTqrCH9m")
+        );
+        // Until the page's whole line has come, nothing is read.
+        let lead = "Opening browser to sign in…\nIf the browser didn't open, visit:\n";
+        assert_eq!(claude_page(lead), None);
+        assert_eq!(
+            claude_page(&format!("{lead}https://claude.ai/oauth/auth")),
+            None
+        );
+        for (text, page) in [
+            (
+                "visit:\r\nhttps://claude.com/a?state=s\r\n",
+                "https://claude.com/a?state=s",
+            ),
+            (
+                "visit: \n\nhttps://claude.com/a?state=s\n",
+                "https://claude.com/a?state=s",
+            ),
+            (
+                "Sign in at:\nhttps://claude.com/a?state=s\n",
+                "https://claude.com/a?state=s",
+            ),
+            (
+                "visit:\n\u{1b}]8;;https://claude.com/a\u{7}https://claude.com/a\u{1b}]8;;\u{7}\n",
+                "https://claude.com/a",
+            ),
+        ] {
+            assert_eq!(claude_page(text).as_deref(), Some(page), "{text:?}");
+        }
+        // A line after the lead that is no page is not one.
+        assert_eq!(claude_page("visit:\nthe page is below\n"), None);
     }
 
     #[test]
     fn pasted_codes_must_be_whole_and_belong_to_this_sign_in() {
+        let state = Some("st4te");
         assert_eq!(
-            pasted_code(" abc-_.~+/=#st4te \n", "st4te").unwrap(),
+            pasted_code(" abc-_.~+/=#st4te \n", state).unwrap(),
             "abc-_.~+/=#st4te"
         );
-        assert!(pasted_code("abc", "st4te").is_err());
-        assert!(pasted_code("#st4te", "st4te").is_err());
-        assert!(pasted_code("abc#", "st4te").is_err());
-        assert!(pasted_code("abc def#st4te", "st4te").is_err());
-        assert!(pasted_code("abc#st4te#more", "st4te").is_err());
-        assert!(pasted_code("abc;rm#st4te", "st4te").is_err());
-        assert!(pasted_code("abc#other", "st4te")
+        assert!(pasted_code("abc", state).is_err());
+        assert!(pasted_code("#st4te", state).is_err());
+        assert!(pasted_code("abc#", state).is_err());
+        assert!(pasted_code("abc def#st4te", state).is_err());
+        assert!(pasted_code("abc#st4te#more", state).is_err());
+        assert!(pasted_code("abc;rm#st4te", state).is_err());
+        assert!(pasted_code("abc#other", state)
             .unwrap_err()
             .contains("another sign-in"));
+        // A page without a state leaves the state to the CLI, but not the code's shape.
+        assert_eq!(pasted_code("abc#other", None).unwrap(), "abc#other");
+        assert!(pasted_code("abc", None).is_err());
+        assert!(pasted_code("abc;rm#st4te", None).is_err());
     }
 
     #[test]
