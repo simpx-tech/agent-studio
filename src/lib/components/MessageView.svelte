@@ -39,6 +39,7 @@
   import { placedSteering } from '$lib/steering';
   import { compactionLabel, compactionTokens } from '$lib/compaction';
   import ReplyFooter from './ReplyFooter.svelte';
+  import type { TimeReport } from '$lib/time-report';
   import ImageAttachments from './ImageAttachments.svelte';
   import type { BackgroundRun } from '$lib/background-work';
   import { replyTools, runningSubagents, type RunningSubagent } from '$lib/subagents';
@@ -65,6 +66,8 @@
     switchNotice = '',
     switchColor,
     timeTotal,
+    chatTime,
+    chatTitle,
     chatChanges,
     folder,
     openArtifact,
@@ -95,6 +98,9 @@
     /** The color of the account this reply switched to, which the notice names first. */
     switchColor?: string;
     timeTotal?: ReplyTimeTotal;
+    /** Where the whole chat's time went, and the chat's title for a copied report. */
+    chatTime?: TimeReport;
+    chatTitle?: string;
     chatChanges?: SeparatedChanges;
     folder?: string;
     openArtifact: (artifact: Artifact, mode?: 'modal' | 'panel') => void;
@@ -438,6 +444,8 @@
   <ReplyFooter
     {message}
     {timeTotal}
+    {chatTime}
+    {chatTitle}
     responseChanges={responseChanges.files}
     chatChanges={allChanges.files}
     responseMemory={responseChanges.memory}

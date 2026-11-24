@@ -141,6 +141,8 @@ pub struct EventSink {
     outputs: Option<crate::tool_output::Recorder>,
     /// The conversation whose screens this run's tools save, list and read.
     screens: Option<Arc<crate::screens::tools::Context>>,
+    /// Where this run's time goes, which the provider's own lines tell most of.
+    time: Option<Arc<Mutex<crate::protocol::time_spent::Ledger>>>,
 }
 impl EventSink {
     pub fn new(f: impl Fn(RunEvent) -> Result<(), String> + Send + Sync + 'static) -> Self {
@@ -148,6 +150,13 @@ impl EventSink {
             send: Arc::new(f),
             outputs: None,
             screens: None,
+            time: None,
+        }
+    }
+    /// Hands the run's time ledger a line of its provider, when the run keeps one.
+    pub fn time(&self, observe: impl FnOnce(&mut crate::protocol::time_spent::Ledger)) {
+        if let Some(ledger) = &self.time {
+            observe(&mut ledger.lock().unwrap_or_else(|e| e.into_inner()));
         }
     }
     pub fn send(&self, event: RunEvent) -> Result<(), String> {
@@ -172,6 +181,29 @@ impl EventSink {
     pub fn with_outputs(mut self, outputs: crate::tool_output::Recorder) -> Self {
         self.outputs = Some(outputs);
         self
+    }
+    /// A test's run that keeps its time ledger as a conversation's run does, begun now, with
+    /// the events it reported.
+    #[cfg(test)]
+    #[allow(clippy::type_complexity)]
+    pub fn timed(
+        run_id: &str,
+    ) -> (
+        Self,
+        Arc<Mutex<crate::protocol::time_spent::Ledger>>,
+        Arc<Mutex<Vec<RunEvent>>>,
+    ) {
+        let ledger = Arc::new(Mutex::new(crate::protocol::time_spent::Ledger::new(run_id)));
+        let events = Arc::new(Mutex::new(vec![]));
+        let (time, reported) = (ledger.clone(), events.clone());
+        let mut sink = Self::new(move |event| {
+            time.lock().unwrap().event(&event);
+            reported.lock().unwrap().push(event);
+            Ok(())
+        });
+        sink.time = Some(ledger.clone());
+        ledger.lock().unwrap().begin(std::time::Instant::now());
+        (sink, ledger, events)
     }
     /// Stores tool results the decoder captured, when this run keeps them.
     pub fn outputs(&self, outputs: Vec<crate::protocol::activity::CapturedOutput>) {
@@ -212,6 +244,12 @@ pub async fn run(
     let recorded_changes = changes.clone();
     let screens =
         crate::screens::tools::Context::new(&app, &request, connection_id.as_deref()).map(Arc::new);
+    // Only these providers' lines tell what their model does.
+    let timed = matches!(request.agent.provider.as_str(), "claude" | "codex");
+    let ledger = Arc::new(Mutex::new(crate::protocol::time_spent::Ledger::new(
+        &request.run_id,
+    )));
+    let time = ledger.clone();
     let mut output = EventSink::new(move |mut event| {
         if let RunEvent::Compaction { compaction } = &mut event {
             compaction.usage_revision = usage_revision.load(Ordering::Relaxed);
@@ -224,9 +262,17 @@ pub async fn run(
         if let RunEvent::Usage { usage } = &mut event {
             usage.revision = Some(usage_revision.fetch_add(1, Ordering::Relaxed) + 1);
         }
-        feed.send(event)
+        // A running reply reports where its time went now and then, after the event that
+        // found it due.
+        let spent = time.lock().unwrap_or_else(|e| e.into_inner()).event(&event);
+        feed.send(event)?;
+        match spent {
+            Some(time_spent) => feed.send(RunEvent::TimeSpent { time_spent }),
+            None => Ok(()),
+        }
     });
     output.screens = screens;
+    output.time = timed.then(|| ledger.clone());
     let workflow = crate::providers::workflow_calls::context(&app, &request, connection_id.clone());
     let mut questions = app.state::<crate::providers::questions::Questions>().open(
         &request.run_id,
@@ -265,6 +311,9 @@ pub async fn run(
         });
     }
     let run_started = std::time::Instant::now();
+    if timed {
+        output.time(|ledger| ledger.begin(run_started));
+    }
     let undo_request = request.clone();
     let result = execute(
         app.clone(),
@@ -277,6 +326,10 @@ pub async fn run(
     .await
     .map(|(status, _)| status);
     let run_duration_ms = run_started.elapsed().as_millis().min(9_007_199_254_740_991) as u64;
+    let spent = ledger.lock().unwrap_or_else(|e| e.into_inner()).end();
+    if let Some(time_spent) = spent {
+        let _ = output.send(RunEvent::TimeSpent { time_spent });
+    }
     let snapshot = changes.lock().ok().and_then(|mut s| s.take());
     if let Some(snapshot) = snapshot {
         if let Err(error) = crate::undo::capture(&app, &undo_request, &snapshot).await {
@@ -981,6 +1034,7 @@ async fn stream_turn(
                             // Lines about the sub-agents of a reply that handed this process over
                             // belong to that reply, apart from file edits, which are this reply's.
                             routed = process.background.as_ref().is_some_and(|watch| watch.route(&value));
+                            if let Some(channel) = channel { channel.time(|ledger| ledger.claude(&value)); }
                             if routed {
                                 for event in decoder.decode_file_changes(&request.agent.provider, &value) {
                                     if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } }

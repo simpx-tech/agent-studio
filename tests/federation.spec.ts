@@ -1533,12 +1533,12 @@ test('two app environments pair, share accounts, route chats, retain progress an
     });
     expect(Buffer.from(await held.arrayBuffer()).toString('base64')).toBe(imageData);
     await expect(desktop.locator('.activity-summary')).not.toHaveAttribute('open', '');
-    await expect(desktop.getByLabel('Reply usage and cost')).not.toContainText(
+    await expect(desktop.getByLabel('Reply time, usage and cost')).not.toContainText(
       /input|output|tokens|cost|\$/i,
     );
-    await desktop.getByLabel('Reply usage and cost').click();
+    await desktop.getByLabel('Reply time, usage and cost').click();
     await expect(desktop.getByText('$0.012345', { exact: true })).toBeVisible();
-    await desktop.getByLabel('Reply usage and cost').click();
+    await desktop.getByLabel('Reply time, usage and cost').click();
     await expect(desktop.getByLabel('Work history', { exact: true })).toHaveText('Work history');
     await desktop.getByLabel('Work history', { exact: true }).click();
     await expect(desktop.getByLabel('Filter activity')).toHaveCount(0);

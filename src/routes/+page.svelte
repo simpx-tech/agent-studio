@@ -425,6 +425,7 @@
     selectedModelName,
     replyTimeTotals,
   } from '$lib/replies';
+  import { timeReport } from '$lib/time-report';
   import UsagePanel from '$lib/components/UsagePanel.svelte';
   import QuotaBars, { quotaBarsWidth } from '$lib/components/QuotaBars.svelte';
   import type { BalanceAgent } from '$lib/components/NewChatSettings.svelte';
@@ -2113,6 +2114,14 @@
       lastReplyConnection !== selectedSettings.connectionId,
   );
   const timeTotals = $derived(replyTimeTotals(active?.messages ?? []));
+  // Where the open chat's time went, worked out only once a reply's timing panel shows the
+  // whole chat. The report reads the chat without making it reactive (src/lib/detached.ts), so
+  // what changes it is named here: a reply's end, and the time a reply reports.
+  const chatTime = $derived.by(() => {
+    void timeTotals;
+    for (const message of active?.messages ?? []) void message.timeSpent?.revision;
+    return timeReport(active?.messages ?? [], { folder: active?.location?.path });
+  });
   // A chat from another day, or continued on one, shows where each of its days begins.
   const dayStarts = $derived(chatDays(active?.messages ?? [], today));
   const chatChanges = $derived(
@@ -8452,6 +8461,8 @@
                     {chatChanges}
                     folder={active.location?.path}
                     timeTotal={timeTotals.get(m.id)}
+                    {chatTime}
+                    chatTitle={active.title}
                     switchNotice={switchNotices.get(m.id)}
                     switchColor={connectionColor(accountSwitches.get(m.id))}
                     agent={active.settings}

@@ -190,7 +190,7 @@ for (const mobile of [false, true])
       summary.locator('.changed-file').filter({ hasText: name }).locator('summary [data-icon]');
     const footer = page.locator('.reply-footer').last();
     const filesToggle = footer.getByRole('button', { name: /Files edited/ });
-    const usageToggle = footer.getByRole('button', { name: 'Reply usage and cost', exact: true });
+    const usageToggle = footer.getByRole('button', { name: 'Reply time, usage and cost', exact: true });
     await expect(filesToggle).toHaveAttribute('aria-expanded', 'false');
     await expect(usageToggle).toHaveAttribute('aria-expanded', 'false');
     await expect(summary.locator('.changes-toolbar')).not.toBeVisible();

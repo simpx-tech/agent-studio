@@ -2266,3 +2266,87 @@ async fn installed_claude_forks_a_standalone_chat_into_its_own_folder() {
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }
+
+/// The ledger follows a real reply: the installed CLI streams what its model does, runs the
+/// command, and the reply's time adds up.
+#[tokio::test]
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
+async fn installed_claude_reports_where_its_time_went() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let text = "This is an Agent Studio integration test in a disposable folder. Run this exact command once with the Bash tool, in the foreground: node -e \"setTimeout(()=>{},4000)\" . Run nothing else. Then reply with just the word OK.";
+    let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"claude","model":"sonnet","instructions":""},"messages":[{"role":"user","text":text}]})).unwrap();
+    request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
+    request.native_session =
+        crate::providers::sessions::Session::prepare(root.path(), &request).unwrap();
+    let exe = crate::providers::resolve("claude").await.unwrap();
+    let (channel, ledger, events) = EventSink::timed(&request.run_id);
+    let started = std::time::Instant::now();
+    let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+        .await
+        .unwrap();
+    let mut process = crate::pool::Process::new(
+        exe,
+        command.spawn().unwrap(),
+        "real-time-test".into(),
+        request.native_session.as_ref().unwrap().id().to_string(),
+    )
+    .unwrap();
+    let mut questions = Questions::default()
+        .open(&request.run_id, None, channel.clone())
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(300),
+        stream_turn(
+            &mut process,
+            &request,
+            Some(&channel),
+            CancellationToken::new(),
+            Some(&mut questions),
+            false,
+        ),
+    )
+    .await
+    .expect("Installed CLI test timed out");
+    let spent = ledger.lock().unwrap().end().expect("The ledger began");
+    let elapsed = started.elapsed().as_millis() as u64;
+    eprintln!("Claude in {elapsed} ms: {spent:?}");
+    let (status, _) = result.expect("Installed CLI failed");
+    assert_eq!(status, "complete");
+    let of = |kind: &str| spent.spent.get(kind).copied().unwrap_or(0);
+    // Every moment once, and the command's four seconds as the command's.
+    let total: u64 = spent.spent.values().sum();
+    assert!(
+        total <= elapsed && elapsed - total < 250,
+        "{total} of {elapsed}"
+    );
+    assert!(of("commands") >= 4000, "{spent:?}");
+    assert!(of("commands") < 4000 + elapsed / 2, "{spent:?}");
+    assert!(of("startup") > 0 && of("waiting") > 0, "{spent:?}");
+    assert!(
+        of("thinking") + of("writing") + of("calls") > 0,
+        "{spent:?}"
+    );
+    // One request ran the command and another answered.
+    assert!(spent.requests >= 2, "{spent:?}");
+    process.kill().await;
+    // The command's record says how long the model took to write it, apart from its run.
+    let events = events.lock().unwrap();
+    let command = events
+        .iter()
+        .rev()
+        .find_map(|event| match event {
+            RunEvent::Tool { tool } if tool.wait().is_none() && tool.write_ms.is_some() => {
+                Some(tool.clone())
+            }
+            _ => None,
+        })
+        .expect("No call recorded how long it took to write");
+    let (wrote, ran) = (command.write_ms.unwrap(), command.elapsed_ms.unwrap());
+    assert!(ran >= wrote + 4000, "wrote {wrote} of {ran}");
+    eprintln!(
+        "The command took {wrote} ms to write and {} ms to run",
+        ran - wrote
+    );
+}

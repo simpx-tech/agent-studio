@@ -86,7 +86,7 @@ for (const provider of ['claude', 'codex'] as const) {
     await page.screenshot({ path: `artifacts/credits/session-${provider}-mobile.png` });
     await page.keyboard.press('Escape');
     await expect(page.getByLabel('Message', { exact: true })).toHaveValue('Keep my draft');
-    await page.getByRole('button', { name: 'Reply usage and cost', exact: true }).click();
+    await page.getByRole('button', { name: 'Reply time, usage and cost', exact: true }).click();
     const footer = page.locator('.reply-usage');
     await expect(footer).toContainText(
       provider === 'codex' ? 'Estimated chat credits' : 'Estimated cost (USD)',
@@ -148,7 +148,7 @@ test('older Claude replies label saved running cost totals and leave them out of
   await expect(card).not.toContainText('$0.45');
   await expect(card).toContainText('Incomplete readings');
   await page.keyboard.press('Escape');
-  const toggles = page.getByRole('button', { name: 'Reply usage and cost', exact: true });
+  const toggles = page.getByRole('button', { name: 'Reply time, usage and cost', exact: true });
   await toggles.first().click();
   const older = page.locator('.reply-usage').first();
   await expect(older).toContainText('Chat cost so far (USD)');

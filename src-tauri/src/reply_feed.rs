@@ -75,6 +75,7 @@ fn place(event: &RunEvent) -> Place {
         RunEvent::Reasoning { id, .. } => format!("reasoning:{id}"),
         RunEvent::Activity { text } => format!("activity:{text}"),
         RunEvent::Usage { .. } => "usage".into(),
+        RunEvent::TimeSpent { .. } => "timespent".into(),
         RunEvent::AccountUsage { .. } => "accountusage".into(),
         RunEvent::FileChanges { .. } => "filechanges".into(),
         RunEvent::Plan { .. } => "plan".into(),

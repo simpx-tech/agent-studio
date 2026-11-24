@@ -2893,7 +2893,7 @@ test('tool targets stream inline and finish as expandable work history below the
   await emit({ kind: 'text', text: 'The source files passed verification.' });
   await emit({ kind: 'usage', input: 2400, output: 50, cachedInput: 1900, costUsd: 0.012345 });
   await page.evaluate(() => (window as any).finishCapabilities('complete'));
-  const usageSummary = page.getByLabel('Reply usage and cost', { exact: true });
+  const usageSummary = page.getByLabel('Reply time, usage and cost', { exact: true });
   await expect(usageSummary.locator('.usage-summary > span')).toHaveCount(2);
   await expect(usageSummary).not.toContainText(/input|output|tokens|cost|\$/i);
   await expect(usageSummary).toHaveAttribute('aria-expanded', 'false');
@@ -3114,12 +3114,12 @@ test('reply cost distinguishes unreported, zero, and tiny values', async ({ page
     const reply = page.getByTestId('message').last();
     await expect(reply).toHaveAttribute('data-status', 'complete');
     await expect(
-      reply.getByLabel('Reply usage and cost').locator('.usage-summary > span'),
+      reply.getByLabel('Reply time, usage and cost').locator('.usage-summary > span'),
     ).toHaveCount(2);
-    await expect(reply.getByLabel('Reply usage and cost')).not.toContainText(
+    await expect(reply.getByLabel('Reply time, usage and cost')).not.toContainText(
       /input|output|tokens|cost|\$/i,
     );
-    await reply.getByLabel('Reply usage and cost').click();
+    await reply.getByLabel('Reply time, usage and cost').click();
     await expect(reply.getByText('Estimated cost (USD)', { exact: true })).toBeVisible();
     await expect(
       reply

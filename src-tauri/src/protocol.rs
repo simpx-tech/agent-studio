@@ -9,6 +9,7 @@ pub mod proposed_plan;
 mod reasoning;
 #[cfg(test)]
 mod reasoning_tests;
+pub mod time_spent;
 pub mod usage_limit;
 pub(crate) mod workflow;
 
@@ -141,6 +142,11 @@ pub enum RunEvent {
     },
     Tool {
         tool: Box<activity::ToolActivity>,
+    },
+    /// Where the reply's time went so far, or once it ended.
+    TimeSpent {
+        #[serde(rename = "timeSpent")]
+        time_spent: time_spent::TimeSpent,
     },
     Usage {
         #[serde(flatten)]

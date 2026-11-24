@@ -53,6 +53,33 @@ The same row also shows **total AI time** through that reply: the sum of its dur
 
 Claude supplies `total_cost_usd` in each result, including failed results when present, but it is a running total rather than the reply's cost: it continues across every turn and compaction of one CLI process. Until 2026-09-22 Agent Studio stored that running total as each reply's cost and added the replies together, so replies on a reused process and chat totals were overstated. Each parked process now remembers the latest total it reported, and a reply records only the change: its last result's total minus the process's total when the reply started. A fresh process starts at zero. The CLI restores an earlier total only when a resumed session's previous process exited cleanly, and Agent Studio terminates parked processes instead; the opt-in `installed_claude_reply_costs_follow_each_process_running_total` test checks this against the installed CLI. A session resumed after a clean exit elsewhere, such as in a terminal, would have its restored total counted once in the next reply. A lower total, such as a zeroed failure result, leaves that reply's cost unknown and never lowers the remembered total; a successful result replaces it. These readings are saved with `scope: "reply"`. Reasoning tokens likewise come from each turn's `usage.output_tokens_details.thinking_tokens`, summed over the reply, not from the cumulative `modelUsage`. Older replies keep their saved running totals, which the reply footer labels **Chat cost so far** and the chat total excludes. Model and child totals are never added again. Codex's optional native-session estimate is shown separately; Codex and Antigravity have no per-reply USD cost field in the current adapters. Older saved replies also remain unknown. A reported zero is displayed as $0.00; tiny positive costs retain precision. Actual billing depends on the account plan. See [Claude cost tracking](https://code.claude.com/docs/en/agent-sdk/cost-tracking) and [subscription cost interpretation](https://code.claude.com/docs/en/costs).
 
+## Where a reply's time went
+
+Requested 2026-11-24: a report for every chat of where the agent spent its time, to learn what to change so that later chats take less of it. A reply's timing row opens it, above the tokens and cost: **This response** or the **Whole chat**, as Files edited switches scope.
+
+| Row | What the reply waited on |
+| --- | --- |
+| Starting | The CLI getting ready for the turn: its process, session and startup hooks |
+| Waiting for the model | Each request, from when it went out until its answer began |
+| Thinking, Writing | The model's reasoning and its text |
+| Writing calls | The model writing commands, file contents and other calls |
+| Commands, Tools, Sub-agents, Hooks | The reply's own calls while the model waited for them |
+| Waiting for you | A question, an MCP form or a plan decision waiting for an answer |
+| Background work | The reply's turn ended and it waited for work it left running |
+| Compacting | A compaction of the context |
+| Not recorded | Replies saved before 2026-11-24, and what followed the last reading of a reply that was cut off |
+
+Rows are sorted by time, each with a bar as long as its share, and the total names the model requests the reply made and how many the CLI sent again. **Longest calls** lists calls by their own run time and **Longest to write** by the time the model took to write them, calls that did the same counted together (`×6`, `2 failed`); a question's or a wait's time is never its call's. **Copy report** copies the shown scope as Markdown, with twenty calls of each list, to paste into a chat and ask what to change.
+
+The computer running the reply keeps the ledger while it runs (`src-tauri/src/protocol/time_spent.rs`), because only it sees the provider's lines as they happen: every moment goes to exactly one row, so the rows add up to the reply's elapsed time. When several things hold at once, the user comes first, then a compaction, then the model while it answers, then hooks, calls and sub-agents, then background work. Claude Code runs a call as soon as the model has written it, while the model writes the next one, so a call running meanwhile holds nothing up and the time is the model's; a sub-agent's own thinking and calls count as the sub-agent; kinds of calls running side by side share the time; a command left in the background counts for nothing until the reply waits for it.
+
+What each provider reports decides how exact a row is:
+
+- **Claude** streams every part of an answer, so thinking, writing and writing calls are measured from each block's start. Its CLI replays the message only once the first request is answered, so the reply's first wait runs from the turn's `system init`. Each call's record also keeps how long the model took to write it (`writeMs`); the rest of its elapsed time is its run.
+- **Codex** reports reasoning and messages as they start and a call only when it runs, so the time between the model's last part and a call is counted as writing that call. Reasoning it does not report while it happens stays in Waiting for the model.
+
+The ledger is saved with the reply as `timeSpent`: milliseconds by row and two counts, nothing a reply said or ran. A running reply reports it about once a minute, so one cut off keeps most of it, and whole at its end. The report itself is derived in the window when its panel opens (`src/lib/time-report.ts`) and never saved. Antigravity replies, background requests and imported chats record no ledger; their calls still appear in the lists when they recorded their time.
+
 ## Subscription limits
 
 These are account readings, not estimates from the number of local messages. They include usage from other sessions and title generation. The dashboard cache stays in memory; run observations are saved as described above. A limit the reading leaves out, or names without a percentage, is not shown at all, never as 0% (below). Failed refreshes retain the last successful reading and mark it **Last reported**. Readings older than three minutes, or whose reset time passed, are also marked as old; the app does not assume a reset succeeded or fabricate fresh capacity.

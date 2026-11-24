@@ -123,7 +123,7 @@ test('nothing animates under reduced motion @webkit', async ({ page }) => {
   await send(page, 'Read a file');
   await still('send');
   await finish(page, 1);
-  await page.getByRole('button', { name: 'Reply usage and cost' }).click();
+  await page.getByRole('button', { name: 'Reply time, usage and cost' }).click();
   await still('footer panel');
   const history = page.locator('summary[aria-label="Work history"]');
   await history.click();

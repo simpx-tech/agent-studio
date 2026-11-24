@@ -747,3 +747,70 @@ async fn installed_codex_rewinds_and_forks_keep_their_native_context() {
     }
     process.kill().await;
 }
+
+/// The ledger follows a real reply: the installed CLI reports what its model writes and the
+/// command it runs, and the reply's time adds up.
+#[tokio::test]
+#[ignore = "Opt-in installed Codex CLI test; uses subscription capacity and a model's tool choice."]
+async fn installed_codex_reports_where_its_time_went() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let text = "This is an Agent Studio integration test in a disposable folder. Run this exact shell command once: node -e \"setTimeout(()=>{},4000)\" . Run nothing else. Then reply with just the word OK.";
+    let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"","reasoning":"low","instructions":""},"messages":[{"role":"user","text":text}]})).unwrap();
+    request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
+    request.native_session =
+        crate::providers::sessions::Session::prepare(root.path(), &request).unwrap();
+    let exe = crate::providers::resolve("codex").await.unwrap();
+    let (channel, ledger, _events) = EventSink::timed(&request.run_id);
+    let started = std::time::Instant::now();
+    let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+        .await
+        .unwrap();
+    let mut process = Process::new(
+        exe,
+        command.spawn().unwrap(),
+        "real-time-test".into(),
+        String::new(),
+    )
+    .unwrap();
+    let mut questions = Questions::default()
+        .open(&request.run_id, None, channel.clone())
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(300),
+        run(
+            &mut process,
+            &request,
+            Some(&channel),
+            CancellationToken::new(),
+            &mut questions,
+            None,
+            false,
+        ),
+    )
+    .await
+    .expect("Installed CLI test timed out");
+    let spent = ledger.lock().unwrap().end().expect("The ledger began");
+    let elapsed = started.elapsed().as_millis() as u64;
+    eprintln!("Codex in {elapsed} ms: {spent:?}");
+    let (status, _) = result.expect("Installed CLI failed");
+    assert_eq!(status, "complete");
+    let of = |kind: &str| spent.spent.get(kind).copied().unwrap_or(0);
+    // Every moment once, and the command's four seconds as the command's.
+    let total: u64 = spent.spent.values().sum();
+    assert!(
+        total <= elapsed && elapsed - total < 250,
+        "{total} of {elapsed}"
+    );
+    assert!(of("commands") >= 4000, "{spent:?}");
+    assert!(of("commands") < 4000 + elapsed / 2, "{spent:?}");
+    assert!(of("startup") > 0 && of("waiting") > 0, "{spent:?}");
+    assert!(
+        of("thinking") + of("writing") + of("calls") > 0,
+        "{spent:?}"
+    );
+    // One request ran the command and another answered.
+    assert!(spent.requests >= 2, "{spent:?}");
+    process.kill().await;
+}

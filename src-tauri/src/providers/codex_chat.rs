@@ -651,6 +651,10 @@ pub async fn run(
                 }
                 questions.resolved_codex(&value, &thread);
                 questions.elicitation.observe(&value, Some(&thread));
+                // This turn's lines alone tell what the reply's model does.
+                if value["params"]["turnId"].as_str().is_none_or(|id| id == turn) {
+                    if let Some(channel) = channel { channel.time(|ledger| ledger.codex(&value, &thread)); }
+                }
                 if value["params"]["threadId"] == thread
                     && value["method"].as_str().is_some_and(|m| m.starts_with("item/"))
                     && value["params"]["turnId"].as_str().is_some_and(|id| turn.is_empty() || id != turn) { continue; }

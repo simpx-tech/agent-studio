@@ -9,6 +9,8 @@
   import type { RunningSubagent } from '$lib/subagents';
   import { planCountText, planProgress } from '$lib/plans';
   import { nativeWorkflowStatus } from '$lib/workflows';
+  import { timeReport, type TimeReport as Report } from '$lib/time-report';
+  import TimeReport from './TimeReport.svelte';
   import FileChanges from './FileChanges.svelte';
   import AccountChanges from './AccountChanges.svelte';
   import PlanPanel from './PlanPanel.svelte';
@@ -20,6 +22,8 @@
   let {
     message,
     timeTotal,
+    chatTime,
+    chatTitle,
     responseChanges,
     chatChanges,
     responseMemory,
@@ -33,6 +37,10 @@
   }: {
     message: Message;
     timeTotal?: ReplyTimeTotal;
+    /** Where the whole chat's time went, worked out when its report is shown. */
+    chatTime?: Report;
+    /** The chat's title, which heads a copied time report. */
+    chatTitle?: string;
     /** File edits apart from the agent's memory, of this reply and of the whole chat. */
     responseChanges: ChangeSummary;
     chatChanges: ChangeSummary;
@@ -86,6 +94,13 @@
     if (expanded && !sections.includes(expanded)) show(null);
   });
   const usage = $derived(message.usage);
+  // Where this reply's time went, read once its panel opens. The report reads the reply without
+  // making it reactive, so what changes it is named here.
+  const responseTime = $derived.by(() => {
+    void message.durationMs;
+    void message.timeSpent?.revision;
+    return timeReport([message], { folder });
+  });
   const elapsed = $derived(
     message.durationMs == null ? 'Time not recorded' : formatReplyTime(message.durationMs),
   );
@@ -232,7 +247,7 @@
     type="button"
     class="footer-toggle usage-toggle"
     id={message.id + '-usage-toggle'}
-    aria-label="Reply usage and cost"
+    aria-label="Reply time, usage and cost"
     aria-expanded={expanded === 'usage'}
     aria-controls={message.id + '-usage'}
     onclick={() => toggle('usage')}
@@ -281,6 +296,13 @@
     aria-labelledby={message.id + '-usage-toggle'}
     hidden={expanded !== 'usage'}
   >
+    {#if opened.has('usage')}<TimeReport
+        response={responseTime}
+        chat={chatTime ?? responseTime}
+        id={message.id + '-time'}
+        title={chatTitle}
+        scope={scope && `${scope}/time`}
+      />{/if}
     <div class="usage-breakdown">
       <dl>
         <div>

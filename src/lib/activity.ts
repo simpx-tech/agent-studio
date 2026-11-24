@@ -17,6 +17,7 @@ import { steeringReceiptSchema, mergeSteering, mergeSteeringPlaces } from './ste
 import { workflowProgressSchema, nativeWorkflowsSchema } from './workflows.ts';
 import { reasoningBlockSchema, mergeReasoningBlocks } from './reasoning.ts';
 import { usageLimitSchema, latestUsageLimit } from './usage-limits.ts';
+import { timeSpentSchema, latestTimeSpent } from './time-spent.ts';
 import { jsonEqual } from './json-equal.ts';
 
 export const activityStatusSchema = z.enum([
@@ -51,6 +52,8 @@ export const toolActivitySchema = z.object({
   inputTruncated: z.boolean().optional(),
   output: toolOutputSummarySchema.optional(),
   elapsedMs: z.number().int().min(0).max(31_536_000_000).optional(),
+  // How much of that the model took to write the call, before it ran.
+  writeMs: z.number().int().min(0).max(31_536_000_000).optional(),
   progress: z
     .object({
       kind: z.enum(['heartbeat', 'output', 'terminal']),
@@ -288,6 +291,14 @@ export function applyRunEvent(message: Message, event: RunEvent): 'clock' | void
     if (message.role === 'assistant' && parsed.success)
       message.usageLimit = latestUsageLimit(message.usageLimit, parsed.data);
     return;
+  }
+  if (event.kind === 'timespent') {
+    const parsed = timeSpentSchema.safeParse(event.timeSpent);
+    if (message.role !== 'assistant' || !parsed.success || parsed.data.runId !== message.runId)
+      return;
+    message.timeSpent = latestTimeSpent(message.timeSpent, parsed.data);
+    // A running reply's reading, which nobody waits for; its last arrives with the reply's end.
+    return 'clock';
   }
   if (event.kind === 'reasoning') {
     const parsed = reasoningBlockSchema.safeParse({ ...event, type: 'reasoning' });
@@ -582,6 +593,18 @@ export function retainRunEvent(events: RunEvent[], event: RunEvent) {
   if (event.kind === 'usage') {
     const previous = events.find((e) => e.kind === 'usage');
     if (previous?.revision != null && (event.revision ?? -1) <= previous.revision) return;
+  }
+  if (event.kind === 'timespent') {
+    const parsed = timeSpentSchema.safeParse(event.timeSpent);
+    if (!parsed.success) return;
+    const index = events.findIndex((e) => e.kind === 'timespent');
+    if (index < 0) events.push({ kind: 'timespent', timeSpent: parsed.data });
+    else
+      events[index] = {
+        kind: 'timespent',
+        timeSpent: latestTimeSpent(events[index].timeSpent, parsed.data),
+      };
+    return;
   }
   if (event.kind === 'accountusage') {
     const parsed = accountUsageSchema.safeParse(event.accountUsage);

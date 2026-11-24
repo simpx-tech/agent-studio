@@ -49,6 +49,10 @@ pub struct ToolActivity {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
+    /// How much of `elapsed_ms` the model took to write the call, which Claude streams before
+    /// the call runs: the rest is the call's own time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<ToolProgress>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,10 +85,36 @@ pub struct ToolActivity {
     sources: Vec<Source>,
     agents: Vec<AgentActivity>,
 }
+/// What a reply waits for while a record of its own runs (`time_spent`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wait {
+    Command,
+    Tool,
+    Agents,
+    Hook,
+}
 impl ToolActivity {
     /// The reported description of the call.
     pub fn detail(&self) -> Option<&str> {
         self.detail.as_deref()
+    }
+    /// What the reply waits for while this record runs. Nothing for a sub-agent's own calls,
+    /// which its sub-agent stands for, nor for work that went on in the background.
+    pub fn wait(&self) -> Option<Wait> {
+        if self.parent_id.is_some() {
+            return None;
+        }
+        match self.category.as_str() {
+            "agent" => self
+                .agents
+                .iter()
+                .any(|a| a.status == "running" && !a.background && a.parent_id.is_none())
+                .then_some(Wait::Agents),
+            _ if self.status != "running" || self.background => None,
+            "hook" => Some(Wait::Hook),
+            _ if self.command_run => Some(Wait::Command),
+            _ => Some(Wait::Tool),
+        }
     }
     pub fn is_monitor(&self) -> bool {
         self.operation.as_deref() == Some("monitor")
@@ -138,6 +168,7 @@ fn fresh(id: String, category: &str, name: &str) -> ToolActivity {
         name: clean(name),
         status: "running".into(),
         elapsed_ms: None,
+        write_ms: None,
         progress: None,
         parent_id: None,
         detail: None,
@@ -284,6 +315,8 @@ struct PartialTool {
     name: String,
     parent: Option<String>,
     json: String,
+    /// When the model began to write the call.
+    at: std::time::Instant,
 }
 #[derive(Default)]
 pub struct ToolDecoder {
@@ -303,6 +336,8 @@ pub struct ToolDecoder {
     /// Sub-agents of earlier replies that a SendMessage call of this one resumed, by task, until
     /// their first line names the call that started them.
     resumed: HashMap<String, subagents::Resumed>,
+    /// How long the model took to write the call whose record is being made, by record.
+    written: HashMap<String, u64>,
 }
 impl ToolDecoder {
     pub fn owns_codex_thread(&self, thread: &str, root: &str) -> bool {
@@ -429,6 +464,12 @@ impl ToolDecoder {
             if previous.status != "running" && tool.elapsed_ms.is_none() {
                 tool.elapsed_ms = previous.elapsed_ms;
             }
+            if tool.write_ms.is_none() {
+                tool.write_ms = previous.write_ms;
+            }
+        }
+        if let Some(written) = self.written.get(&tool.id) {
+            tool.write_ms = Some(*written);
         }
         self.time_tool(&mut tool);
         if let Some(index) = self.tools.iter().position(|t| t.id == tool.id) {
@@ -1130,6 +1171,7 @@ impl ToolDecoder {
                                     name,
                                     parent: parent.clone(),
                                     json: String::new(),
+                                    at: std::time::Instant::now(),
                                 },
                             );
                         }
@@ -1145,7 +1187,14 @@ impl ToolDecoder {
                 "content_block_stop" => {
                     if let Some(tool) = self.partial.remove(&key) {
                         if let Ok(input) = serde_json::from_str::<Value>(&tool.json) {
+                            // The call is written, and its record says how long that took.
+                            self.written.insert(
+                                format!("claude:{}", tool.id),
+                                (tool.at.elapsed().as_millis() as u64)
+                                    .min(progress::MAX_ELAPSED_MS),
+                            );
                             self.claude_tool(&tool.id, &tool.name, &input, tool.parent, out);
+                            self.written.remove(&format!("claude:{}", tool.id));
                         }
                     }
                 }

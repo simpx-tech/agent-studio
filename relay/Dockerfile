@@ -33,6 +33,7 @@ COPY src/lib/sidebar-order.ts ./src/lib/
 COPY src/lib/sent-files.ts ./src/lib/
 COPY src/lib/tool-output.ts ./src/lib/
 COPY src/lib/usage-limits.ts ./src/lib/
+COPY src/lib/time-spent.ts ./src/lib/
 COPY src/lib/question-drafts.ts ./src/lib/
 COPY src/lib/screens.ts ./src/lib/
 COPY src/lib/published-artifacts.ts ./src/lib/

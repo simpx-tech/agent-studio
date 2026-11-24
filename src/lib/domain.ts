@@ -35,6 +35,7 @@ import {
   type SteeringReceipt,
 } from './steering.ts';
 import { autoContinueSchema, usageLimitSchema, type UsageLimit } from './usage-limits.ts';
+import { timeSpentSchema, type TimeSpent } from './time-spent.ts';
 import { inputTemplatesSchema } from './input-templates.ts';
 import { claudeInstructionsSchema } from './claude-instructions.ts';
 import { appSessionsSchema } from './app-sessions.ts';
@@ -226,6 +227,8 @@ export const messageSchema = z
     accountUsage: accountUsageSchema.optional(),
     promptTokensEstimate: z.number().nonnegative().optional(),
     durationMs: z.number().optional(),
+    // Where that time went, as the computer that ran the reply measured it.
+    timeSpent: timeSpentSchema.optional(),
     settings: chatSettingsSchema.optional(),
     modelName: z.string().optional(),
     authorName: z.string().optional(),
@@ -406,7 +409,8 @@ export type RunEvent = TokenUsage & {
     | 'nativeworkflow'
     | 'backgroundwait'
     | 'takeover'
-    | 'usagelimit';
+    | 'usagelimit'
+    | 'timespent';
   id?: string;
   accountUsage?: AccountUsage;
   revision?: number;
@@ -437,6 +441,7 @@ export type RunEvent = TokenUsage & {
   workflow?: WorkflowProgress;
   nativeWorkflows?: NativeWorkflows;
   usageLimit?: UsageLimit;
+  timeSpent?: TimeSpent;
 };
 export type RunRequest = {
   compact?: boolean;

@@ -22,6 +22,7 @@ import { mergeProposedPlans } from './proposed-plans.ts';
 import { latestFileChanges } from './file-changes.ts';
 import { latestAccountUsage, latestTokenUsage } from './spend.ts';
 import { latestUsageLimit, mergeAutoContinue } from './usage-limits.ts';
+import { latestTimeSpent } from './time-spent.ts';
 import { mergeClaudeInstructions } from './claude-instructions.ts';
 import { mergeAppSessions } from './app-sessions.ts';
 import { mergeFolderIcons, sameFolderIcons } from './folder-icons.ts';
@@ -206,6 +207,7 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
         !previous.filesUndone &&
         !previous.accountUsage &&
         !previous.usageLimit &&
+        !previous.timeSpent &&
         !previous.autoContinue &&
         !previous.tookOver &&
         previous.usage?.revision == null)
@@ -252,6 +254,9 @@ function retainQuestions(selected: Conversation, other?: Conversation): Conversa
         : {}),
       ...(message.usageLimit || previous.usageLimit
         ? { usageLimit: latestUsageLimit(message.usageLimit, previous.usageLimit) }
+        : {}),
+      ...(message.timeSpent || previous.timeSpent
+        ? { timeSpent: latestTimeSpent(message.timeSpent, previous.timeSpent) }
         : {}),
       ...(message.autoContinue || previous.autoContinue
         ? { autoContinue: mergeAutoContinue(message.autoContinue, previous.autoContinue) }
@@ -407,6 +412,9 @@ function sameRun(
         : {}),
       ...(a.usageLimit || b.usageLimit
         ? { usageLimit: latestUsageLimit(a.usageLimit, b.usageLimit) }
+        : {}),
+      ...(a.timeSpent || b.timeSpent
+        ? { timeSpent: latestTimeSpent(a.timeSpent, b.timeSpent) }
         : {}),
       ...(a.autoContinue || b.autoContinue
         ? { autoContinue: mergeAutoContinue(a.autoContinue, b.autoContinue) }
