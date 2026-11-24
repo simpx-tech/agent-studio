@@ -98,6 +98,14 @@ test('the Viewer opens a computer’s screen and runs its actions through the re
     account: { provider: 'codex', connectionId: connection },
     digest: 'b'.repeat(64),
   };
+  // The group the computer files it in, until the phone moves it out.
+  const group = {
+    id: crypto.randomUUID(),
+    environmentId: host,
+    name: 'Dashboards',
+    createdAt: '2026-11-24T12:00:00.000Z',
+  };
+  let filed = true;
   // The computer that keeps the screen answers its jobs, as its window would.
   const screenJobs: unknown[] = [];
   const jobId = crypto.randomUUID();
@@ -139,29 +147,32 @@ test('the Viewer opens a computer’s screen and runs its actions through the re
           startedAt: '2026-10-30T12:00:00.000Z',
         };
         const printed = JSON.stringify({ passing: 3 });
+        if (request.op === 'moveScreen') filed = !!request.group;
         const result =
           request.op === 'list'
-            ? { screens: [summary] }
-            : request.op === 'read'
-              ? detail
-              : request.op === 'load'
-                ? { values: {} }
-                : request.op === 'jobs'
-                  ? { jobs: [] }
-                  : request.op === 'start'
-                    ? { ...record, state: 'running' }
-                    : request.op === 'output'
-                      ? {
-                          chunks: [{ stream: 'stdout', text: printed }],
-                          next: printed.length,
-                          job: { ...record, state: 'done', exitCode: 0, durationMs: 40 },
-                        }
-                      : request.op === 'mcp'
+            ? { screens: [{ ...summary, ...(filed ? { group: group.id } : {}) }], groups: [group] }
+            : request.op === 'moveScreen'
+              ? { groups: [group], members: filed ? { [screenId]: group.id } : {} }
+              : request.op === 'read'
+                ? detail
+                : request.op === 'load'
+                  ? { values: {} }
+                  : request.op === 'jobs'
+                    ? { jobs: [] }
+                    : request.op === 'start'
+                      ? { ...record, state: 'running' }
+                      : request.op === 'output'
                         ? {
-                            content: [{ type: 'text', text: JSON.stringify({ open: 2 }) }],
-                            account: 'Codex QA (Codex)',
+                            chunks: [{ stream: 'stdout', text: printed }],
+                            next: printed.length,
+                            job: { ...record, state: 'done', exitCode: 0, durationMs: 40 },
                           }
-                        : {};
+                        : request.op === 'mcp'
+                          ? {
+                              content: [{ type: 'text', text: JSON.stringify({ open: 2 }) }],
+                              account: 'Codex QA (Codex)',
+                            }
+                          : {};
         await call('PUT', `jobs/${job.id}`, { status: 'complete', events: [], result });
       }
     } catch (error) {
@@ -186,6 +197,9 @@ test('the Viewer opens a computer’s screen and runs its actions through the re
       { op: 'start', id: screenId, command: { shell: 'cmd', script: 'dir' } },
       { op: 'output', id: screenId, job: '../jobs' },
       { op: 'mcp', id: screenId, server: 'github', tool: 'x', where: 'C:\\' },
+      { op: 'moveScreen', id: screenId, group: '../groups' },
+      { op: 'createGroup', environmentId: host, name: '  ' },
+      { op: 'renameGroup', group: group.id, name: 'Boards', path: 'C:\\' },
     ])
       await call(
         'POST',
@@ -208,6 +222,27 @@ test('the Viewer opens a computer’s screen and runs its actions through the re
     await expect(
       page.locator('.computer-group-toggle').filter({ hasText: 'Desktop QA' }),
     ).toBeVisible();
+    // It shows in the group its computer files it in, and a held touch moves it out, through
+    // the relay to that computer.
+    const dashboards = page.getByRole('group', { name: 'Dashboards', exact: true });
+    await expect(dashboards.getByRole('button', { name: 'Team dashboard' })).toBeVisible();
+    const held = (await row.boundingBox())!;
+    await row.dispatchEvent('pointerdown', {
+      pointerType: 'touch',
+      isPrimary: true,
+      button: 0,
+      clientX: held.x + 20,
+      clientY: held.y + held.height / 2,
+    });
+    const menu = page.getByRole('menu', { name: 'Actions for Team dashboard' });
+    await expect(menu.getByRole('menuitemradio', { name: 'Dashboards' })).toHaveAttribute(
+      'aria-checked',
+      'true',
+    );
+    await menu.getByRole('menuitemradio', { name: 'Desktop QA' }).click();
+    await expect(dashboards.getByRole('button', { name: 'Team dashboard' })).toHaveCount(0);
+    await expect(row).toBeVisible();
+    await expect.poll(() => filed).toBe(false);
     await row.click();
     await expect(page.getByRole('heading', { name: 'Team dashboard' })).toBeVisible();
     const frame = page.frameLocator('iframe[title="Team dashboard screen"]');
@@ -218,6 +253,7 @@ test('the Viewer opens a computer’s screen and runs its actions through the re
     expect(screenJobs).toEqual(
       expect.arrayContaining([
         { environmentId: host, request: { op: 'list' } },
+        { environmentId: host, request: { op: 'moveScreen', id: screenId } },
         { environmentId: host, request: { op: 'read', id: screenId } },
         {
           environmentId: host,

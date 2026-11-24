@@ -1129,11 +1129,14 @@ pre {
    transforms move, so the list's layout never changes during a drag. A root class keeps the
    cursor rule cheap for every other style recalculation. */
 :root.sidebar-reordering,
-:root.sidebar-reordering * {
+:root.sidebar-reordering *,
+:root.screen-dragging,
+:root.screen-dragging * {
   cursor: grabbing !important;
   user-select: none !important;
 }
-:root.sidebar-reordering iframe {
+:root.sidebar-reordering iframe,
+:root.screen-dragging iframe {
   pointer-events: none;
 }
 .order-moving > [data-order] {

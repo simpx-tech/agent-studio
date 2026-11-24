@@ -17,6 +17,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use tauri::Manager;
 
+pub mod groups;
 pub mod jobs;
 pub mod mcp;
 pub mod places;
@@ -224,10 +225,13 @@ pub struct Summary {
     pub allowed: bool,
     /// How many of its jobs run now.
     pub running: usize,
+    /// The group the Screens tab shows it in; none at the top of its computer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 impl Summary {
-    fn of(screen: &Screen, running: usize) -> Self {
+    fn of(screen: &Screen, running: usize, group: Option<String>) -> Self {
         Self {
             id: screen.id.clone(),
             revision: screen.revision,
@@ -243,6 +247,7 @@ impl Summary {
             tools: screen.mcp_tools.len(),
             allowed: true,
             running,
+            group,
         }
     }
 }
@@ -264,9 +269,9 @@ pub struct Detail {
 }
 
 impl Detail {
-    fn of(screen: &Screen, running: usize) -> Self {
+    fn of(screen: &Screen, running: usize, group: Option<String>) -> Self {
         Self {
-            summary: Summary::of(screen, running),
+            summary: Summary::of(screen, running, group),
             html: screen.html.clone(),
             actions: screen.actions.clone(),
             mcp_tools: screen.mcp_tools.clone(),
@@ -285,6 +290,9 @@ pub struct Definition {
     pub html: String,
     pub actions: Vec<Action>,
     pub mcp_tools: Vec<McpTool>,
+    /// The group to file it in, by names from the top: empty for the top, none to leave a
+    /// saved screen where it is.
+    pub group: Option<Vec<String>>,
 }
 
 /// Text lists and pages show on one line: line breaks become spaces, and characters that hide
@@ -593,13 +601,38 @@ fn mcp_tool(item: &Value) -> Result<McpTool, String> {
     })
 }
 
-pub const FIELDS: &[&str] = &["id", "title", "description", "html", "actions", "mcpTools"];
+pub const FIELDS: &[&str] = &[
+    "id",
+    "title",
+    "description",
+    "html",
+    "actions",
+    "mcpTools",
+    "group",
+];
+
+/// The group a chat files a screen in: the names of its groups from the top.
+fn group_path(value: Option<&Value>) -> Result<Option<Vec<String>>, String> {
+    const SHAPE: &str = "group must be the names of the groups from the top, such as [\"Edvisor\", \"Linear\"], or [] for the top.";
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(names)) => names
+            .iter()
+            .map(|name| match name {
+                Value::String(name) => groups::name(name),
+                _ => Err(SHAPE.into()),
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some),
+        Some(_) => Err(SHAPE.into()),
+    }
+}
 
 /// Checks a chat's submission completely, before anything is saved.
 pub fn definition(args: &Value) -> Result<Definition, String> {
     let object = args
         .as_object()
-        .ok_or("Send title, html and optionally id, description, actions and mcpTools.")?;
+        .ok_or("Send title, html and optionally id, description, actions, mcpTools and group.")?;
     unexpected(object, FIELDS).map_err(|error| {
         format!("This call has an {error} Send the complete screen in those fields.")
     })?;
@@ -664,6 +697,7 @@ pub fn definition(args: &Value) -> Result<Definition, String> {
             )
         }
     };
+    let group = group_path(object.get("group"))?;
     Ok(Definition {
         id,
         title,
@@ -671,6 +705,7 @@ pub fn definition(args: &Value) -> Result<Definition, String> {
         html: html.into(),
         actions,
         mcp_tools,
+        group,
     })
 }
 
@@ -875,6 +910,13 @@ fn all(root: &Path) -> Vec<Screen> {
     screens
 }
 
+/// The group a screen is filed in, as its summary names it.
+fn filed(known: &groups::Groups, screen: &Screen) -> Option<String> {
+    known
+        .group_of(&screen.id, &screen.site.environment_id)
+        .map(|group| group.id.clone())
+}
+
 fn read_data(root: &Path, id: &str) -> Result<Map<String, Value>, String> {
     match std::fs::read(data_file(root, id)) {
         Ok(bytes) => {
@@ -1077,6 +1119,34 @@ pub enum Request {
     Delete {
         id: String,
     },
+    /// The groups the Screens tab files screens in (`groups.rs`). Each answers with how this
+    /// computer's screens are grouped now, `{groups, members}`, and a new group as `group`.
+    CreateGroup {
+        #[serde(rename = "environmentId")]
+        environment_id: String,
+        name: String,
+        #[serde(default)]
+        parent: Option<String>,
+    },
+    RenameGroup {
+        group: String,
+        name: String,
+    },
+    MoveGroup {
+        group: String,
+        #[serde(default)]
+        parent: Option<String>,
+    },
+    /// Takes a group away, leaving what it held a level up.
+    DeleteGroup {
+        group: String,
+    },
+    /// Files a screen in a group of its environment, or at the top when none.
+    MoveScreen {
+        id: String,
+        #[serde(default)]
+        group: Option<String>,
+    },
     Load {
         id: String,
     },
@@ -1169,6 +1239,44 @@ impl Screens {
         .unwrap_or_default();
         *lock(&self.computer) = Some(computer.clone());
         computer
+    }
+    /// Whether this computer keeps screens of `environment`: its own, or those of a
+    /// distribution it manages.
+    async fn keeps(&self, data: &Path, environment: &str) -> Result<(), String> {
+        for again in [false, true] {
+            let computer = self.computer(data, again).await;
+            if computer.local == environment
+                || computer
+                    .distributions
+                    .iter()
+                    .any(|(id, _)| id == environment)
+            {
+                return Ok(());
+            }
+        }
+        Err("This computer keeps no screens of that environment.".into())
+    }
+    /// Changes how this computer's screens are grouped, one change at a time, and answers with
+    /// the groups as they are then, and the group the change made as `group`.
+    async fn regroup(
+        &self,
+        root: PathBuf,
+        change: impl FnOnce(&mut groups::Groups) -> Result<Option<groups::Group>, String>
+            + Send
+            + 'static,
+    ) -> Result<Value, String> {
+        let _change = self.changes.lock().await;
+        blocking(move || {
+            let mut known = groups::read(&root)?;
+            let made = change(&mut known)?;
+            groups::write(&root, &known)?;
+            let mut answer = encode(&known)?;
+            if let Some(group) = made {
+                answer["group"] = encode(&group)?;
+            }
+            Ok(answer)
+        })
+        .await
     }
     /// Where a screen's command runs or tool is called: the screen's own place, or the one named.
     pub(crate) async fn place(
@@ -1264,16 +1372,66 @@ impl Screens {
             .unwrap_or_else(|| root.clone());
         match request {
             Request::List => {
-                let screens = blocking(move || Ok(all(&root))).await?;
+                // Unreadable groups leave every screen at the top, and the groups unchanged
+                // until a change finds them readable.
+                let (screens, known) =
+                    blocking(move || Ok((all(&root), groups::read(&root).unwrap_or_default())))
+                        .await?;
                 let summaries: Vec<Summary> = screens
                     .iter()
-                    .map(|screen| Summary::of(screen, self.jobs.running_for(&screen.id)))
+                    .map(|screen| {
+                        Summary::of(
+                            screen,
+                            self.jobs.running_for(&screen.id),
+                            filed(&known, screen),
+                        )
+                    })
                     .collect();
-                Ok(json!({ "screens": summaries }))
+                Ok(json!({ "screens": summaries, "groups": known.groups }))
             }
             Request::Read { id } | Request::Approve { id } | Request::Revoke { id } => {
                 let screen = self.screen(&root, &id).await?;
-                encode(&Detail::of(&screen, self.jobs.running_for(&screen.id)))
+                let known = blocking(move || Ok(groups::read(&root).unwrap_or_default())).await?;
+                encode(&Detail::of(
+                    &screen,
+                    self.jobs.running_for(&screen.id),
+                    filed(&known, &screen),
+                ))
+            }
+            Request::CreateGroup {
+                environment_id,
+                name,
+                parent,
+            } => {
+                self.keeps(&data, &environment_id).await?;
+                self.regroup(root, move |known| {
+                    let group = known.create(&environment_id, &name, parent.as_deref())?;
+                    Ok(Some(group))
+                })
+                .await
+            }
+            Request::RenameGroup { group, name } => {
+                self.regroup(root, move |known| known.rename(&group, &name).map(|_| None))
+                    .await
+            }
+            Request::MoveGroup { group, parent } => {
+                self.regroup(root, move |known| {
+                    known.reparent(&group, parent.as_deref()).map(|_| None)
+                })
+                .await
+            }
+            Request::DeleteGroup { group } => {
+                self.regroup(root, move |known| known.remove(&group).map(|_| None))
+                    .await
+            }
+            Request::MoveScreen { id, group } => {
+                let screen = self.screen(&root, &id).await?;
+                self.regroup(root, move |known| {
+                    known
+                        .place(&screen.id, &screen.site.environment_id, group.as_deref())
+                        .map(|_| None)
+                })
+                .await
             }
             Request::Run { id, action, params } => {
                 let screen = self.screen(&root, &id).await?;
@@ -1408,6 +1566,12 @@ impl Screens {
                             Err(_) => return Err("Cannot delete this screen.".to_string()),
                         }
                     }
+                    // It leaves its group; groups that cannot be read keep it until a change.
+                    if let Ok(mut known) = groups::read(&root) {
+                        if known.forget(&id) {
+                            let _ = groups::write(&root, &known);
+                        }
+                    }
                     Ok(())
                 })
                 .await?;
@@ -1477,36 +1641,53 @@ pub async fn manage_screen(
     screens.handle(root, namespace, &launch, request).await
 }
 
-/// The screens a chat's tools read: summaries, or one screen whole with its saved values.
-pub(crate) async fn listed(root: PathBuf) -> Result<Vec<Screen>, String> {
-    blocking(move || Ok(all(&root))).await
+/// The screens a chat's tools read, with how they are grouped, or one screen whole with its
+/// saved values and its group's names from the top.
+pub(crate) async fn listed(root: PathBuf) -> Result<(Vec<Screen>, groups::Groups), String> {
+    blocking(move || Ok((all(&root), groups::read(&root).unwrap_or_default()))).await
 }
 pub(crate) async fn opened(
     root: PathBuf,
     id: String,
-) -> Result<(Screen, Map<String, Value>), String> {
+) -> Result<(Screen, Map<String, Value>, Vec<String>), String> {
     blocking(move || {
         let screen = read(&root, &id)?;
         let values = read_data(&root, &id)?;
-        Ok((screen, values))
+        let known = groups::read(&root).unwrap_or_default();
+        let group = known
+            .group_of(&screen.id, &screen.site.environment_id)
+            .map(|group| known.path(&group.id))
+            .unwrap_or_default();
+        Ok((screen, values, group))
     })
     .await
 }
-/// Saves a chat's screen. `usable` names the accounts still connected where it runs.
+/// What a chat's save did: the screen, and the names of the group it is in from the top, empty
+/// at the top. `unfiled` says why the group the chat named could not take it; the screen is
+/// saved either way.
+pub(crate) struct Saved {
+    pub screen: Screen,
+    pub group: Vec<String>,
+    pub unfiled: Option<String>,
+}
+
+/// Saves a chat's screen, and files it in the group it names. `usable` names the accounts still
+/// connected where it runs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn saved(
     screens: &Screens,
     root: PathBuf,
-    definition: Definition,
+    mut definition: Definition,
     site: Site,
     account: Option<Account>,
     usable: impl Fn(&Account) -> bool + Send + 'static,
     conversation_id: String,
     run_id: String,
-) -> Result<(Screen, bool), String> {
+) -> Result<Saved, String> {
     let _change = screens.changes.lock().await;
-    let screen = blocking(move || {
-        store(
+    let path = definition.group.take();
+    let saved = blocking(move || {
+        let (screen, _) = store(
             &root,
             definition,
             site,
@@ -1514,12 +1695,37 @@ pub(crate) async fn saved(
             &usable,
             &conversation_id,
             &run_id,
-        )
+        )?;
+        let environment = screen.site.environment_id.clone();
+        let filed = match (groups::read(&root), &path) {
+            (Ok(mut known), path) => (|| {
+                if let Some(path) = path {
+                    let group = known.ensure(&environment, path)?;
+                    known.place(&screen.id, &environment, group.as_deref())?;
+                    groups::write(&root, &known)?;
+                }
+                Ok(known
+                    .group_of(&screen.id, &environment)
+                    .map(|group| known.path(&group.id))
+                    .unwrap_or_default())
+            })(),
+            (Err(error), Some(_)) => Err(error),
+            (Err(_), None) => Ok(vec![]),
+        };
+        let (group, unfiled) = match filed {
+            Ok(group) => (group, None),
+            Err(error) => (vec![], Some(error)),
+        };
+        Ok(Saved {
+            screen,
+            group,
+            unfiled,
+        })
     })
     .await?;
     // Its next call starts CLIs that read the accounts' servers and sign-ins as they are now.
-    screens.calls.release(&screen.0.id).await;
-    Ok(screen)
+    screens.calls.release(&saved.screen.id).await;
+    Ok(saved)
 }
 
 #[cfg(test)]
@@ -1664,7 +1870,7 @@ mod tests {
         .unwrap();
         let screen = read(&root, &id).unwrap();
         assert_eq!(screen.actions[0].name, "list");
-        let detail = serde_json::to_value(Detail::of(&screen, 0)).unwrap();
+        let detail = serde_json::to_value(Detail::of(&screen, 0, None)).unwrap();
         assert_eq!(detail["allowed"], true);
         assert_eq!(detail["running"], 0);
         assert!(detail["digest"]
@@ -2245,6 +2451,197 @@ mod tests {
                 .await
                 .unwrap_err(),
             "This computer cannot ask a model for screens."
+        );
+    }
+
+    #[test]
+    fn a_submission_names_its_group_from_the_top() {
+        let mut submission = submission();
+        assert_eq!(definition(&submission).unwrap().group, None);
+        submission["group"] = json!([" Edvisor ", "Linear\nTickets"]);
+        assert_eq!(
+            definition(&submission).unwrap().group.unwrap(),
+            ["Edvisor", "Linear Tickets"]
+        );
+        submission["group"] = json!([]);
+        assert_eq!(definition(&submission).unwrap().group, Some(vec![]));
+        for wrong in [
+            json!("Edvisor/Linear"),
+            json!(["Edvisor", 2]),
+            json!({"name": "x"}),
+        ] {
+            submission["group"] = wrong;
+            assert!(definition(&submission)
+                .unwrap_err()
+                .starts_with("group must be the names of the groups from the top"));
+        }
+        submission["group"] = json!(["Edvisor", " "]);
+        assert_eq!(definition(&submission).unwrap_err(), "Name the group.");
+    }
+
+    #[tokio::test]
+    async fn screens_go_in_groups_by_request_and_a_chat_files_one_by_its_path() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("screens");
+        let here = site();
+        // This computer's own environment is the one its screens run in.
+        std::fs::write(
+            directory.path().join("installation.json"),
+            serde_json::to_vec(&json!({
+                "id": here.environment_id,
+                "computerId": uuid::Uuid::new_v4().to_string(),
+                "name": "Desk",
+                "platform": "windows",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let screens = Screens::default();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let ask = |request: Value| {
+            let root = root.clone();
+            let screens = &screens;
+            async move {
+                screens
+                    .handle(
+                        root,
+                        "agent-studio-test".into(),
+                        &NoCli,
+                        serde_json::from_value(request).unwrap(),
+                    )
+                    .await
+            }
+        };
+        let save = |submission: Value| {
+            let (root, here, screens) = (root.clone(), here.clone(), &screens);
+            let conversation = conversation.clone();
+            async move {
+                saved(
+                    screens,
+                    root,
+                    definition(&submission).unwrap(),
+                    here,
+                    None,
+                    |_: &Account| true,
+                    conversation.clone(),
+                    conversation,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        // A chat files a new screen by its group's path, making the groups.
+        let first = save(
+            json!({"title": "Bluevox editor", "html": "<p></p>", "group": ["Unreal", "Editors"]}),
+        )
+        .await;
+        assert!(first.screen.revision == 1 && first.unfiled.is_none());
+        assert_eq!(first.group, ["Unreal", "Editors"]);
+        let id = first.screen.id.clone();
+        let listed = ask(json!({"op": "list"})).await.unwrap();
+        let group_named = |listed: &Value, name: &str| {
+            listed["groups"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|group| group["name"] == name)
+                .map(|group| group["id"].as_str().unwrap().to_string())
+                .unwrap()
+        };
+        let (unreal, editors) = (
+            group_named(&listed, "Unreal"),
+            group_named(&listed, "Editors"),
+        );
+        assert_eq!(listed["groups"].as_array().unwrap().len(), 2);
+        assert_eq!(listed["screens"][0]["group"], editors.as_str());
+        // A window makes a group and files the screen in it, which leaves the screen's own file,
+        // revision and time as they were.
+        let before = std::fs::read(root.join(format!("{id}.json"))).unwrap();
+        let made = ask(
+            json!({"op": "createGroup", "environmentId": here.environment_id, "name": "Edvisor"}),
+        )
+        .await
+        .unwrap();
+        let edvisor = made["group"]["id"].as_str().unwrap().to_string();
+        assert_eq!(made["groups"].as_array().unwrap().len(), 3);
+        let moved = ask(json!({"op": "moveScreen", "id": id, "group": edvisor}))
+            .await
+            .unwrap();
+        assert_eq!(moved["members"][id.as_str()], edvisor.as_str());
+        assert_eq!(
+            std::fs::read(root.join(format!("{id}.json"))).unwrap(),
+            before
+        );
+        let detail = ask(json!({"op": "read", "id": id})).await.unwrap();
+        assert_eq!(detail["group"], edvisor.as_str());
+        assert_eq!(detail["revision"], 1);
+        // Groups are renamed and moved, never into themselves.
+        ask(json!({"op": "renameGroup", "group": edvisor, "name": "Work"}))
+            .await
+            .unwrap();
+        ask(json!({"op": "moveGroup", "group": unreal, "parent": edvisor}))
+            .await
+            .unwrap();
+        assert_eq!(
+            ask(json!({"op": "moveGroup", "group": edvisor, "parent": editors}))
+                .await
+                .unwrap_err(),
+            "A group cannot go inside itself."
+        );
+        assert_eq!(
+            ask(json!({"op": "createGroup", "environmentId": here.environment_id, "name": "work"}))
+                .await
+                .unwrap_err(),
+            "A group named work is already there."
+        );
+        // Taking Work away leaves Unreal and the screen at the top.
+        let removed = ask(json!({"op": "deleteGroup", "group": edvisor}))
+            .await
+            .unwrap();
+        assert!(removed["members"].get(id.as_str()).is_none());
+        let known = groups::read(&root).unwrap();
+        assert_eq!(
+            known.paths(&here.environment_id),
+            [
+                vec!["Unreal".to_string()],
+                vec!["Unreal".into(), "Editors".into()]
+            ]
+        );
+        // Only this computer's environments hold groups, and a gone group takes no screen.
+        assert_eq!(
+            ask(json!({"op": "createGroup", "environmentId": uuid::Uuid::new_v4().to_string(), "name": "Elsewhere"}))
+                .await
+                .unwrap_err(),
+            "This computer keeps no screens of that environment."
+        );
+        assert_eq!(
+            ask(json!({"op": "moveScreen", "id": id, "group": edvisor}))
+                .await
+                .unwrap_err(),
+            groups::GONE
+        );
+        // An update that names no group leaves the screen where the user filed it.
+        ask(json!({"op": "moveScreen", "id": id, "group": unreal}))
+            .await
+            .unwrap();
+        let again = save(json!({"id": id, "title": "Bluevox editor", "html": "<p>2</p>"})).await;
+        assert_eq!(again.screen.revision, 2);
+        assert_eq!(again.group, ["Unreal"]);
+        let top =
+            save(json!({"id": id, "title": "Bluevox editor", "html": "<p>3</p>", "group": []}))
+                .await;
+        assert!(top.group.is_empty());
+        // A deleted screen leaves its group.
+        ask(json!({"op": "moveScreen", "id": id, "group": unreal}))
+            .await
+            .unwrap();
+        ask(json!({"op": "delete", "id": id})).await.unwrap();
+        assert!(groups::read(&root).unwrap().members.is_empty());
+        assert_eq!(
+            ask(json!({"op": "moveScreen", "id": id}))
+                .await
+                .unwrap_err(),
+            MISSING
         );
     }
 }

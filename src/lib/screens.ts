@@ -43,6 +43,8 @@ const commandSchema = z
   })
   .strict();
 const paramsSchema = z.record(nameSchema, z.unknown());
+/** A group's name as written: the computer keeps it on one line. */
+const groupNameSchema = z.string().refine((name) => !!name.trim() && !name.includes('\u0000'));
 
 /**
  * What a window or another device asks the computer that keeps a screen. The relay checks it
@@ -130,6 +132,27 @@ export const screenRequestSchema = z.discriminatedUnion('op', [
     .strict(),
   z.object({ op: z.literal('revoke'), id: screenIdSchema }).strict(),
   z.object({ op: z.literal('delete'), id: screenIdSchema }).strict(),
+  // The groups the Screens tab files screens in (src-tauri/src/screens/groups.rs).
+  z
+    .object({
+      op: z.literal('createGroup'),
+      environmentId: z.string().uuid(),
+      name: groupNameSchema,
+      parent: screenIdSchema.optional(),
+    })
+    .strict(),
+  z.object({ op: z.literal('renameGroup'), group: screenIdSchema, name: groupNameSchema }).strict(),
+  z
+    .object({
+      op: z.literal('moveGroup'),
+      group: screenIdSchema,
+      parent: screenIdSchema.optional(),
+    })
+    .strict(),
+  z.object({ op: z.literal('deleteGroup'), group: screenIdSchema }).strict(),
+  z
+    .object({ op: z.literal('moveScreen'), id: screenIdSchema, group: screenIdSchema.optional() })
+    .strict(),
   z.object({ op: z.literal('load'), id: screenIdSchema }).strict(),
   z
     .object({
@@ -163,8 +186,32 @@ export const screenSummarySchema = z.object({
   allowed: z.boolean().optional(),
   // How many of its jobs run now; hosts before jobs report none.
   running: z.number().int().nonnegative().optional(),
+  // The group the Screens tab shows it in; hosts before groups report none.
+  group: z.string().optional(),
 });
 export type ScreenSummary = z.infer<typeof screenSummarySchema>;
+
+/**
+ * A group of screens (requested 2026-11-24), kept by the computer that keeps them: it holds
+ * screens of one environment and shows under that environment's computer, at the top or inside
+ * another group of the same environment.
+ */
+export const screenGroupSchema = z.object({
+  id: screenIdSchema,
+  environmentId: z.string().uuid(),
+  name: z.string(),
+  parent: screenIdSchema.optional(),
+  createdAt: z.string(),
+});
+export type ScreenGroup = z.infer<typeof screenGroupSchema>;
+/** How a computer's screens are grouped now, as a change answers, with the group it made. */
+export const screenGroupsSchema = z.object({
+  groups: z.array(screenGroupSchema),
+  // Each grouped screen's group, by the screen's id.
+  members: z.record(z.string(), z.string()),
+  group: screenGroupSchema.optional(),
+});
+export type ScreenGroups = z.infer<typeof screenGroupsSchema>;
 
 export const screenParamSchema = z.object({
   type: z.enum(['string', 'number', 'integer', 'boolean']),

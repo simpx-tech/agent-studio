@@ -791,6 +791,16 @@ export async function mockDesktop(page: Page, mode = 'success') {
               Object.values(jobs).filter(
                 (job: any) => job.screen === screen && job.record.state === 'running',
               ).length;
+            // The groups the Screens tab files screens in, kept beside them as the computer
+            // keeps them (src-tauri/src/screens/groups.rs); `test-old-screen-host` answers as
+            // a release before groups did, and `refuseScreenGroups` refuses each change.
+            const known: { groups: any[]; members: Record<string, string> } = JSON.parse(
+              localStorage.getItem('test-screen-groups') ?? '{"groups":[],"members":{}}',
+            );
+            w.oldScreenHost = !!localStorage.getItem('test-old-screen-host');
+            const keepGroups = () =>
+              localStorage.setItem('test-screen-groups', JSON.stringify(known));
+            const groupOf = (id: string) => known.groups.find((g: any) => g.id === id);
             const detail = ({ data: _data, ...screen }: any) => ({
               ...screen,
               mcpTools: screen.mcpTools ?? [],
@@ -798,6 +808,9 @@ export async function mockDesktop(page: Page, mode = 'success') {
               tools: screen.mcpTools?.length ?? 0,
               allowed: true,
               running: running(screen.id),
+              ...(!w.oldScreenHost && known.members[screen.id]
+                ? { group: known.members[screen.id] }
+                : {}),
             });
             if (request.op === 'list')
               return {
@@ -812,7 +825,82 @@ export async function mockDesktop(page: Page, mode = 'success') {
                   } = detail(screen);
                   return summary;
                 }),
+                ...(w.oldScreenHost ? {} : { groups: known.groups }),
               };
+            if (/Group$|^moveScreen$/.test(request.op)) {
+              if (w.oldScreenHost)
+                throw `invalid args \`request\` for command \`manage_screen\`: unknown variant \`${request.op}\``;
+              if (w.refuseScreenGroups) throw w.refuseScreenGroups;
+              const named = (environmentId: string, parent: string | undefined, name: string) =>
+                known.groups.find(
+                  (g: any) =>
+                    g.environmentId === environmentId &&
+                    g.parent === parent &&
+                    g.name.toLowerCase() === name.toLowerCase(),
+                );
+              const inside = (id: string | undefined, outer: string) => {
+                for (let next = id; next; next = groupOf(next)?.parent)
+                  if (next === outer) return true;
+                return false;
+              };
+              let made: any;
+              if (request.op === 'createGroup') {
+                const name = request.name.trim();
+                if (named(request.environmentId, request.parent, name))
+                  throw `A group named ${name} is already there.`;
+                made = {
+                  id: crypto.randomUUID(),
+                  environmentId: request.environmentId,
+                  name,
+                  ...(request.parent ? { parent: request.parent } : {}),
+                  createdAt: new Date().toISOString(),
+                };
+                known.groups.push(made);
+              } else if (request.op === 'moveScreen') {
+                if (!screens.some((s) => s.id === request.id))
+                  throw 'This screen is no longer on this computer.';
+                if (request.group && !groupOf(request.group))
+                  throw 'This group is no longer on this computer.';
+                if (request.group) known.members[request.id] = request.group;
+                else delete known.members[request.id];
+              } else {
+                const group = groupOf(request.group);
+                if (!group) throw 'This group is no longer on this computer.';
+                if (request.op === 'renameGroup') {
+                  const name = request.name.trim();
+                  const other = named(group.environmentId, group.parent, name);
+                  if (other && other.id !== group.id)
+                    throw `A group named ${name} is already there.`;
+                  group.name = name;
+                } else if (request.op === 'moveGroup') {
+                  if (request.parent && inside(request.parent, group.id))
+                    throw 'A group cannot go inside itself.';
+                  const other = named(group.environmentId, request.parent, group.name);
+                  if (other && other.id !== group.id)
+                    throw `A group named ${group.name} is already there.`;
+                  if (request.parent) group.parent = request.parent;
+                  else delete group.parent;
+                } else {
+                  known.groups.splice(known.groups.indexOf(group), 1);
+                  for (const child of known.groups)
+                    if (child.parent === group.id) {
+                      if (group.parent) child.parent = group.parent;
+                      else delete child.parent;
+                    }
+                  for (const [id, holder] of Object.entries(known.members))
+                    if (holder === group.id) {
+                      if (group.parent) known.members[id] = group.parent;
+                      else delete known.members[id];
+                    }
+                }
+              }
+              keepGroups();
+              return {
+                groups: known.groups,
+                members: known.members,
+                ...(made ? { group: made } : {}),
+              };
+            }
             const screen = screens.find((s) => s.id === request.id);
             if (!screen) throw 'This screen is no longer on this computer.';
             if (request.op === 'read' || request.op === 'approve' || request.op === 'revoke')
@@ -820,6 +908,8 @@ export async function mockDesktop(page: Page, mode = 'success') {
             if (request.op === 'delete') {
               screens.splice(screens.indexOf(screen), 1);
               keep();
+              delete known.members[screen.id];
+              keepGroups();
               for (const [id, job] of Object.entries(jobs))
                 if ((job as any).screen === screen.id) delete jobs[id];
               return {};

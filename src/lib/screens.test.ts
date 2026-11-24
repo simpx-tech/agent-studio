@@ -72,6 +72,31 @@ describe('screen requests', () => {
     );
   });
 
+  it('group screens by the ids of screens and groups, with names of any length', () => {
+    for (const request of [
+      { op: 'createGroup', environmentId, name: 'Unreal editors' },
+      { op: 'createGroup', environmentId, name: 'x'.repeat(10_000), parent: job },
+      { op: 'renameGroup', group: job, name: ' Edvisor ' },
+      { op: 'moveGroup', group: job, parent: id },
+      { op: 'moveGroup', group: job },
+      { op: 'deleteGroup', group: job },
+      { op: 'moveScreen', id, group: job },
+      { op: 'moveScreen', id },
+    ])
+      expect(screenRequestSchema.safeParse(request).success, JSON.stringify(request)).toBe(true);
+    for (const request of [
+      { op: 'createGroup', environmentId, name: '   ' },
+      { op: 'createGroup', environmentId: 'Desktop', name: 'Unreal' },
+      { op: 'createGroup', environmentId, name: 'Unreal', parent: null },
+      { op: 'createGroup', environmentId, name: 'Unreal', path: 'C:\\screens' },
+      { op: 'renameGroup', group: '../groups', name: 'x' },
+      { op: 'moveGroup', group: job, parent: 'top' },
+      { op: 'deleteGroup', id },
+      { op: 'moveScreen', id, group: job.toUpperCase() },
+    ])
+      expect(screenRequestSchema.safeParse(request).success, JSON.stringify(request)).toBe(false);
+  });
+
   it('start actions and commands as jobs, and follow, stop and forget them by id', () => {
     for (const request of [
       { op: 'start', id, action: 'build', params: { config: 'Development' }, keep: true },

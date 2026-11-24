@@ -48,11 +48,13 @@ where: an action, a command or an MCP call runs where this conversation runs unl
 
 actions: the commands the page runs by name, each {name, description, shell, script, params, timeout, where}. name is lowercase letters, digits and _. shell is 'powershell' on Windows (pwsh when installed, otherwise Windows PowerShell 5.1, so write for both) or 'bash' (Git Bash on Windows, bash in WSL, Linux and macOS). The script runs in this conversation's working folder, or where it names, bash in a login shell, with stdin closed, until it ends; set timeout to a number of seconds to stop it after that long, and whatever it started ends with it. It succeeds with exit code 0, and a PowerShell script ends with its own exit code or that of the last program it ran. params declares the values the page passes, as {name: {type: 'string' | 'number' | 'integer' | 'boolean', description, enum, pattern, maxLength, minimum, maximum, optional}}, which the host checks before the script runs; a value the action does not declare passes as it is, as JSON when it is not text. Each value reaches the script only as the environment variable PARAM_<NAME> (since becomes PARAM_SINCE), never inside the script's text: quote it as \"$PARAM_SINCE\" in bash, use $env:PARAM_SINCE in PowerShell, and never pass it to eval or Invoke-Expression. Print JSON for studio.json (gh --json, ConvertTo-Json -Depth 6 -Compress, jq). Test each script with your own shell tool first, in its folder and with its PARAM_ variables set.
 
-mcpTools: the MCP tools the page calls, each {server, tool, description, where, account}, named as a tool list names them: mcp__linear__list_issues is {\"server\":\"linear\",\"tool\":\"list_issues\"}. A declaration says what the page uses a tool for, and where and as which account (by the name Connections gives it) studio.mcp calls it unless the call names its own. The screen calls tools through the CLI of an account in that place, with the servers and sign-ins it has there: where this conversation runs, its account first; elsewhere, that place's CLI login first; then each other account there until one has the server connected. No model takes part, and a call's result goes to the page alone. Call each tool first, with your own tools or with call_mcp_tool for another place, to see the arguments it takes and what it returns, and list_mcp_tools to see the servers and tools a place has. Prefer an MCP tool to a script doing the same through a command line, and a server already signed in somewhere on this computer, such as Linear in WSL, to asking the user for keys.";
+mcpTools: the MCP tools the page calls, each {server, tool, description, where, account}, named as a tool list names them: mcp__linear__list_issues is {\"server\":\"linear\",\"tool\":\"list_issues\"}. A declaration says what the page uses a tool for, and where and as which account (by the name Connections gives it) studio.mcp calls it unless the call names its own. The screen calls tools through the CLI of an account in that place, with the servers and sign-ins it has there: where this conversation runs, its account first; elsewhere, that place's CLI login first; then each other account there until one has the server connected. No model takes part, and a call's result goes to the page alone. Call each tool first, with your own tools or with call_mcp_tool for another place, to see the arguments it takes and what it returns, and list_mcp_tools to see the servers and tools a place has. Prefer an MCP tool to a script doing the same through a command line, and a server already signed in somewhere on this computer, such as Linear in WSL, to asking the user for keys.
 
-const LIST_DESCRIPTION: &str = "List the screens this computer keeps: id, title, description, the folder their actions run in, their actions and MCP tools with the account that calls those first, how many of their jobs run, and whether this conversation can update the screen. Call it before reading or updating a screen.";
+group: the user files screens in groups, which can hold groups of their own, in the Screens list. Pass group, the names of the groups from the top, to file the screen in one, creating the groups that are missing: a new screen that belongs with screens already grouped goes in their group (list_screens shows each screen's group and the groups there are). Omit it when updating a screen, which stays where the user filed it, unless the user asks to move it.";
 
-const READ_DESCRIPTION: &str = "Read one saved screen whole: its title, description, html, actions, MCP tools with the account that calls them first, the values it saved with studio.save and its jobs, to change it and save it again with save_screen and the same id.";
+const LIST_DESCRIPTION: &str = "List the screens this computer keeps: id, title, description, the folder their actions run in, their actions and MCP tools with the account that calls those first, how many of their jobs run, the group the Screens list files each in (names from the top) and whether this conversation can update the screen, with the groups a screen saved here can go in. Call it before reading or updating a screen.";
+
+const READ_DESCRIPTION: &str = "Read one saved screen whole: its title, description, group, html, actions, MCP tools with the account that calls them first, the values it saved with studio.save and its jobs, to change it and save it again with save_screen and the same id.";
 
 const SERVERS_DESCRIPTION: &str = "List the MCP servers an account has in a place of this computer, each with its state and tools (Codex reports each tool's description and input schema, Claude Code its name), as a screen's studio.mcp reaches them. where is 'windows', 'wsl' or a WSL distribution's name; omit it for where this conversation runs. account names the account to ask, by the name Connections gives it; otherwise the account a screen would call first answers. The result names that account and the others there.";
 
@@ -94,7 +96,8 @@ pub fn tools() -> Vec<Value> {
                         "description":{"type":"string","description":"What the page uses it for."},
                         "where":place,
                         "account":{"type":"string","description":"The account to call it as first, by the name Connections gives it."}
-                    },"required":["server","tool"],"additionalProperties":false}}
+                    },"required":["server","tool"],"additionalProperties":false}},
+                "group":{"type":"array","items":{"type":"string","minLength":1},"description":"The group the Screens list files it in, as the names of its groups from the top, such as [\"Edvisor\", \"Linear\"]; [] puts it at the top. Omit it to leave a saved screen where it is."}
             },"required":["title","html"],"additionalProperties":false}}),
         json!({"name":LIST,"description":LIST_DESCRIPTION,"inputSchema":{"type":"object","properties":{},"additionalProperties":false}}),
         json!({"name":READ,"description":READ_DESCRIPTION,"inputSchema":{
@@ -331,7 +334,7 @@ async fn save(context: &Context, args: &Value) -> Result<(String, Card), String>
         }
     };
     let ours = context.account();
-    let (screen, _) = super::saved(
+    let saved = super::saved(
         &context.screens,
         root,
         definition,
@@ -342,12 +345,22 @@ async fn save(context: &Context, args: &Value) -> Result<(String, Card), String>
         context.run_id.clone(),
     )
     .await?;
+    let screen = &saved.screen;
     let caller = screen
         .account
         .as_ref()
         .filter(|account| **account != ours)
         .map(|account| places::account_name(&fleet, account));
-    Ok((saved_text(&screen, caller.as_deref()), card(&screen)))
+    let mut text = saved_text(screen, caller.as_deref());
+    match &saved.unfiled {
+        Some(error) => text.push_str(&format!(" It could not go in the group you named: {error}")),
+        None if !saved.group.is_empty() => text.push_str(&format!(
+            " The Screens list shows it in the group {}.",
+            serde_json::to_string(&saved.group).unwrap_or_default()
+        )),
+        None => {}
+    }
+    Ok((text, card(screen)))
 }
 
 async fn list(context: &Context, args: &Value) -> Result<String, String> {
@@ -356,8 +369,9 @@ async fn list(context: &Context, args: &Value) -> Result<String, String> {
     }
     let fleet = context.fleet().await?;
     let environment = context.environment(&fleet)?;
-    let screens = super::listed(context.data.join("screens")).await?;
-    if screens.is_empty() {
+    let (screens, known) = super::listed(context.data.join("screens")).await?;
+    let groups = known.paths(&environment);
+    if screens.is_empty() && groups.is_empty() {
         return Ok("This computer keeps no screens yet. Create one with save_screen.".into());
     }
     let entries: Vec<Value> = screens
@@ -374,6 +388,9 @@ async fn list(context: &Context, args: &Value) -> Result<String, String> {
                 "runningJobs": context.screens.jobs.running_for(&screen.id),
                 "updatableHere": screen.site.environment_id == environment,
             });
+            if let Some(group) = known.group_of(&screen.id, &screen.site.environment_id) {
+                entry["group"] = json!(known.path(&group.id));
+            }
             if !screen.mcp_tools.is_empty() {
                 entry["mcpTools"] = json!(screen.mcp_tools);
             }
@@ -381,7 +398,7 @@ async fn list(context: &Context, args: &Value) -> Result<String, String> {
             entry
         })
         .collect();
-    serde_json::to_string_pretty(&json!({ "screens": entries }))
+    serde_json::to_string_pretty(&json!({ "screens": entries, "groups": groups }))
         .map_err(|_| "Cannot list screens".into())
 }
 
@@ -393,7 +410,7 @@ async fn read(context: &Context, args: &Value) -> Result<String, String> {
         .and_then(Value::as_str)
         .filter(|id| super::valid_id(id))
         .ok_or("Send the id of a screen from list_screens, and nothing else.")?;
-    let (screen, values) = super::opened(context.data.join("screens"), id.into())
+    let (screen, values, group) = super::opened(context.data.join("screens"), id.into())
         .await
         .map_err(|error| {
             if error == super::MISSING {
@@ -411,6 +428,7 @@ async fn read(context: &Context, args: &Value) -> Result<String, String> {
         "description": screen.description,
         "revision": screen.revision,
         "folder": screen.site.folder,
+        "group": group,
         "html": screen.html,
         "actions": screen.actions,
         "mcpTools": screen.mcp_tools,
@@ -735,9 +753,16 @@ mod tests {
             "call_mcp_tool",
             "list_mcp_tools",
             "mcp__linear__list_issues is {\"server\":\"linear\",\"tool\":\"list_issues\"}",
+            "group: the user files screens in groups",
         ] {
             assert!(SAVE_DESCRIPTION.contains(api), "{api}");
         }
+        // Chats file screens in the groups the user made, and leave them where the user put them.
+        assert!(LIST_DESCRIPTION.contains("group") && READ_DESCRIPTION.contains("group"));
+        assert_eq!(
+            listed[0]["inputSchema"]["properties"]["group"]["items"]["type"],
+            "string"
+        );
         // Nothing in it asks the user for permission any more.
         assert!(!SAVE_DESCRIPTION.contains("allow them"));
         assert!(GUIDANCE.contains("list_mcp_tools") && GUIDANCE.contains("call_mcp_tool"));

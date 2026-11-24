@@ -90,6 +90,8 @@ import { steeringInputSchema, type SteeringInput } from './steering';
 import type { ConsoleShell } from './code-blocks';
 import {
   screenDetailSchema,
+  screenGroupSchema,
+  screenGroupsSchema,
   screenJobSchema,
   screenOutcomeSchema,
   screenOutputSchema,
@@ -98,6 +100,8 @@ import {
   screenToolResultSchema,
   type ScreenCommand,
   type ScreenDetail,
+  type ScreenGroup,
+  type ScreenGroups,
   type ScreenJob,
   type ScreenOutcome,
   type ScreenOutput,
@@ -4160,18 +4164,53 @@ async function screenRequest(environmentId: string, request: ScreenRequest): Pro
   try {
     return await routed('screens', { environmentId, request });
   } catch (e) {
-    // A relay older than screens refuses their requests as an invalid payload.
+    // A relay older than screens, or than their groups, refuses their requests as an invalid
+    // payload.
     if (e instanceof RelayResponseError && e.status === 400)
       throw new Error(
-        'The relay does not route screens yet. It does once it runs the Agent Studio release that brings them.',
+        `The relay does not route ${/Group|moveScreen/.test(request.op) ? 'screen groups' : 'screens'} yet. It does once it runs the Agent Studio release that brings them.`,
       );
     throw e;
   }
 }
-/** The screens one computer keeps, named by an environment it owns. */
-export async function listScreens(environmentId: string): Promise<ScreenSummary[]> {
-  const answer = (await screenRequest(environmentId, { op: 'list' })) as { screens?: unknown };
-  return z.array(screenSummarySchema).parse(answer?.screens ?? []);
+/**
+ * The screens one computer keeps, named by an environment it owns, and the groups it files them
+ * in; a computer of a release before groups reports none.
+ */
+export async function listScreens(
+  environmentId: string,
+): Promise<{ screens: ScreenSummary[]; groups?: ScreenGroup[] }> {
+  const answer = (await screenRequest(environmentId, { op: 'list' })) as {
+    screens?: unknown;
+    groups?: unknown;
+  };
+  return {
+    screens: z.array(screenSummarySchema).parse(answer?.screens ?? []),
+    ...(answer?.groups === undefined
+      ? {}
+      : { groups: z.array(screenGroupSchema).parse(answer.groups) }),
+  };
+}
+/**
+ * Changes how a computer's screens are grouped, routed by an environment of that computer: a
+ * new group, a renamed, moved or removed one, or a screen filed in a group. It answers with the
+ * groups as they are then.
+ */
+export async function regroupScreens(
+  environmentId: string,
+  request: Extract<
+    ScreenRequest,
+    { op: 'createGroup' | 'renameGroup' | 'moveGroup' | 'deleteGroup' | 'moveScreen' }
+  >,
+): Promise<ScreenGroups> {
+  try {
+    return screenGroupsSchema.parse(await screenRequest(environmentId, request));
+  } catch (e) {
+    // A computer of a release before groups knows no such request.
+    if (/unknown variant/.test(e instanceof Error ? e.message : String(e)))
+      throw new Error('This computer’s Agent Studio does not group screens yet.');
+    throw e;
+  }
 }
 export async function readScreen(environmentId: string, id: string): Promise<ScreenDetail> {
   return screenDetailSchema.parse(await screenRequest(environmentId, { op: 'read', id }));

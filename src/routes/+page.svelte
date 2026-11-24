@@ -198,6 +198,7 @@
     readChatImage,
     storeChatImages,
     listScreens,
+    regroupScreens,
   } from '$lib/transport';
   import {
     isLightMessage,
@@ -243,7 +244,16 @@
     workflowHookUrl as webhookUrl,
   } from '$lib/transport';
   import { notificationWorkflow } from '$lib/notifications';
-  import { screenFolderName, type ScreenDetail, type ScreenSummary } from '$lib/screens';
+  import { type ScreenDetail, type ScreenGroup, type ScreenSummary } from '$lib/screens';
+  import ScreenTree from '$lib/components/ScreenTree.svelte';
+  import {
+    keptGroups,
+    regrouped,
+    regroupLocally,
+    screenTree,
+    type RegroupRequest,
+    type ScreenTreeSection,
+  } from '$lib/screen-groups';
   import type { PublishedArtifact } from '$lib/published-artifacts';
   import ChatInstructions from '$lib/components/ChatInstructions.svelte';
   import InputTemplates from '$lib/components/InputTemplates.svelte';
@@ -587,9 +597,11 @@
   let collapsedGroups = $state<Record<string, boolean>>({});
   let conversationScope = $state<'active' | 'history' | 'screens'>('active');
   // Screens (docs/SCREENS.md): each computer keeps its own and lists them when asked. This window
-  // keeps the lists it read for the session, by the host that answered.
+  // keeps the lists it read for the session, by the host that answered, with the groups it files
+  // them in (none from a computer of a release before groups).
   type ScreenShelf = {
     screens: ScreenSummary[];
+    groups?: ScreenGroup[];
     loading: boolean;
     error?: string;
     checkedAt?: number;
@@ -2300,29 +2312,34 @@
   const screenCount = $derived(
     Object.values(screenShelves).reduce((count, shelf) => count + shelf.screens.length, 0),
   );
-  // The Screens tab lists each computer's screens, newest first, filtered by the search.
-  const screenGroups = $derived.by(() => {
-    const search = query.toLowerCase();
-    const groups = new Map<string, { id: string; name: string; screens: ScreenSummary[] }>();
-    for (const shelf of Object.values(screenShelves))
-      for (const screen of shelf.screens) {
-        const environment = workspace.fleet.environments.find((e) => e.id === screen.environmentId);
-        if (!environment) continue;
-        if (
-          search &&
-          !`${screen.title} ${screen.description} ${screen.project}`.toLowerCase().includes(search)
-        )
-          continue;
-        const id = computerViewId(environment);
-        const group = groups.get(id) ?? {
-          id,
-          name: computers.find((c) => c.id === id)?.name ?? environment.name,
-          screens: [],
-        };
-        group.screens.push(screen);
-        groups.set(id, group);
-      }
-    return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name));
+  // The Screens tab lists each computer's screens in the groups it files them in (requested
+  // 2026-11-24), each group's own groups by name and its screens newest first, filtered by the
+  // search (src/lib/screen-groups.ts).
+  const shelvedGroups = $derived(
+    Object.values(screenShelves).flatMap((shelf) => shelf.groups ?? []),
+  );
+  const shelvedScreens = $derived(Object.values(screenShelves).flatMap((shelf) => shelf.screens));
+  const screenSections = $derived.by((): ScreenTreeSection[] => {
+    const fleet = workspace.fleet;
+    const computerOf = (environmentId: string) => {
+      const environment = fleet.environments.find((e) => e.id === environmentId);
+      if (!environment) return;
+      const id = computerViewId(environment);
+      return { id, name: computers.find((c) => c.id === id)?.name ?? environment.name };
+    };
+    return screenTree(shelvedGroups, shelvedScreens, computerOf, query).map((section) => {
+      // A new group at a computer's top holds the screens of that computer's own environment.
+      const environment = fleet.environments.find(
+        (e) => computerViewId(e) === section.id && screenHost(e.id),
+      );
+      const host = environment && screenHost(environment.id);
+      return {
+        ...section,
+        environmentId: environment?.id,
+        groupable: !!host && !!screenShelves[host]?.groups,
+        online: computerOnline(section.id),
+      };
+    });
   });
   const screenProblems = $derived(
     Object.entries(screenShelves)
@@ -2367,22 +2384,71 @@
       if (shelf.loading || (!force && shelf.checkedAt && Date.now() - shelf.checkedAt < 15_000))
         continue;
       shelf.loading = true;
+      const turn = regroupTurns[host] ?? 0;
       void listScreens(host).then(
-        (screens) => {
-          if (session === workspaceSession)
-            screenShelves[host] = { screens, loading: false, checkedAt: Date.now() };
+        ({ screens, groups }) => {
+          if (session !== workspaceSession) return;
+          // A change to its groups sent meanwhile answers with them as they are then, so the
+          // groups this list read may already be old.
+          const before = (regroupTurns[host] ?? 0) !== turn ? screenShelves[host] : undefined;
+          screenShelves[host] = {
+            screens: before ? keptGroups(screens, before.screens) : screens,
+            groups: before ? before.groups : groups,
+            loading: false,
+            checkedAt: Date.now(),
+          };
         },
         (e) => {
           if (session !== workspaceSession) return;
           // The list it gave before stays, as last reported.
           screenShelves[host] = {
             screens: screenShelves[host]?.screens ?? [],
+            groups: screenShelves[host]?.groups,
             loading: false,
             checkedAt: Date.now(),
             error: (e instanceof Error ? e.message : String(e)).replace(/^Error: /, ''),
           };
         },
       );
+    }
+  }
+  // Each change to a computer's groups, counted so only the newest one's answer shows.
+  const regroupTurns: Record<string, number> = {};
+  /**
+   * Changes how a computer's screens are grouped (src/lib/screen-groups.ts). A move or a rename
+   * shows at once; the computer's answer then shows the groups as it keeps them, unless a later
+   * change was sent meanwhile, and a refused change reads the computer's list again.
+   */
+  async function regroupOnHost(environmentId: string, request: RegroupRequest) {
+    const host = screenHost(environmentId);
+    if (!host) throw new Error('This screen’s computer is no longer in Connections.');
+    const session = workspaceSession;
+    const turn = (regroupTurns[host] = (regroupTurns[host] ?? 0) + 1);
+    const shelf = screenShelves[host];
+    const before = shelf && { screens: shelf.screens, groups: shelf.groups };
+    const shown = shelf ? regroupLocally(shelf, request) : undefined;
+    if (shelf && shown) {
+      shelf.screens = shown.screens;
+      shelf.groups = shown.groups;
+    }
+    try {
+      const answer = await regroupScreens(environmentId, request);
+      const now = screenShelves[host];
+      if (session === workspaceSession && now && regroupTurns[host] === turn) {
+        now.groups = answer.groups;
+        now.screens = regrouped(now.screens, answer);
+      }
+      return answer;
+    } catch (e) {
+      if (session === workspaceSession) {
+        const now = screenShelves[host];
+        if (now && before && shown && regroupTurns[host] === turn) {
+          now.screens = before.screens;
+          now.groups = before.groups;
+        }
+        refreshScreens([host], true);
+      }
+      throw e;
     }
   }
   $effect(() => {
@@ -8476,55 +8542,20 @@
         aria-labelledby="conversation-tab-screens"
         hidden={conversationScope !== 'screens'}
       >
-        {#each screenGroups as group (group.id)}
-          {@const groupKey = `screens/${group.id}`}
-          <div class="conversation-computer" aria-label={`${group.name} screens`}>
-            <div class="computer-group-row">
-              <button
-                class="computer-group-toggle"
-                title={group.name}
-                aria-expanded={!collapsedGroups[groupKey]}
-                onclick={() => (collapsedGroups[groupKey] = !collapsedGroups[groupKey])}
-                ><Laptop size={13} /><span>{group.name}</span
-                >{#if !computerOnline(group.id)}<small class="computer-offline">Offline</small
-                  >{/if}<ChevronRight
-                  size={12}
-                  class={!collapsedGroups[groupKey] ? 'expanded-chevron' : ''}
-                /></button
-              >
-            </div>
-            {#if !collapsedGroups[groupKey]}<div class="folder-conversations screen-list">
-                {#each group.screens as screen (screen.id)}{@const current =
-                    view === 'screen' && openedScreen?.id === screen.id}{@const running =
-                    screen.running ?? 0}
-                  <div class="conversation-row">
-                    <button
-                      class="conversation-item screen-item"
-                      class:current
-                      aria-current={current ? 'page' : undefined}
-                      title={[
-                        screen.title,
-                        screen.description,
-                        screenFolderName(screen),
-                        ...(running ? [`${running} running`] : []),
-                      ]
-                        .filter(Boolean)
-                        .join(' · ')}
-                      aria-label={running ? `${screen.title}, ${running} running` : undefined}
-                      onclick={() => openScreen(screen.environmentId, screen.id)}
-                      ><LayoutDashboard size={13} aria-hidden="true" /><span>{screen.title}</span
-                      >{#if running}<span class="screen-jobs" aria-hidden="true"
-                          ><LoaderCircle size={12} class="spinning" /></span
-                        >{/if}</button
-                    >
-                  </div>
-                {/each}
-              </div>{/if}
-          </div>
-        {:else}{#if screensLoading}<p class="sidebar-empty">Reading screens…</p>{:else}<SidebarEmpty
-              icon={query ? SearchX : LayoutDashboard}
-              title={query ? 'No matches' : 'No screens'}
-            />{/if}{/each}
+        {#if screenSections.length}<ScreenTree
+            sections={screenSections}
+            groups={shelvedGroups}
+            screens={shelvedScreens}
+            bind:collapsed={collapsedGroups}
+            searching={!!query.trim()}
+            current={view === 'screen' ? openedScreen?.id : undefined}
+            open={(screen) => openScreen(screen.environmentId, screen.id)}
+            regroup={regroupOnHost}
+            fail={(message) => (notice = message)}
+          />{:else if screensLoading}<p class="sidebar-empty">Reading screens…</p>{:else}<SidebarEmpty
+            icon={query ? SearchX : LayoutDashboard}
+            title={query ? 'No matches' : 'No screens'}
+          />{/if}
         {#each screenProblems as problem (problem.host)}<p class="sidebar-empty screen-problem">
             Could not read the screens of {problem.name}: {problem.error}
           </p>{/each}
