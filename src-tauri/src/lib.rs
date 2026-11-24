@@ -31,6 +31,7 @@ mod protocol;
 mod providers;
 mod relay;
 mod reply_feed;
+mod reservations;
 mod retention;
 mod runner;
 mod saved;
@@ -389,6 +390,64 @@ async fn background_work(
     state: State<'_, background_work::Registry>,
 ) -> Result<Vec<background_work::Snapshot>, String> {
     Ok(state.snapshots())
+}
+
+/// The reservations of this computer for performance measurements (reservations.rs).
+#[tauri::command]
+async fn pc_state(app: tauri::AppHandle) -> Result<reservations::Snapshot, String> {
+    Ok(app
+        .try_state::<std::sync::Arc<reservations::Broker>>()
+        .map(|broker| broker.snapshot())
+        .unwrap_or_default())
+}
+
+/// Reservations of this computer, which name chats by the titles of the workspace this app last
+/// saved and follow the background work chats' CLIs keep.
+fn reservations_broker(app: &tauri::AppHandle) -> std::sync::Arc<reservations::Broker> {
+    let (emitter, titles, background) = (app.clone(), app.clone(), app.clone());
+    reservations::Broker::new(
+        Box::new(move |snapshot| {
+            use tauri::Emitter;
+            let _ = emitter.emit(reservations::EVENT, snapshot);
+        }),
+        Box::new(move |conversation| {
+            #[derive(serde::Deserialize)]
+            struct Titled {
+                title: Option<String>,
+            }
+            // A save in progress keeps the lock: the chat goes unnamed rather than wait.
+            let storage = titles.try_state::<Storage>()?;
+            let state = storage.0.try_lock().ok()?;
+            let chat = state.saved.as_ref()?.get(conversation)?;
+            serde_json::from_str::<Titled>(chat.get()).ok()?.title
+        }),
+        Box::new(move || {
+            background
+                .try_state::<background_work::Registry>()
+                .map(|registry| {
+                    registry
+                        .snapshots()
+                        .into_iter()
+                        .flat_map(|snapshot| {
+                            let conversation = snapshot.conversation_id;
+                            snapshot
+                                .runs
+                                .into_iter()
+                                .map(move |run| reservations::BackgroundWork {
+                                    conversation: conversation.clone(),
+                                    id: run.id,
+                                    label: run.label,
+                                })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }),
+        app.path()
+            .app_local_data_dir()
+            .ok()
+            .map(|data| data.join("reservations").join("history.jsonl")),
+    )
 }
 
 #[tauri::command]
@@ -2209,6 +2268,7 @@ pub fn run() {
         .manage(watchdog::Watchdog::default())
         .manage(window_recovery::Recovery::default())
         .setup(|app| {
+            app.manage(reservations_broker(app.handle()));
             tray::setup(app.handle());
             // The taskbar overlay is set off the window thread, on the window's own handle.
             #[cfg(windows)]
@@ -2361,6 +2421,7 @@ pub fn run() {
             read_usage,
             live_account_updates,
             background_work,
+            pc_state,
             manage_account,
             read_context,
             search_mentions,

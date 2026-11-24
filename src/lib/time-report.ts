@@ -29,6 +29,7 @@ export const timeKinds = [
   'hooks',
   'user',
   'background',
+  'held',
   'startup',
   'compaction',
   'other',
@@ -47,6 +48,7 @@ export const timeKindNames: Record<TimeKind, string> = {
   waiting: 'Waiting for the model',
   user: 'Waiting for you',
   background: 'Background work',
+  held: 'Waiting for the computer',
   compaction: 'Compacting',
   startup: 'Starting',
   other: 'Other',
@@ -58,6 +60,7 @@ export const timeKindHints: Partial<Record<TimeKind, string>> = {
   calls: 'The model writing commands, file contents and other calls',
   waiting: 'From each request until its answer began',
   background: 'The reply waited for work it left running',
+  held: 'Another chat had the computer reserved for a measurement',
   startup: 'Before the agent took the message',
   unrecorded: 'Replies from before this was recorded, or cut off',
 };
@@ -86,6 +89,7 @@ export const kindFamily: Record<TimeKind, TimeFamily> = {
   hooks: 'work',
   user: 'hold',
   background: 'hold',
+  held: 'hold',
   startup: 'overhead',
   compaction: 'overhead',
   other: 'overhead',
@@ -198,6 +202,7 @@ const waitsOnOthers = new Set([
   'Wait for background tasks',
   'await_background_tasks',
   'mcp__agent_studio__await_background_tasks',
+  'Wait for the computer',
 ]);
 
 const commandNames: Record<CommandKind, string> = {

@@ -1,0 +1,109 @@
+# Reserving the computer for a measurement
+
+Chats run side by side on a computer, and that stays the default: builds, tests, game runs and
+editors of several chats run together. A performance measurement is the exception. A benchmark,
+a profiling run or a timing test is worthless when another chat starts an Unreal build or a game
+in the middle of it, which used to make chats throw their results away (requested 2026-11-24).
+So a chat that measures reserves the computer first, and the reservation is a real place in line:
+from the moment a chat asks, no other chat starts a command, so the wait never depends on the
+computer getting quiet by itself, which never happens while several chats work.
+
+The native broker is `src-tauri/src/reservations.rs`, with `reservations/tools.rs` (the agents'
+tools and the gate), `reservations/light.rs` (light commands), `reservations/machine.rs`
+(measuring the computer) and `reservations/jobs.rs` (which chat a process belongs to). Every
+Windows chat and the WSL distributions this computer manages share one broker, since they share
+the computer.
+
+## How a measurement goes
+
+1. **Prepare.** The agent builds, cooks and finishes its own background work first, and calls
+   `pc_status`, which lists what other chats run, the busiest and largest programs and whose they
+   are: a chat's, Agent Studio's, the system's, or the user's own. Programs the user started are
+   the only thing an agent asks the user about, with `studio_ask_user` (close them, or measure
+   anyway), and it asks before reserving, so no other chat waits on the answer.
+2. **Reserve.** `pc_reserve` with a purpose and, optionally, the minutes the measurement takes.
+   From that moment other chats' new commands wait, except light ones. The answer lists what
+   still runs.
+3. **Wait for the window.** `pc_wait` returns once no other chat runs a command, nor background
+   work that a reply of its own still runs and waits on. Background work a chat left running
+   after its reply ended (a dev server, a watcher) does not keep the window closed; it is listed
+   so that the agent can decide, and it shows in the report.
+4. **Measure** at once: warm up, run several times.
+5. **Release** with `pc_release` right after capturing, and analyze afterwards. The answer is the
+   report. A reservation also ends by itself when the reply that made it ends.
+
+Reservations take turns, first come first served: the first holds the computer, the others wait
+in line, and their own chats' commands wait for the first like everyone else's. A chat that
+reserves again only updates its purpose and estimate. Nothing is capped: a reservation, a wait
+and a queue last as long as their chats need; a reservation ends only when its chat releases it
+or its reply ends.
+
+## What waits, and how
+
+- **Claude chats.** Each chat process registers a `PreToolUse` hook callback for `Bash`,
+  `PowerShell` and `Monitor` in its `initialize` request, beside the compaction hooks. The
+  running reply answers it: with no opinion when the computer is free, the command is light, or
+  the chat holds the reservation itself (its sub-agents included); otherwise with a refusal that
+  names the chat measuring and its purpose and tells the agent to call `pc_wait` and run the
+  command again. A refusal rather than a held answer: a process parked between replies has nobody
+  to answer its hooks, so the hook's timeout is 30 seconds, and a command an unobserved turn of a
+  parked process starts goes ahead after it. Claude Code names an SDK callback
+  `PreToolUse:Callback`, which Work history leaves out.
+- **Light commands** run anyway (`light.rs`): reading files, listing folders, searching text and
+  asking Git about the checkout, every part of the command line. A command substitution, a script
+  block, `Invoke-Expression` or any program the list does not name makes the command wait.
+- **Codex chats** get the same tools, but their commands are not held yet: Codex's app-server has
+  no hook a client answers before a command. Its command approval requests and its `preToolUse`
+  hooks (`thread/start` takes per-thread configuration) are the candidates. Until one is in place,
+  a Codex command that runs during a window is in the report.
+- **What runs** is what the replies running on this computer report: each command and monitor
+  from its start until it ends (`Broker::tool`, fed by every chat run's events), and the
+  background work chats' CLIs keep (`background_work`).
+
+`pc_wait` waits as long as the computer stays reserved. Its answer, like every answer of these
+tools, goes back to the CLI through the run's own channel (`Session::rx`), so a long wait never
+holds up the reply's loop, and Stop ends it.
+
+## Whose a process is
+
+On Windows each chat CLI runs in a job object of its own (`jobs.rs`), which every process it starts
+joins, an editor left open included, so a process is the chat's however it was started. Jobs limit
+nothing: they let a process break away when it asks, never end their processes, and are dropped
+once none of their processes runs. A process outside every job is Agent Studio's when the app
+started it, the system's when it runs outside the signed-in session (Windows' services), and the
+user's otherwise. WSL processes run inside the distribution's virtual machine and count as one
+program on Windows. Linux server hosts tell processes apart by their parent chain.
+
+## The report
+
+`pc_release` returns, and `reservations/history.jsonl` in app data keeps one JSON line per
+reservation:
+
+- when the window opened after the reservation, and how long it stayed open;
+- what kept it closed, each chat's command with how long it ran meanwhile;
+- other chats' work that ran while it was open anyway (Codex commands, work left running);
+- the computer while it was open, read every two seconds: CPU on average and at most, the
+  measuring chat's processes apart from everything else, memory in use and free, and the busiest
+  and largest other programs with whose they are;
+- how long other chats waited in `pc_wait` because of it, split by what kept the window closed
+  at the time (time several things shared is split between them), and how many commands waited.
+
+A reply waiting in `pc_wait` counts that time as **Waiting for the computer** in its time ledger
+(`held`, in the On hold family of the Time report).
+
+## In the window
+
+While the computer is reserved, a gauge in the sidebar's footer, beside Connections, names the
+chat and its purpose on hover with where it stands (waiting for commands, measuring, chats
+waiting, reservations in line) and opens that chat. It is in the warning colour while other
+chats' work finishes and in the accent while the measurement runs. The window follows
+reservations through `studio-pc` events and `pc_state`; nothing about them is saved or synced.
+The Viewer shows none.
+
+## Not yet
+
+- Holding Codex chats' commands (see above), and freezing a process a chat starts during a window
+  when nothing else can hold it.
+- `pc_stop` for processes a chat that is no longer replying left running, messages between chats,
+  and a chat handing over something it holds (an editor) to the one measuring.
+- The history of reservations in the window.

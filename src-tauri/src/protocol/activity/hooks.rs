@@ -12,6 +12,11 @@ impl ToolDecoder {
         let Some(id) = identifier(&v["hook_id"]) else {
             return true;
         };
+        // Agent Studio's own command gate (`reservations::tools`), which answers every command,
+        // is no hook of the user's: Claude Code names an SDK callback `<event>:Callback`.
+        if identifier(&v["hook_name"]) == Some("PreToolUse:Callback") {
+            return true;
+        }
         let parent = identifier(&v["parent_tool_use_id"]);
         if !v["parent_tool_use_id"].is_null() && parent.is_none() {
             return true;

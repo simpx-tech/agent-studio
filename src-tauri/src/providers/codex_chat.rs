@@ -72,6 +72,10 @@ const HELD_BACK: &[&str] = &[
     "read_screen",
     "list_mcp_tools",
     "call_mcp_tool",
+    "pc_status",
+    "pc_reserve",
+    "pc_wait",
+    "pc_release",
 ];
 /// The workflow tools held back too, except for an orchestrator, whose work they are. A static
 /// workflow's assistant reads and saves its workflow before every change, so workflow_read and
@@ -84,7 +88,7 @@ const HELD_BACK_WORKFLOW: &[&str] = &[
 ];
 /// The namespace of the tools held back, as Claude Code names Agent Studio's MCP server.
 pub const NAMESPACE: &str = "agent_studio";
-const NAMESPACE_DESCRIPTION: &str = "Agent Studio's tools for comparing images and 3D models side by side, saving and opening screens, calling the MCP servers of this computer's other places, and building and running workflows.";
+const NAMESPACE_DESCRIPTION: &str = "Agent Studio's tools for comparing images and 3D models side by side, saving and opening screens, calling the MCP servers of this computer's other places, reserving this computer for performance measurements, and building and running workflows.";
 
 /// Whether a dynamic tool call comes from a tool Agent Studio registered: one of its own, or one
 /// in `NAMESPACE`. A chat begun before 2026-11-19 keeps its tools outside the namespace.
@@ -120,6 +124,10 @@ fn dynamic_tools(request: &RunRequest) -> Vec<Value> {
         super::artifact_tool::codex_tool(),
     ];
     tools.extend(crate::screens::tools::codex_tools());
+    // A saved conversation can reserve this computer for a measurement (reservations.rs).
+    if request.conversation_id.is_some() && request.tools_enabled() {
+        tools.extend(crate::reservations::tools::codex_tools());
+    }
     let orchestrator = request.mission.is_some();
     tools.extend(super::workflow_calls::codex_tools(
         request.workflow_tools(),
@@ -417,6 +425,7 @@ pub async fn run(
     let mut tool_tick = tokio::time::interval(Duration::from_secs(1));
     tool_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
+        let pc_rx = questions.pc.as_mut().map(|pc| &mut pc.rx);
         tokio::select! {
             biased;
             _ = tool_tick.tick() => {
@@ -463,6 +472,13 @@ pub async fn run(
                     process.stdin.write_all(format!("{}\n", delivery.payload).as_bytes()).await.map_err(|_| "Could not send MCP input to Codex.".to_string())
                 } else { Err("This MCP request is no longer waiting.".into()) };
                 questions.elicitation.delivered(delivery, result);
+            },
+            // The answer to a call of the reservation tools, which may have waited for the computer.
+            Some(answer) = async { match pc_rx { Some(rx) => rx.recv().await, None => std::future::pending().await } }, if !cancelling => {
+                if process.stdin.write_all(format!("{answer}\n").as_bytes()).await.is_err() {
+                    process.healthy = false;
+                    return Err("Could not answer the reservation tool.".into());
+                }
             },
             Some(delivery) = questions.steering.rx.recv(), if !cancelling => {
                 let id = process.next_id;
@@ -599,6 +615,10 @@ pub async fn run(
                     }
                     if let Some(response) = questions.workflow.codex(&value, &thread) {
                         if let Some(response) = response { process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| "Could not answer the workflow tool")?; }
+                        continue;
+                    }
+                    // Reserving this computer: the answer comes once the call is done.
+                    if questions.pc.as_ref().and_then(|pc| pc.codex(&value)).is_some() {
                         continue;
                     }
                     if let Some((response, event)) = screen_tools.codex(&value, &thread, screen_context.as_deref()).await {

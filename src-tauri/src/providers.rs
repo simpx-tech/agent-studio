@@ -950,10 +950,11 @@ impl RunRequest {
         if !self.uses_claude_visualizer() {
             return Vec::new();
         }
-        let [tools, visuals, files, questions, screens, workflows] = self.capability_sections(true);
+        let [tools, visuals, files, questions, screens, reservations, workflows] =
+            self.capability_sections(true);
         let mut parts = vec![format!("You are having a conversation in Agent Studio. Its earlier messages were just compacted into a summary, so the guidance its first message gave follows again. {tools} Format your response with Markdown where useful.")];
         parts.extend(
-            [visuals, files, questions, screens, workflows]
+            [visuals, files, questions, screens, reservations, workflows]
                 .into_iter()
                 .filter(|part| !part.is_empty()),
         );
@@ -970,10 +971,12 @@ impl RunRequest {
         parts
     }
     fn capabilities(&self, studio_tools: bool) -> String {
-        let [tools, visuals, files, questions, screens, workflows] =
+        let [tools, visuals, files, questions, screens, reservations, workflows] =
             self.capability_sections(studio_tools);
         if studio_tools {
-            let text = format!("{tools} {visuals} {files} {questions} {screens} {workflows}");
+            let text = format!(
+                "{tools} {visuals} {files} {questions} {screens} {reservations} {workflows}"
+            );
             // Codex holds some of these tools back until the agent looks them up.
             let held = if self.uses_codex_server() {
                 codex_chat::held_back_guidance(self)
@@ -990,8 +993,9 @@ impl RunRequest {
         }
     }
     /// The guidance a chat agent starts with, by subject: tools, visuals, files, questions,
-    /// screens and workflows, each empty when the chat has none of it.
-    fn capability_sections(&self, studio_tools: bool) -> [String; 6] {
+    /// screens, reservations of the computer and workflows, each empty when the chat has none of
+    /// it.
+    fn capability_sections(&self, studio_tools: bool) -> [String; 7] {
         let tools = if self.tools_enabled() {
             // Every chat agent names its fences' languages, so the commands it gives can run in
             // a console. A Codex chat with Agent Studio's tools shows an artifact from a file, a
@@ -1034,6 +1038,15 @@ impl RunRequest {
         } else {
             ""
         };
+        // A saved conversation can reserve its computer for a measurement (reservations.rs).
+        let reservations = if self.conversation_id.is_some()
+            && self.tools_enabled()
+            && (self.uses_codex_server() || self.uses_claude_visualizer())
+        {
+            crate::reservations::tools::GUIDANCE
+        } else {
+            ""
+        };
         let workflows = if self.workflow_tools() {
             workflow_calls::GUIDANCE
         } else {
@@ -1045,6 +1058,7 @@ impl RunRequest {
             files,
             questions.into(),
             screens.into(),
+            reservations.into(),
             workflows.into(),
         ]
     }

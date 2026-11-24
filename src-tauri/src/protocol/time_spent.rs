@@ -44,6 +44,8 @@ enum Kind {
     User,
     /// The reply's turn ended and it waits for background work.
     Background,
+    /// Another chat holds this computer for a measurement (`reservations`).
+    Held,
     Compaction,
     Other,
     /// Before the reply's turn began, not yet known to be the CLI getting ready or the first
@@ -68,6 +70,7 @@ impl Kind {
             Kind::Hooks => "hooks",
             Kind::User => "user",
             Kind::Background => "background",
+            Kind::Held => "held",
             Kind::Compaction => "compaction",
             Kind::Other => "other",
         }
@@ -316,6 +319,10 @@ impl Ledger {
         let waits = |wait: Wait| self.waits.values().any(|w| *w == wait);
         if waits(Wait::Hook) {
             return self.add(Kind::Hooks, time);
+        }
+        // Waiting for the computer another chat measures with is on hold, whatever else runs.
+        if waits(Wait::Held) {
+            return self.add(Kind::Held, time);
         }
         // Calls of several kinds running side by side share the time.
         let running: Vec<Kind> = [

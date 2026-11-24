@@ -76,6 +76,7 @@ import {
 } from './tool-output';
 import { renderModelViews, type ModelFormat } from './model-scene';
 import { backgroundWorkEventSchema, type BackgroundWorkEvent } from './background-work';
+import { pcSnapshotSchema, type PcSnapshot } from './pc-reservations';
 import { answerSchema, type QuestionAnswer } from './questions';
 import { elicitationInputSchema, type ElicitationInput } from './elicitations';
 import { steeringInputSchema, type SteeringInput } from './steering';
@@ -889,6 +890,31 @@ export function watchBackgroundWork(listener: (event: BackgroundWorkEvent) => vo
         receive({ ...(snapshot as object), kind: 'snapshot' });
     } catch {
       /* Older hosts report background work only while its reply runs. */
+    }
+  })();
+  return () => {
+    stopped = true;
+    unlisten();
+  };
+}
+// Reservations of this computer for performance measurements (src-tauri/src/reservations.rs).
+// Viewers have no host of their own.
+export function watchPcReservations(listener: (snapshot: PcSnapshot) => void) {
+  if (!desktop()) return () => {};
+  let stopped = false;
+  let unlisten = () => {};
+  const receive = (value: unknown) => {
+    const parsed = pcSnapshotSchema.safeParse(value);
+    if (parsed.success && !stopped) listener(parsed.data);
+  };
+  void (async () => {
+    try {
+      const stop = await listen<unknown>('studio-pc', ({ payload }) => receive(payload));
+      if (stopped) stop();
+      else unlisten = stop;
+      receive(await invoke<unknown>('pc_state'));
+    } catch {
+      /* A host older than reservations has none. */
     }
   })();
   return () => {

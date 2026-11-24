@@ -101,11 +101,21 @@ pub enum Wait {
     Tool,
     Agents,
     Hook,
+    /// Another chat holds this computer for a measurement (`reservations`).
+    Held,
 }
 impl ToolActivity {
     /// The reported description of the call.
     pub fn detail(&self) -> Option<&str> {
         self.detail.as_deref()
+    }
+    /// The script a shell call runs, whole.
+    pub fn command(&self) -> Option<&str> {
+        self.command.as_deref()
+    }
+    /// Whether the call runs a command line.
+    pub fn runs_command(&self) -> bool {
+        self.command_run
     }
     /// What the reply waits for while this record runs. Nothing for a sub-agent's own calls,
     /// which its sub-agent stands for, nor for work that went on in the background.
@@ -120,6 +130,7 @@ impl ToolActivity {
                 .any(|a| a.status == "running" && !a.background && a.parent_id.is_none())
                 .then_some(Wait::Agents),
             _ if self.status != "running" || self.background => None,
+            _ if self.operation.as_deref() == Some("pcWait") => Some(Wait::Held),
             "hook" => Some(Wait::Hook),
             _ if self.command_run => Some(Wait::Command),
             _ => Some(Wait::Tool),
@@ -201,6 +212,29 @@ fn is_image_path(path: &str) -> bool {
     [".png", ".jpg", ".jpeg", ".gif", ".webp"]
         .iter()
         .any(|ext| lower.ends_with(ext))
+}
+/// A tool that reserves this computer for a measurement (`reservations::tools`), by its name
+/// without Claude's server prefix.
+fn pc_name(name: &str) -> Option<&str> {
+    let name = name.strip_prefix("mcp__agent_studio__").unwrap_or(name);
+    crate::reservations::tools::NAMES
+        .contains(&name)
+        .then_some(name)
+}
+/// What a reservation call does, with the purpose a reservation names. Its answer, a report on
+/// the computer, is kept as other calls' results are.
+fn pc_tool(tool: &mut ToolActivity, name: &str, input: &Value) {
+    tool.name = match name {
+        "pc_status" => "Check the computer",
+        "pc_reserve" => "Reserve the computer",
+        "pc_wait" => "Wait for the computer",
+        _ => "Release the computer",
+    }
+    .into();
+    tool.operation = Some(if name == "pc_wait" { "pcWait" } else { "pc" }.into());
+    if let Some(purpose) = field(input, "purpose") {
+        tool.detail = Some(purpose);
+    }
 }
 /// Agent Studio's own tools, whose arguments and results other panels already show.
 fn studio_tool(name: &str) -> bool {
@@ -407,6 +441,9 @@ impl ToolDecoder {
                 tool.elapsed_ms = progress::duration_ms(&item["durationMs"]);
                 if thread != root {
                     tool.parent_id = Some(thread.into());
+                }
+                if let Some(pc) = pc_name(&name) {
+                    pc_tool(&mut tool, pc, &item["arguments"]);
                 }
                 // Agent Studio's own tools show their arguments and results in other panels.
                 if studio_tool(&name) {
@@ -944,6 +981,11 @@ impl ToolDecoder {
             .unwrap_or_else(|| fresh(tool_id, category, name));
         tool.parent_id = parent;
         if self.claude_team_tool(&mut tool, name, input) {
+            self.publish(tool, out);
+            return;
+        }
+        if let Some(pc) = pc_name(name) {
+            pc_tool(&mut tool, pc, input);
             self.publish(tool, out);
             return;
         }

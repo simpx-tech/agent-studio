@@ -1409,6 +1409,19 @@ pre {
   background: var(--accent-soft-hover);
   color: var(--accent-hover);
 }
+/* The computer is reserved for a measurement: quiet while other chats' work finishes, in the
+   accent while the measurement runs. */
+.pc-reserved {
+  color: var(--warning);
+}
+.pc-reserved.measuring {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+.pc-reserved.measuring:not(:disabled):hover {
+  background: var(--accent-soft-hover);
+  color: var(--accent-hover);
+}
 .main-area {
   min-width: 0;
   display: flex;

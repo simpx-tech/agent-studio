@@ -47,6 +47,11 @@ while ($null -ne ($line = [Console]::ReadLine())) {
         foreach ($matcher in @($value.request.hooks.SessionStart)) {
             if ($matcher.matcher -eq 'compact') { $compactHooks = @($matcher.hookCallbackIds) }
         }
+        # The gate the host runs before commands while a chat reserves the computer.
+        $gateHooks = @()
+        foreach ($matcher in @($value.request.hooks.PreToolUse)) {
+            if ($matcher) { $gateHooks += @($matcher.hookCallbackIds) }
+        }
         [Console]::WriteLine('{"type":"control_response","response":{"subtype":"success","request_id":"' + $value.request_id + '"}}')
         continue
     }
@@ -128,6 +133,19 @@ while ($null -ne ($line = [Console]::ReadLine())) {
                 Add-Content -LiteralPath $settingsLog -Value ([Console]::ReadLine())
             }
             [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"Done","usage":{"input_tokens":1,"output_tokens":1}}')
+            continue
+        }
+        if ($mode -eq 'Gated') {
+            # A build passes the gate first, then the model waits for the computer with pc_wait,
+            # whose answer comes once the chat measuring with it releases it.
+            foreach ($id in $gateHooks) {
+                [Console]::WriteLine('{"type":"control_request","request_id":"gate-1","request":{"subtype":"hook_callback","callback_id":"' + $id + '","input":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cargo build"},"tool_use_id":"call-1"},"tool_use_id":"call-1"}}')
+                Add-Content -LiteralPath $settingsLog -Value ([Console]::ReadLine())
+            }
+            [Console]::WriteLine('{"type":"control_request","request_id":"wait-1","request":{"subtype":"mcp_message","server_name":"agent_studio","message":{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"pc_wait","arguments":{}}}}}')
+            Add-Content -LiteralPath $settingsLog -Value ([Console]::ReadLine())
+            [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"built","model":"fixture-model","content":[{"type":"text","text":"Built after the benchmark."}],"usage":{"input_tokens":1,"output_tokens":1}}}')
+            [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"Built after the benchmark.","usage":{"input_tokens":1,"output_tokens":1}}')
             continue
         }
         if ($mode -eq 'Agents') {
@@ -360,6 +378,102 @@ async fn a_refused_tool_hears_of_planning_only_while_the_cli_reports_plan_mode()
         assert!(answers[2].contains("Dangerous rm operation"), "{answers:?}");
         assert!(!answers[2].contains("planning"), "{answers:?}");
     }
+}
+
+#[tokio::test]
+async fn the_gate_refuses_commands_while_another_chat_measures_and_pc_wait_answers_once_it_ends() {
+    let root = tempfile::tempdir().unwrap();
+    let conversation = uuid::Uuid::new_v4().to_string();
+    let request = request(
+        root.path(),
+        &conversation,
+        serde_json::json!([{"role":"user","text":"Gated"}]),
+    );
+    let session = request.native_session.as_ref().unwrap().id().to_string();
+    let mut process = fixture(root.path(), &session, false, false);
+    let broker = crate::reservations::Broker::new(
+        Box::new(|_| {}),
+        Box::new(|_| Some("Chunk benchmark".into())),
+        Box::new(Vec::new),
+        None,
+    );
+    broker.reserve(
+        "bench-run",
+        "bench-chat",
+        "Benchmark of chunk meshing",
+        None,
+    );
+    let channel = EventSink::new(|_| Ok(()));
+    let mut questions = Questions::default()
+        .open(&request.run_id, None, channel.clone())
+        .unwrap();
+    questions.pc = Some(crate::reservations::tools::Session::new(
+        broker.clone(),
+        &conversation,
+        &request.run_id,
+    ));
+    // The chat measuring releases the computer once this chat waits for it.
+    let release = {
+        let broker = broker.clone();
+        tokio::spawn(async move {
+            while broker
+                .snapshot()
+                .reservations
+                .first()
+                .is_none_or(|r| r.held == 0)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            broker.release("bench-chat")
+        })
+    };
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        stream_turn(
+            &mut process,
+            &request,
+            Some(&channel),
+            CancellationToken::new(),
+            Some(&mut questions),
+            false,
+        ),
+    )
+    .await
+    .expect("the turn must finish");
+    process.kill().await;
+    assert_eq!(result.unwrap().0, "complete");
+    assert!(release.await.unwrap().is_some());
+    let input = settings_input(root.path());
+    let init = input
+        .iter()
+        .find(|line| line["request"]["subtype"] == "initialize")
+        .unwrap();
+    assert_eq!(
+        init["request"]["hooks"]["PreToolUse"][0]["matcher"],
+        "Bash|PowerShell|Monitor"
+    );
+    assert!(init["request"]["hooks"]["SessionStart"].is_array());
+    let gate = input
+        .iter()
+        .find(|line| line["response"]["request_id"] == "gate-1")
+        .unwrap();
+    let refusal = &gate["response"]["response"]["hookSpecificOutput"];
+    assert_eq!(refusal["permissionDecision"], "deny");
+    assert!(refusal["permissionDecisionReason"]
+        .as_str()
+        .unwrap()
+        .contains("the chat \"Chunk benchmark\""));
+    let wait = input
+        .iter()
+        .find(|line| line["response"]["request_id"] == "wait-1")
+        .unwrap();
+    let text = wait["response"]["response"]["mcp_response"]["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(
+        text.starts_with("The computer is free again after"),
+        "{text}"
+    );
 }
 
 /// The guidance a compaction's hooks gave, their pieces in order, from what the fixture read.

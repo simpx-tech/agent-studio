@@ -402,10 +402,18 @@ impl Registry {
 /// A watch for one conversation's Claude process that reports to this computer's window.
 pub fn watch(app: &tauri::AppHandle, conversation: &str) -> Arc<Watch> {
     let emitter = app.clone();
+    // A reservation of this computer waits for some background work (reservations.rs).
+    let reservations = app
+        .try_state::<Arc<crate::reservations::Broker>>()
+        .map(|broker| broker.inner().clone());
     let watch = Watch::new(
         conversation,
         Box::new(move |event| {
+            let listing = matches!(event, Event::Snapshot(_));
             let _ = emitter.emit(EVENT, event);
+            if let (true, Some(broker)) = (listing, &reservations) {
+                broker.changed();
+            }
         }),
     );
     if let Some(registry) = app.try_state::<Registry>() {

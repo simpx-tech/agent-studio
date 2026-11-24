@@ -255,7 +255,16 @@ pub async fn run(
         &request.run_id,
     )));
     let time = ledger.clone();
+    // Reservations of this computer follow the commands every chat runs (reservations.rs).
+    let reservations = app
+        .try_state::<Arc<crate::reservations::Broker>>()
+        .map(|broker| broker.inner().clone())
+        .filter(|_| request.conversation_id.is_some());
+    let (followed, run) = (reservations.clone(), request.run_id.clone());
     let mut output = EventSink::new(move |mut event| {
+        if let (Some(broker), RunEvent::Tool { tool }) = (&followed, &event) {
+            broker.tool(&run, tool);
+        }
         if let RunEvent::Compaction { compaction } = &mut event {
             compaction.usage_revision = usage_revision.load(Ordering::Relaxed);
         }
@@ -285,6 +294,17 @@ pub async fn run(
         output.clone(),
     )?;
     questions.workflow.attach(workflow);
+    if let (Some(broker), Some(conversation)) = (&reservations, request.conversation_id.as_deref())
+    {
+        if request.tools_enabled() && matches!(request.agent.provider.as_str(), "claude" | "codex")
+        {
+            questions.pc = Some(crate::reservations::tools::Session::new(
+                broker.clone(),
+                conversation,
+                &request.run_id,
+            ));
+        }
+    }
     let tracking = matches!(request.agent.provider.as_str(), "claude" | "codex")
         && request.conversation_id.is_some();
     let mut observation = crate::spend::Observation {
@@ -320,6 +340,10 @@ pub async fn run(
         output.time(|ledger| ledger.begin(run_started));
     }
     let undo_request = request.clone();
+    if let (Some(broker), Some(conversation)) = (&reservations, request.conversation_id.as_deref())
+    {
+        broker.run_started(&request.run_id, conversation);
+    }
     let result = execute(
         app.clone(),
         request,
@@ -330,6 +354,10 @@ pub async fn run(
     )
     .await
     .map(|(status, _)| status);
+    // Its commands ended with it, and a reservation it held ends here.
+    if let Some(broker) = &reservations {
+        broker.run_ended(&undo_request.run_id);
+    }
     let run_duration_ms = run_started.elapsed().as_millis().min(9_007_199_254_740_991) as u64;
     let spent = ledger.lock().unwrap_or_else(|e| e.into_inner()).end();
     if let Some(time_spent) = spent {
@@ -642,6 +670,16 @@ pub(crate) async fn execute(
             let child = command
                 .spawn()
                 .map_err(|_| "Could not launch the provider CLI. Check Connections.")?;
+            // What a chat's CLI starts on Windows belongs to the chat (reservations/jobs.rs).
+            if let (Some(conversation), None, true) = (
+                request.conversation_id.as_deref(),
+                &exe.wsl,
+                request.tools_enabled(),
+            ) {
+                if let Some(broker) = app.try_state::<Arc<crate::reservations::Broker>>() {
+                    broker.jobs.adopt(conversation, &child);
+                }
+            }
             let session_id = request
                 .native_session
                 .as_ref()
@@ -831,8 +869,17 @@ async fn stream_turn(
         }
         prompt_sent = settings.advance(process, &prompt).await?;
     } else {
-        // The process keeps these hooks for every later reply, each answering them as it runs.
-        let init = serde_json::json!({"type":"control_request","request_id":"studio-init","request":{"subtype":"initialize","hooks":crate::providers::after_compaction::hooks()}});
+        // The process keeps these hooks for every later reply, each answering them as it runs:
+        // compactions, and in a chat that can reserve this computer, its gate before commands.
+        let mut hooks = crate::providers::after_compaction::hooks();
+        if questions.as_ref().is_some_and(|q| q.pc.is_some()) {
+            if let (Some(all), serde_json::Value::Object(gate)) =
+                (hooks.as_object_mut(), crate::reservations::tools::hooks())
+            {
+                all.extend(gate);
+            }
+        }
+        let init = serde_json::json!({"type":"control_request","request_id":"studio-init","request":{"subtype":"initialize","hooks":hooks}});
         process
             .stdin
             .write_all(format!("{init}\n").as_bytes())
@@ -848,12 +895,16 @@ async fn stream_turn(
     let mut tool_tick = tokio::time::interval(Duration::from_secs(1));
     tool_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     decoder.compactions.manual = request.compact;
-    let mut visualizer = crate::providers::visualize::Visualizer::with_tools(
-        crate::providers::workflow_calls::tools(
+    let mut visualizer = crate::providers::visualize::Visualizer::with_tools({
+        let mut tools = crate::providers::workflow_calls::tools(
             request.workflow_tools(),
             request.mission.is_some(),
-        ),
-    );
+        );
+        if questions.as_ref().is_some_and(|q| q.pc.is_some()) {
+            tools.extend(crate::reservations::tools::tools());
+        }
+        tools
+    });
     // What a compaction hears again, worked out once its hooks ask (`after_compaction`).
     let mut compaction_guidance = crate::providers::after_compaction::Guidance::default();
     let mut sender = crate::providers::sent_files::FileSender::default();
@@ -902,7 +953,7 @@ async fn stream_turn(
     // The mode the CLI last reported: an approved plan decision changes it during a reply.
     let mut planning = request.agent.plan_mode;
     loop {
-        let (answer_rx, steering_rx, elicitation_rx, take_over_rx, workflow_rx) =
+        let (answer_rx, steering_rx, elicitation_rx, take_over_rx, workflow_rx, pc_rx) =
             match questions.as_mut() {
                 Some(q) => (
                     Some(&mut q.rx),
@@ -910,8 +961,9 @@ async fn stream_turn(
                     Some(&mut q.elicitation.rx),
                     Some(&mut q.take_over.rx),
                     Some(&mut q.workflow.rx),
+                    q.pc.as_mut().map(|pc| &mut pc.rx),
                 ),
-                None => (None, None, None, None, None),
+                None => (None, None, None, None, None, None),
             };
         let mut turn_ended = false;
         tokio::select! {
@@ -995,6 +1047,13 @@ async fn stream_turn(
                     process.stdin.write_all(format!("{}\n", delivery.payload).as_bytes()).await.map_err(|_| "Could not send MCP input to Claude.".to_string())
                 } else { Err("This MCP request is no longer waiting.".into()) };
                 q.delivered(delivery, result);
+            },
+            // The answer to a call of the reservation tools, which may have waited for the computer.
+            Some(answer) = async { match pc_rx { Some(rx) => rx.recv().await, None => std::future::pending().await } }, if !interrupting => {
+                if stdin_open && process.stdin.write_all(format!("{answer}\n").as_bytes()).await.is_err() {
+                    process.healthy = false;
+                    break Err(send_failed.into());
+                }
             },
             line = process.lines.recv() => match line {
                 Some(Line::Err(line)) => {
@@ -1109,6 +1168,11 @@ async fn stream_turn(
                             for event in screen_tools.observe_claude(&value) { if let Some(channel) = channel { if channel.send(event).is_err() { cancel.cancel(); } } }
                             if let Some(q) = &mut questions { q.workflow.observe_claude(&value); }
                             if value["type"] == "control_request" {
+                                // Before a command: another chat may hold this computer for a measurement.
+                                if let Some(answer) = questions.as_ref().and_then(|q| q.pc.as_ref()).and_then(|pc| pc.gate(&value)) {
+                                    process.stdin.write_all(format!("{answer}\n").as_bytes()).await.map_err(|_| send_failed)?;
+                                    continue;
+                                }
                                 // A compaction, automatic or /compact, asks for the guidance its summary replaced.
                                 if let Some(answer) = compaction_guidance.answer(&value, || request.compaction_context()) {
                                     process.stdin.write_all(format!("{answer}\n").as_bytes()).await.map_err(|_| send_failed)?;
@@ -1146,6 +1210,10 @@ async fn stream_turn(
                                 }
                                 if let Some(response) = sender.claude(&value, &staging).await {
                                     process.stdin.write_all(format!("{response}\n").as_bytes()).await.map_err(|_| send_failed)?;
+                                    continue;
+                                }
+                                // Reserving this computer: the answer comes once the call is done.
+                                if questions.as_ref().and_then(|q| q.pc.as_ref()).and_then(|pc| pc.claude(&value)).is_some() {
                                     continue;
                                 }
                                 let response = visualizer.claude_response(&value);

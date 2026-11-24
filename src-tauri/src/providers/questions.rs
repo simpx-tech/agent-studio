@@ -254,6 +254,9 @@ pub struct Session {
     pub elicitation: super::elicitation::Session,
     pub take_over: super::take_over::Session,
     pub workflow: super::workflow_calls::Session,
+    /// The tools that reserve this computer for a measurement, and the gate before commands, in a
+    /// saved Claude or Codex conversation with tools (`reservations::tools`).
+    pub pc: Option<crate::reservations::tools::Session>,
     hub: Questions,
     run_id: String,
     channel: EventSink,
@@ -291,6 +294,7 @@ impl Questions {
             take_over: self.3.open(run_id, connection.clone()),
             workflow: self.4.open(run_id, connection.clone()),
             steering: self.1.open(run_id, connection, channel.clone()),
+            pc: None,
             hub: self.clone(),
             run_id: run_id.into(),
             channel,

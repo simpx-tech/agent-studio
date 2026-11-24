@@ -103,7 +103,9 @@
     Target,
     History as HistoryIcon,
     SearchX,
+    Gauge,
   } from '@lucide/svelte';
+  import { pcReservationTitle, type PcReservation } from '$lib/pc-reservations';
   import {
     abandonedReplyError,
     initialWorkspace,
@@ -136,6 +138,7 @@
     readUsage,
     watchAccountUpdates,
     watchBackgroundWork,
+    watchPcReservations,
     watchUsageRefresh,
     accountUsageRevision,
     generateTitle,
@@ -2034,6 +2037,18 @@
   const localRunning = $derived(Object.keys(runs).length > 0);
   // Background work this computer still runs for each chat, including after its reply.
   let hostBackground = $state<Record<string, HostBackgroundWork>>({});
+  // Reservations of this computer for performance measurements (src/lib/pc-reservations.ts).
+  let pcReservations = $state<PcReservation[]>([]);
+  const pcHolder = $derived(
+    pcReservations[0] &&
+      workspace.conversations.find((c) => c.id === pcReservations[0].conversationId),
+  );
+  const pcTitle = $derived(
+    pcReservationTitle(
+      pcReservations,
+      (id) => workspace.conversations.find((c) => c.id === id)?.title ?? 'Another chat',
+    ),
+  );
   function applyBackgroundWork(event: BackgroundWorkEvent) {
     if (event.kind === 'snapshot') {
       if (event.runs.length)
@@ -3187,6 +3202,9 @@
     );
     const stopAccountUpdates = watchAccountUpdates(applyAccountUpdate);
     const stopBackgroundWork = watchBackgroundWork(applyBackgroundWork);
+    const stopPcReservations = watchPcReservations(
+      (snapshot) => (pcReservations = snapshot.reservations),
+    );
     const stopUsageRefresh = watchUsageRefresh(refreshUsageConnection);
     const stopNotificationView = watchNotificationView(
       () => (loaded && view === 'chat' ? activeId || undefined : undefined),
@@ -3650,6 +3668,7 @@
       shutdown.stop();
       stopAccountUpdates();
       stopBackgroundWork();
+      stopPcReservations();
       stopUsageRefresh();
       stopNotificationView();
       stopNotifications();
@@ -8043,6 +8062,15 @@
               ? 'Restarting…'
               : 'Restart to update'}</span
           ></button
+        >{/if}
+      {#if pcReservations.length}<button
+          class="icon-button pc-reserved"
+          class:measuring={pcReservations[0].phase === 'open'}
+          aria-label={pcTitle}
+          title={pcTitle}
+          disabled={!pcHolder}
+          onclick={() => pcHolder && openConversation(pcHolder)}
+          ><Gauge size={17} aria-hidden="true" /></button
         >{/if}
       <button
         class="icon-button connections-button"
