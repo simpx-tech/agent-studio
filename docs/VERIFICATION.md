@@ -1,5 +1,21 @@
 # Verification — 2026-09-08
 
+## Each chat's row shows its model and account — 2026-11-24
+
+The user asked, on a worktree: "on the list of sessions show at glance what is the model and the account being used (visually, no text)". Each chat's row in the sidebar now ends with `ChatUses.svelte`: the model's print, or its provider's glyph, framed in the account's color, 20px in all (a 2px frame, a 1px line of `--bg-sidebar`, a 14px print). `chatUses` in `src/lib/chat-uses.ts` takes the running reply's model and account while one runs and otherwise the chat's next-reply settings, naming the model as the latest reply ran it while the chat still uses it. Hovering the mark names both, and the row's `aria-describedby` points at it, so its description is the same words while its name stays its title.
+
+Looks tried at 2x in both themes before choosing the frame: an 8px dot after a 16px print (it read as a status dot beside the green finished dot, and took 12px more of the title), a corner badge (its knockout ring cannot match the translucent hover and selected backgrounds), a 3px frame (the print too small) and a bar under the print. The frame merged with prints of its own hue (a violet account around Sonnet, orange around Sol) until the 1px line of the sidebar's surface separated them.
+
+The first version broke 17 existing browser tests, which read rows' text: a CLI default chat's glyph (O, ✳) and the mark's `span` joined each title. The glyph is now drawn by CSS from `data-glyph` and the mark is an `<i>`, so a row's text is its title again, which `tests/sidebar-marks.spec.ts` checks.
+
+- `npm run check`: no diagnostics. `npx vitest run`: 1,063 tests in 123 files, among them `src/lib/chat-uses.test.ts`. `npm run build` passed.
+- Browser suite in three shards on the worktree's own Vite (port 1457, sockets drained before each): 512 of 516 passed at the first run. `app-updates.spec.ts:50` (its page had not received the update state yet, the first-test flake seen before) and three `workflows.spec.ts` tests (Vite optimized `@xyflow/svelte` for the first time on the worktree's fresh cache and reloaded their pages) failed, then passed on rerun, 4 of 4 and 10 of 10.
+- `tests/sidebar-marks.spec.ts`, Edge and WebKit: the print of each line, the frame of each account's color, an unframed print for a removed account, the provider glyph for an unnamed model, one size and one inset for every mark, the row's text, hover title and description, a model chosen for the next reply, and a running reply keeping its account's frame after the next message's account changed, until Stop.
+- Edge's own accessibility tree (CDP `Accessibility.getFullAXTree`) names a row by its title and describes it as "CLI default · Codex CLI login".
+- A 390px phone in WebKit shows each mark before the Move to history button phones always show.
+- No Rust changed: `cargo fmt --check` passed; Clippy and the Rust tests were not run.
+- Choices of mine, not confirmed: one framed mark rather than two icons; its place at the row's end, after the running time; the running reply's model and account while it runs; every account framed, even an agent's only one on a computer; no mark on unsent drafts, snoozed cards and workflow rows; the hover naming both.
+
 ## The time report is a window of its own, with steps, a timeline and sub-agents — 2026-11-24
 
 The user called the first report "a good start" and asked for more: "more eye candy and complete", "a separated page or modal", "which steps took more time (abstractly, for example implementing A took X time, and documenting (step 1/2) took Y time)", and "the report including subagents as well".

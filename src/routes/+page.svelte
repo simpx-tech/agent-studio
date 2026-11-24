@@ -338,6 +338,8 @@
   } from '$lib/account-balance';
   import { expectedLimits, rememberShownLimits } from '$lib/shown-limits';
   import AccountMark from '$lib/components/AccountMark.svelte';
+  import ChatUses from '$lib/components/ChatUses.svelte';
+  import { chatUses } from '$lib/chat-uses';
   import {
     registerInstallation,
     registerWslEnvironments,
@@ -1374,6 +1376,28 @@
     return connection
       ? accountColorValue(colorsByAccount.get(connection.accountId)?.color)
       : undefined;
+  }
+  // The account of each connection as a chat's row marks it: its color and its name.
+  const rowAccounts = $derived(
+    new Map(
+      workspace.fleet.connections.map((connection) => [
+        connection.id,
+        {
+          color: accountColorValue(colorsByAccount.get(connection.accountId)?.color),
+          name: workspace.fleet.accounts.find((a) => a.id === connection.accountId)?.name,
+        },
+      ]),
+    ),
+  );
+  /** The model and account a chat's row marks, named for its description. */
+  function rowUses(c: Conversation, running: Message | undefined) {
+    const uses = chatUses(c, running);
+    const account = uses.connectionId ? rowAccounts.get(uses.connectionId) : undefined;
+    return {
+      mark: modelMark(uses.provider, uses.model),
+      color: account?.color,
+      label: [uses.model, account?.name].filter(Boolean).join(' · '),
+    };
   }
   const agentOptions = $derived.by(() => {
     const preview = !desktop() && !paired && !selectedComputer;
@@ -7437,13 +7461,14 @@
     monitors,
     plan,
     snoozed,
-  )}
+  )}{@const uses = rowUses(c, runningReply)}
   <div class="conversation-row" data-order={c.id}>
     <button
       class="conversation-item"
       class:pinned-item={!!pinned}
       class:current={activeId === c.id && view === 'chat'}
       aria-current={activeId === c.id && view === 'chat' ? 'page' : undefined}
+      aria-describedby={`uses-${c.id}`}
       aria-haspopup="menu"
       data-conversation={c.id}
       data-order-handle
@@ -7498,7 +7523,12 @@
           size={14}
           class="conversation-snoozed"
           aria-hidden="true"
-        />{/if}</button
+        />{/if}<ChatUses
+        id={`uses-${c.id}`}
+        mark={uses.mark}
+        color={uses.color}
+        label={uses.label}
+      /></button
     >{#if !c.archived && !conversationRunning(c)}<button
         class="conversation-archive"
         title="Move to history"

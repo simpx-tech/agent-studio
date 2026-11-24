@@ -86,9 +86,16 @@ at a glance: `AccountMark.svelte` draws the agent's glyph in `--text-inverse` on
 color, as a 28px tile in an Agent picker choice, a 20px chip on the Agent trigger and a 52px tile
 on a new chat's welcome. `.account-dot` is the same color as an 8px dot before an account's name
 in running text, 10px beside a Connections heading. Set `--account-color` from
-`accountColorValue`, never a raw color. Only accounts the Agent picker names are filled: an agent
-with one account on a computer keeps its tinted provider mark and the bot icon. Manage account
-shows the palette as 22px swatches in one radio group, the chosen one ringed in its own color.
+`accountColorValue`, never a raw color. In the Agent picker only accounts it names are filled: an
+agent with one account on a computer keeps its tinted provider mark and the bot icon. Manage
+account shows the palette as 22px swatches in one radio group, the chosen one ringed in its own
+color.
+
+A chat's row in the sidebar ends with both identities in one 20px mark (`ChatUses.svelte`): the
+model's 14px print, or the provider glyph on its tint, framed in the account's color, with a 1px
+line of `--bg-sidebar` between frame and print so a frame keeps its hue beside a print of the
+same color. Every account is framed there, and a chat whose account is gone keeps its print
+unframed in the same place, so the marks form one column at the rows' end.
 
 ## Themes
 
