@@ -79,10 +79,10 @@ pub fn tools() -> Vec<Value> {
             MESSAGE_DESCRIPTION,
             json!({
                 "chat": chat,
-                "text":{"type":"string","minLength":1,"description":"The message."},
+                "message":{"type":"string","minLength":1,"description":"The message."},
                 "hand_over":{"type":"boolean","description":"Ask that chat to hand over what it holds for this chat's measurement. Only while this chat holds the computer."}
             }),
-            &["chat", "text"],
+            &["chat", "message"],
         ),
     ]
 }
@@ -288,7 +288,8 @@ fn fields(name: &str) -> &'static [&'static str] {
     match name {
         RESERVE => &["purpose", "minutes"],
         STOP => &["chat", "programs", "background"],
-        MESSAGE => &["chat", "text", "hand_over"],
+        // `text` too, as an agent may name the message.
+        MESSAGE => &["chat", "message", "hand_over", "text"],
         _ => &[],
     }
 }
@@ -374,11 +375,12 @@ async fn act(
                 .await
         }
         MESSAGE => {
-            let text = args["text"]
+            let text = args["message"]
                 .as_str()
+                .or_else(|| args["text"].as_str())
                 .map(str::trim)
                 .filter(|t| !t.is_empty())
-                .ok_or("Write the message in text.")?;
+                .ok_or("Write the message.")?;
             broker.message(
                 conversation,
                 chat()?,

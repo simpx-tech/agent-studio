@@ -54,6 +54,29 @@ const GIT: &[&str] = &[
     "whatchanged",
 ];
 
+/// Whether a line is one a CLI hook put before the agent's command, running a script under a
+/// hooks folder, as `primaryCommand` in `src/lib/tool-presentation.ts` tells them: a Codex
+/// `PreToolUse` hook may prepend one to every command it lets run.
+pub fn hook_line(line: &str) -> bool {
+    static LINE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    LINE.get_or_init(|| {
+        regex::Regex::new(
+            r#"(?i)^(?:&\s*)?["']?(?:node|python3?|py|pwsh|powershell|bash|sh|deno|bun)(?:\.exe)?["']?\s+["']?[^"'\s]*[\\/]hooks?[\\/]"#,
+        )
+        .expect("the hook line pattern")
+    })
+    .is_match(line.trim())
+}
+
+/// A command as its agent wrote it, without the lines CLI hooks put before it.
+pub fn own(command: &str) -> String {
+    command
+        .lines()
+        .filter(|line| !hook_line(line))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Whether every part of `command` is light. Parts are what `&&`, `||`, `;`, `|` and line
 /// breaks separate.
 pub fn is_light(command: &str) -> bool {
@@ -162,6 +185,31 @@ fn program_name(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_a_cli_hook_put_before_the_command_is_not_the_agent_s() {
+        // A user's Codex PreToolUse hook prepends one to every command it lets run.
+        let command = "node \"C:/Users/u/.codex/hooks/claude-context/context-hook.cjs\" --record-cwd 2d2a\ngit status --short";
+        assert!(hook_line(command.lines().next().unwrap()));
+        assert_eq!(own(command), "git status --short");
+        assert!(is_light(&own(command)));
+        assert!(!is_light(command));
+        for line in [
+            "& node.exe C:\\x\\hooks\\gate.js",
+            "python3 ~/.claude/hook/check.py",
+            "bash ./hooks/pre.sh",
+        ] {
+            assert!(hook_line(line), "{line}");
+        }
+        for line in [
+            "node build.js",
+            "git status",
+            "npm run hooks",
+            "node scripts/webhooks.js",
+        ] {
+            assert!(!hook_line(line), "{line}");
+        }
+    }
 
     #[test]
     fn reading_listing_searching_and_asking_git_are_light() {

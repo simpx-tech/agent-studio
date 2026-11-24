@@ -138,6 +138,8 @@ struct State {
     messages: Vec<Message>,
     /// The replies that read messages, by run id.
     readers: HashMap<String, Reader>,
+    /// What chats stopped before they reserved, for the reservation each makes next.
+    prepared: Vec<Stopping>,
     next: u64,
     ticking: bool,
 }
@@ -334,7 +336,8 @@ impl Broker {
                 return;
             };
             if tool.status == "running" {
-                let command = tool.command().unwrap_or_default();
+                // As its agent wrote it: a CLI hook may put a line of its own before it.
+                let command = light::own(tool.command().unwrap_or_default());
                 let read = (command.len(), tool.detail().map_or(0, str::len));
                 if run
                     .calls
@@ -347,7 +350,7 @@ impl Broker {
                     tool.id.clone(),
                     Call {
                         label: label_of(tool),
-                        light: !command.is_empty() && light::is_light(command),
+                        light: !command.is_empty() && light::is_light(&command),
                         read,
                     },
                 );
@@ -417,6 +420,8 @@ impl Broker {
     /// it did not read go back to their senders as a notice. Returns whether an ask ended.
     fn reply_gone(&self, state: &mut State, conversation: &str, now: Instant) -> bool {
         let mut ended = false;
+        // What it stopped without reserving afterwards reports nowhere.
+        state.prepared.retain(|s| s.by != conversation);
         for reservation in state.queue.iter_mut() {
             for ask in reservation
                 .asks
@@ -698,7 +703,10 @@ impl Broker {
             self.view(&state)
         };
         self.publish(snapshot);
-        let mut text = format!("Handed over to {} ({purpose}). ", self.named(&holder));
+        let mut text = format!(
+            "Handed over to {} for its measurement ({purpose}). ",
+            self.named(&holder)
+        );
         if closed.is_empty() {
             text.push_str("This chat left no programs running.");
         } else {
@@ -787,21 +795,26 @@ impl Broker {
             Some(release) if has_background => release(conversation.clone()).await,
             _ => false,
         };
-        // The reservation holding the computer reports it.
+        // The caller's reservation reports it: the one it holds, or the one it makes next, since
+        // a chat clears the computer before it reserves as often as after.
+        let stopping = Stopping {
+            by: caller.into(),
+            conversation: conversation.clone(),
+            outcomes: outcomes.clone(),
+            background: released,
+        };
         let snapshot = {
             let mut state = self.lock();
-            match state.queue.first_mut() {
-                Some(first) => {
-                    first.stopped.push(Stopping {
-                        by: caller.into(),
-                        conversation: conversation.clone(),
-                        outcomes: outcomes.clone(),
-                        background: released,
-                    });
+            match state.queue.iter_mut().find(|r| r.conversation == caller) {
+                Some(reservation) => {
+                    reservation.stopped.push(stopping);
                     self.settled(&mut state, Instant::now());
                     Some(self.view(&state))
                 }
-                None => None,
+                None => {
+                    state.prepared.push(stopping);
+                    None
+                }
             }
         };
         if let Some(snapshot) = snapshot {
@@ -864,6 +877,12 @@ impl Broker {
             } else {
                 state.next += 1;
                 let id = format!("pc-{}", state.next);
+                // What it stopped while it prepared belongs to this reservation.
+                let (prepared, rest): (Vec<Stopping>, Vec<Stopping>) =
+                    std::mem::take(&mut state.prepared)
+                        .into_iter()
+                        .partition(|s| s.by == conversation);
+                state.prepared = rest;
                 state.queue.push(Reservation {
                     id,
                     conversation: conversation.into(),
@@ -880,7 +899,7 @@ impl Broker {
                     refused: 0,
                     refused_calls: HashSet::new(),
                     asks: vec![],
-                    stopped: vec![],
+                    stopped: prepared,
                     measure: machine::Window::default(),
                 });
             }
@@ -1021,7 +1040,8 @@ impl Broker {
                 .asks
                 .iter()
                 .any(|a| a.conversation == conversation && a.ended.is_none() && !a.closing);
-            if first.conversation == conversation || asked || light::is_light(command) {
+            if first.conversation == conversation || asked || light::is_light(&light::own(command))
+            {
                 return None;
             }
             first.refused += 1;
@@ -1962,7 +1982,11 @@ fn held(r: &Reservation, waits: &[Wait], now: Instant) -> Held {
 fn label_of(tool: &ToolActivity) -> String {
     let command = tool
         .command()
-        .and_then(|c| c.lines().map(str::trim).find(|l| !l.is_empty()))
+        .and_then(|c| {
+            c.lines()
+                .map(str::trim)
+                .find(|l| !l.is_empty() && !light::hook_line(l))
+        })
         .map(|line| format!("`{}`", shortened(line, 160)));
     match (tool.detail(), command) {
         (Some(detail), Some(command)) if !detail.trim().is_empty() => {

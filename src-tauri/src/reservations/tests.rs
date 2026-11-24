@@ -439,7 +439,7 @@ async fn a_chat_asked_to_hand_over_works_on_and_the_window_waits_for_it() {
     // Handing over opens the window, and its commands wait from then on.
     let handed = broker.hand_over("ui").await.unwrap().unwrap();
     assert!(
-        handed.starts_with("Handed over to the chat \"Chunk benchmark\" (id bench) (Benchmark). This chat left no programs running. From now on your commands wait"),
+        handed.starts_with("Handed over to the chat \"Chunk benchmark\" (id bench) for its measurement (Benchmark). This chat left no programs running. From now on your commands wait"),
         "{handed}"
     );
     assert_eq!(broker.snapshot().reservations[0].phase, "open");
@@ -585,6 +585,18 @@ async fn only_what_a_chat_that_no_longer_replies_left_running_is_stopped() {
         "Its background work stopped with its CLI, which starts again with its next reply."
     );
     assert_eq!(*released.lock().unwrap(), ["srv"]);
+    // What a chat stopped before reserving belongs to the reservation it makes next.
+    broker.reserve("run-bench", "bench", "Benchmark", None);
+    let report = broker.release("bench").unwrap();
+    assert!(
+        report.text.contains(
+            "This chat stopped what another chat left running: its background work stopped with its CLI."
+        ),
+        "{}",
+        report.text
+    );
+    assert_eq!(report.record["stopped"][0]["background"], true);
+    assert_eq!(report.record["stopped"][0]["conversationId"], "srv");
 }
 
 /// A chat's CLI whose command started a program and let it go, as an editor started from a

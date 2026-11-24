@@ -258,7 +258,7 @@ fn pc_tool(tool: &mut ToolActivity, name: &str, input: &Value) {
         tool.detail = Some(detail);
     }
     if name == "chat_message" {
-        if let Some(text) = field(input, "text") {
+        if let Some(text) = field(input, "message").or_else(|| field(input, "text")) {
             fact(tool, "Message", text);
         }
         if input["hand_over"] == true {
@@ -1719,7 +1719,7 @@ mod tests {
             (
                 "ask",
                 "mcp__agent_studio__chat_message",
-                json!({"chat":"Level art","text":"Close the editor when you can.","hand_over":true}),
+                json!({"chat":"Level art","message":"Close the editor when you can.","hand_over":true}),
             ),
             (
                 "stop",

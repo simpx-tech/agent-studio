@@ -78,7 +78,10 @@ or its reply ends.
   WSL Codex chat's commands are not held yet: one that runs during a window is in the report.
 - **What runs** is what the replies running on this computer report: each command and monitor
   from its start until it ends (`Broker::tool`, fed by every chat run's events), and the
-  background work chats' CLIs keep (`background_work`).
+  background work chats' CLIs keep (`background_work`). A command is named, and judged light, as
+  its agent wrote it: lines a CLI hook put before it, running a script under a `hooks` folder,
+  are left out, as the window's `primaryCommand` leaves them out (a user's Codex `PreToolUse`
+  hook may prepend one to every command, which made every Codex command read as that line).
 
 `pc_wait` waits as long as the computer stays reserved. Its answer, like every answer of these
 tools, goes back to the CLI through the run's own channel (`Session::rx`), so a long wait never
@@ -144,7 +147,9 @@ reservation:
 - when the window opened after the reservation, and how long it stayed open;
 - what kept it closed, each chat's command with how long it ran meanwhile, and the chats asked
   to hand over, with when they read the request and how and when it ended;
-- what was stopped while it held the computer, and by which chat;
+- what was stopped for it, and by which chat: a chat's stops go to the reservation it holds,
+  or to the one it makes next in the same reply, since a chat clears the computer before it
+  reserves as often as after;
 - other chats' work that ran while it was open anyway (Codex commands, work left running);
 - the computer while it was open, read every two seconds: CPU on average and at most, the
   measuring chat's processes apart from everything else, memory in use and free, and the busiest
