@@ -812,5 +812,16 @@ async fn installed_codex_reports_where_its_time_went() {
     );
     // One request ran the command and another answered.
     assert!(spent.requests >= 2, "{spent:?}");
+    // The same time in order, the command's stretch among it.
+    let timeline = spent
+        .timeline
+        .as_ref()
+        .expect("A reply that took time has a timeline");
+    let stretches: u64 = timeline.runs.chunks(2).map(|run| run[1]).sum();
+    assert!(
+        stretches <= elapsed && elapsed - stretches < 250,
+        "{stretches} of {elapsed}"
+    );
+    assert!(timeline.kinds.contains(&"commands"), "{timeline:?}");
     process.kill().await;
 }

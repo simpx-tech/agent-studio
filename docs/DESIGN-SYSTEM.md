@@ -50,6 +50,7 @@ named colors, so every surface follows the selected theme.
 | Status       | `--success`, `--warning`, `--danger`, `--info` with `-soft`/`-border` variants, `--danger-solid`                                 | Meaningful states and destructive actions                   |
 | Usage        | `--pace-*`, `--meter-*`, `--quota-guide`, `--quota-guide-over`, `--quota-excess`                                                 | Limit bars and pace indicators                              |
 | Accounts     | `--account-red`, `-orange`, `-yellow`, `-green`, `-teal`, `-blue`, `-violet`, `-pink`, `-brown`, `-gray`                         | The color that marks each account                           |
+| Time report  | `--time-model`, `--time-work`, `--time-hold`, `--time-overhead`, `--time-unknown`                                                | Who spent a reply’s time, in its report                     |
 | Code         | `--code-*`, `--syntax-*`, `--diff-*`                                                                                             | Code blocks, highlighting and diffs                         |
 | Type         | `--font-sans` (Geist), `--font-mono` (Geist Mono), `--text-2xs…3xl`, `--leading-*`, `--tracking-*`                               | All text                                                    |
 | Shape        | `--radius-*`, `--control-*`, `--shadow-sm…xl`, `--backdrop`                                                                      | Corners, control heights, elevation                         |

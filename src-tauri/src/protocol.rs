@@ -388,6 +388,10 @@ impl Decoder {
     pub fn take_tool_outputs(&mut self) -> Vec<activity::CapturedOutput> {
         self.tools.take_outputs()
     }
+    /// The reply began at `origin`: its calls and sub-agents record when each began from there.
+    pub fn time_from(&mut self, origin: std::time::Instant) {
+        self.tools.time_from(origin);
+    }
     /// The records of this reply's calls and native workflows, for whatever follows its
     /// sub-agents and workflows once it handed its process to the next reply.
     pub fn hand_over(&mut self) -> (activity::ToolDecoder, workflow::WorkflowDecoder) {

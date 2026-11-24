@@ -55,9 +55,24 @@ Claude supplies `total_cost_usd` in each result, including failed results when p
 
 ## Where a reply's time went
 
-Requested 2026-11-24: a report for every chat of where the agent spent its time, to learn what to change so that later chats take less of it. A reply's timing row opens it, above the tokens and cost: **This response** or the **Whole chat**, as Files edited switches scope.
+Requested 2026-11-24: a report for every chat of where the agent spent its time, to learn what to change so that later chats take less of it, then as a window of its own that also tells which steps took the time and what the sub-agents did.
 
-| Row | What the reply waited on |
+A reply's timing row opens a summary above its tokens and cost: the total, the model requests it made, and a row for each thing it waited on, largest first. **Open report** there, **Time report** in the chat's toolbar and `/time` open the report window, for the **Whole chat** or **One response**, with arrows between responses, each named by what was asked.
+
+| Section | What it shows |
+| --- | --- |
+| Total | The time, the model requests, and who spent it: **Model**, **Commands and tools**, **On hold** (waiting for you or for background work) and **Overhead** (starting, compacting, the rest), as one bar and a tile each |
+| Timeline | One response's time in order, coloured by who spent it, with the steps of its plan and its sub-agents drawn under it; the pointer names the moment, what the reply waited on and the step |
+| Responses | Each reply of the chat with its time and what it was made of; a row opens that reply |
+| Steps | **Plan**: each step of the reply's plan with the time it was in progress, in how many stretches, and what that time was made of, then what no step covered. **Notes**: the stretches between the agent's own progress comments, each named by the comment's first line, longest first |
+| Sub-agents | Each sub-agent with how long it ran, its calls, and how much of its time was its own calls rather than its model |
+| What it waited on | The rows of the summary, with the family each belongs to |
+| Commands | The reply's commands by what they did: tests, builds and checks, Git, packages, scripts and the like, judged from each command's own text |
+| Longest calls, Longest to write | Calls by their own run time, and by the time the model took to write them, calls that did the same counted together |
+
+What a reply waited on:
+
+| Row | Meaning |
 | --- | --- |
 | Starting | The CLI getting ready for the turn: its process, session and startup hooks |
 | Waiting for the model | Each request, from when it went out until its answer began |
@@ -69,16 +84,20 @@ Requested 2026-11-24: a report for every chat of where the agent spent its time,
 | Compacting | A compaction of the context |
 | Not recorded | Replies saved before 2026-11-24, and what followed the last reading of a reply that was cut off |
 
-Rows are sorted by time, each with a bar as long as its share, and the total names the model requests the reply made and how many the CLI sent again. **Longest calls** lists calls by their own run time and **Longest to write** by the time the model took to write them, calls that did the same counted together (`×6`, `2 failed`); a question's or a wait's time is never its call's. **Copy report** copies the shown scope as Markdown, with twenty calls of each list, to paste into a chat and ask what to change.
+**Copy report** copies the shown scope as Markdown, with twenty rows of each list, to paste into a chat and ask what to change.
 
 The computer running the reply keeps the ledger while it runs (`src-tauri/src/protocol/time_spent.rs`), because only it sees the provider's lines as they happen: every moment goes to exactly one row, so the rows add up to the reply's elapsed time. When several things hold at once, the user comes first, then a compaction, then the model while it answers, then hooks, calls and sub-agents, then background work. Claude Code runs a call as soon as the model has written it, while the model writes the next one, so a call running meanwhile holds nothing up and the time is the model's; a sub-agent's own thinking and calls count as the sub-agent; kinds of calls running side by side share the time; a command left in the background counts for nothing until the reply waits for it.
+
+Steps come from what the agent itself says it is doing. A plan step's time runs from the moment the plan marks it in progress (Claude's task and todo tools, Codex's plan updates) until another step, or none, is; a step taken up again adds to its time. Replies without a plan still have their notes: each comment the model writes between its calls begins a stretch that lasts until the next one. Neither is a guess from the calls.
 
 What each provider reports decides how exact a row is:
 
 - **Claude** streams every part of an answer, so thinking, writing and writing calls are measured from each block's start. Its CLI replays the message only once the first request is answered, so the reply's first wait runs from the turn's `system init`. Each call's record also keeps how long the model took to write it (`writeMs`); the rest of its elapsed time is its run.
 - **Codex** reports reasoning and messages as they start and a call only when it runs, so the time between the model's last part and a call is counted as writing that call. Reasoning it does not report while it happens stays in Waiting for the model.
 
-The ledger is saved with the reply as `timeSpent`: milliseconds by row and two counts, nothing a reply said or ran. A running reply reports it about once a minute, so one cut off keeps most of it, and whole at its end. The report itself is derived in the window when its panel opens (`src/lib/time-report.ts`) and never saved. Antigravity replies, background requests and imported chats record no ledger; their calls still appear in the lists when they recorded their time.
+The ledger is saved with the reply as `timeSpent`: milliseconds by row, the same time in order, the moments its plan's steps and its notes began, and two counts. The timeline joins stretches shorter than a 1,500th of the reply with their neighbours, as the kind that took most of them, so a reply of hours keeps a timeline of a few kilobytes that a chart can still draw point by point; the totals stay exact. Each call's record keeps when it began in its reply, and each sub-agent when it began and how long it ran. A running reply reports its ledger about once a minute, so one cut off keeps most of it, and whole at its end. The report itself is derived in the window when it is shown (`src/lib/time-report.ts`) and never saved. Antigravity replies, background requests and imported chats record no ledger; their calls still appear in the lists when they recorded their time.
+
+The window's four colours are tokens of their own (`--time-model`, `--time-work`, `--time-hold`, `--time-overhead`): blue, green and orange that a validator of colour-blind separation passed against both themes' surfaces for every pair, and gray. They are never the status colours, and every bar is labelled, so no reading depends on colour alone.
 
 ## Subscription limits
 

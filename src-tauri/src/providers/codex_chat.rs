@@ -375,6 +375,9 @@ pub async fn run(
     let mut pending: HashMap<u64, Kind> = HashMap::new();
     let mut steering = HashMap::new();
     let mut decoder = Decoder::default();
+    if let Some(began) = channel.and_then(EventSink::began) {
+        decoder.time_from(began);
+    }
     let mut startup_hooks = Vec::new();
     decoder.compactions.manual = request.compact;
     let mut thread = String::new();

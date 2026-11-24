@@ -3,10 +3,13 @@
 //! the model, before it answers a request, while it thinks, writes, or writes a call; a command,
 //! another tool, a sub-agent or a hook; the user; background work; a compaction. The computer
 //! running the reply keeps this ledger as the provider's lines arrive, since only it sees them
-//! when they happen, and the reply saves what it reports.
+//! when they happen, and the reply saves what it reports: the time by kind, the same as a
+//! timeline, and when each step of the reply's plan and each of its notes began, so that a
+//! report can say what a step took and what it was made of.
 //!
 //! The model's part comes from the provider's own lines (`claude`, `codex`), everything else from
-//! the events the reply already reports (`event`). Only times and counts are kept: no text.
+//! the events the reply already reports (`event`). Times, counts, the ids of notes and the
+//! titles of plan steps are kept, all of which the reply saves anyway: nothing it said or ran.
 use super::activity::Wait;
 use super::RunEvent;
 use serde::Serialize;
@@ -16,6 +19,11 @@ use std::time::{Duration, Instant};
 
 /// How often a running reply reports its ledger, so that one cut off keeps most of it.
 const REPORT_EVERY: Duration = Duration::from_secs(60);
+
+/// How finely the saved timeline tells a reply's time apart: stretches shorter than this share
+/// of it join their neighbours, the kind that took most of them standing for all. A chart of
+/// the timeline is no wider than this many points, and a long reply's stays small.
+const TIMELINE_STRETCHES: u32 = 1500;
 
 /// What a reply waits on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -38,14 +46,21 @@ enum Kind {
     Background,
     Compaction,
     Other,
+    /// Before the reply's turn began, not yet known to be the CLI getting ready or the first
+    /// request under way.
+    Opening,
+    /// The model writes a part of its answer that shows only once it arrives.
+    Unsettled,
 }
 impl Kind {
     fn key(self) -> &'static str {
         match self {
-            Kind::Startup => "startup",
+            // A reply whose turn never began was starting.
+            Kind::Startup | Kind::Opening => "startup",
             Kind::Waiting => "waiting",
             Kind::Thinking => "thinking",
-            Kind::Writing => "writing",
+            // What the model spends on a part not yet known reads as writing until it is.
+            Kind::Writing | Kind::Unsettled => "writing",
             Kind::Calls => "calls",
             Kind::Commands => "commands",
             Kind::Tools => "tools",
@@ -80,6 +95,29 @@ impl Model {
     }
 }
 
+/// The reply's time in the order it passed: what it waited on, stretch after stretch.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct Timeline {
+    pub kinds: Vec<&'static str>,
+    /// For each stretch its kind's place in `kinds`, then its milliseconds.
+    pub runs: Vec<u64>,
+}
+
+/// From `at` milliseconds into the reply, this step of its plan was in progress, or none was.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct StepMark {
+    pub at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+/// At `at` milliseconds into the reply, the model began the note with this id.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct NoteMark {
+    pub at: u64,
+    pub id: String,
+}
+
 /// A reply's ledger as it is saved: milliseconds by what the reply waited on.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -95,6 +133,12 @@ pub struct TimeSpent {
     /// Requests the CLI sent again after the provider failed them.
     #[serde(skip_serializing_if = "is_zero")]
     pub retries: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeline: Option<Timeline>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<StepMark>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<NoteMark>,
 }
 fn is_zero(n: &u64) -> bool {
     *n == 0
@@ -103,14 +147,15 @@ fn is_zero(n: &u64) -> bool {
 #[derive(Default)]
 pub struct Ledger {
     run_id: String,
+    began: Option<Instant>,
     /// The moment accounted for last; none before the reply begins and after it ends.
     since: Option<Instant>,
-    spent: HashMap<Kind, Duration>,
-    /// Time the model spent on a part of its answer not yet known.
-    unsettled: Duration,
-    /// Time before the reply's turn began that is not yet known to be the CLI getting ready or
-    /// the first request under way.
-    opening: Duration,
+    /// What the reply waited on, stretch after stretch.
+    runs: Vec<(Kind, Duration)>,
+    /// Where the stretches before the turn that are not yet known begin.
+    opening_from: usize,
+    /// Where the stretches of an answer's part not yet known begin, while the model writes one.
+    unsettled_from: Option<usize>,
     /// The reply's turn began: the CLI took its message, or the model answers.
     started: bool,
     model: Model,
@@ -122,10 +167,83 @@ pub struct Ledger {
     asking: HashSet<String>,
     compacting: HashSet<String>,
     background: bool,
+    /// The step of the reply's plan in progress, and when each began.
+    step: Option<String>,
+    steps: Vec<StepMark>,
+    /// When the model began each of the reply's notes.
+    noted: HashSet<String>,
+    notes: Vec<NoteMark>,
     requests: u64,
     retries: u64,
     revision: u64,
     reported: Option<Instant>,
+}
+
+fn push(runs: &mut Vec<(Kind, Duration)>, kind: Kind, time: Duration) {
+    match runs.last_mut() {
+        Some((last, total)) if *last == kind => *total += time,
+        _ => runs.push((kind, time)),
+    }
+}
+
+/// The timeline of `runs` at the fineness it is saved with.
+fn timeline(runs: &[(Kind, Duration)]) -> Option<Timeline> {
+    let total: Duration = runs.iter().map(|run| run.1).sum();
+    let shortest = total / TIMELINE_STRETCHES;
+    let mut kept: Vec<(Kind, Duration)> = vec![];
+    // Short stretches gather until together they are long enough to show.
+    let mut short: Vec<(Kind, Duration)> = vec![];
+    let gathered = |short: &[(Kind, Duration)]| short.iter().map(|run| run.1).sum::<Duration>();
+    let settle = |short: &mut Vec<(Kind, Duration)>, kept: &mut Vec<(Kind, Duration)>| {
+        let mut most: Option<(Kind, Duration)> = None;
+        for &(kind, _) in short.iter() {
+            let time: Duration = short.iter().filter(|r| r.0 == kind).map(|r| r.1).sum();
+            if most.is_none_or(|(_, longest)| time > longest) {
+                most = Some((kind, time));
+            }
+        }
+        if let Some((kind, _)) = most {
+            push(kept, kind, gathered(short));
+        }
+        short.clear();
+    };
+    for &(kind, time) in runs {
+        if time >= shortest {
+            settle(&mut short, &mut kept);
+            push(&mut kept, kind, time);
+        } else {
+            short.push((kind, time));
+            if gathered(&short) >= shortest {
+                settle(&mut short, &mut kept);
+            }
+        }
+    }
+    settle(&mut short, &mut kept);
+    // Whole milliseconds that add up to the reply's: each stretch ends where its time does.
+    let mut timeline = Timeline::default();
+    let (mut passed, mut counted) = (Duration::ZERO, 0);
+    for (kind, time) in kept {
+        passed += time;
+        let end = passed.as_millis() as u64;
+        let ms = end - counted;
+        counted = end;
+        if ms == 0 {
+            continue;
+        }
+        let key = kind.key();
+        let place = match timeline.kinds.iter().position(|k| *k == key) {
+            Some(place) => place,
+            None => {
+                timeline.kinds.push(key);
+                timeline.kinds.len() - 1
+            }
+        } as u64;
+        match timeline.runs.as_mut_slice() {
+            [.., last, total] if *last == place => *total += ms,
+            _ => timeline.runs.extend([place, ms]),
+        }
+    }
+    (!timeline.runs.is_empty()).then_some(timeline)
 }
 
 impl Ledger {
@@ -138,12 +256,34 @@ impl Ledger {
 
     /// The reply's own time starts here.
     pub fn begin(&mut self, now: Instant) {
+        self.began = Some(now);
         self.since = Some(now);
         self.reported = Some(now);
     }
 
+    /// When the reply's time started, which what it records is counted from.
+    pub fn began(&self) -> Option<Instant> {
+        self.began
+    }
+
     fn add(&mut self, kind: Kind, time: Duration) {
-        *self.spent.entry(kind).or_default() += time;
+        push(&mut self.runs, kind, time);
+    }
+
+    /// What was counted as `was` from the stretch `from` on turned out to be `is`.
+    fn settle(&mut self, from: usize, was: Kind, is: Kind) {
+        for run in self.runs.iter_mut().skip(from) {
+            if run.0 == was {
+                run.0 = is;
+            }
+        }
+    }
+
+    /// Milliseconds into the reply.
+    fn at(&self, now: Instant) -> u64 {
+        self.began.map_or(0, |began| {
+            now.saturating_duration_since(began).as_millis() as u64
+        })
     }
 
     /// Gives the time since the last moment accounted for to what the reply waited on. One thing
@@ -158,8 +298,7 @@ impl Ledger {
             return;
         }
         if !self.started {
-            self.opening += time;
-            return;
+            return self.add(Kind::Opening, time);
         }
         if !self.asking.is_empty() {
             return self.add(Kind::User, time);
@@ -171,10 +310,7 @@ impl Ledger {
             Model::Thinking => return self.add(Kind::Thinking, time),
             Model::Writing => return self.add(Kind::Writing, time),
             Model::Calling => return self.add(Kind::Calls, time),
-            Model::Unsettled => {
-                self.unsettled += time;
-                return;
-            }
+            Model::Unsettled => return self.add(Kind::Unsettled, time),
             Model::Idle | Model::Waiting => {}
         }
         let waits = |wait: Wait| self.waits.values().any(|w| *w == wait);
@@ -219,16 +355,16 @@ impl Ledger {
         if self.model == Model::Waiting && next.answering() {
             self.requests += 1;
         }
-        let unsettled = std::mem::take(&mut self.unsettled);
-        if !unsettled.is_zero() {
-            self.add(
-                match next {
-                    Model::Thinking => Kind::Thinking,
-                    Model::Calling => Kind::Calls,
-                    _ => Kind::Writing,
-                },
-                unsettled,
-            );
+        if let Some(from) = self.unsettled_from.take() {
+            let written = match next {
+                Model::Thinking => Kind::Thinking,
+                Model::Calling => Kind::Calls,
+                _ => Kind::Writing,
+            };
+            self.settle(from, Kind::Unsettled, written);
+        }
+        if next == Model::Unsettled {
+            self.unsettled_from = Some(self.runs.len());
         }
         self.model = next;
     }
@@ -354,8 +490,8 @@ impl Ledger {
     fn ready(&mut self, now: Instant) {
         if !self.started {
             self.advance(now);
-            let opening = std::mem::take(&mut self.opening);
-            self.add(Kind::Startup, opening);
+            self.settle(self.opening_from, Kind::Opening, Kind::Startup);
+            self.opening_from = self.runs.len();
         }
     }
 
@@ -363,15 +499,15 @@ impl Ledger {
     fn start(&mut self, now: Instant) {
         if !self.started {
             self.advance(now);
-            let opening = std::mem::take(&mut self.opening);
-            self.add(Kind::Waiting, opening);
+            self.settle(self.opening_from, Kind::Opening, Kind::Waiting);
             self.started = true;
             self.model = Model::Waiting;
         }
     }
 
-    /// An event the reply reports: what runs, what waits for the user, and what the reply waits
-    /// for besides. Returns the ledger when a running reply is due to report it.
+    /// An event the reply reports: what runs, what waits for the user, what the reply waits for
+    /// besides, and which step and note it is at. Returns the ledger when a running reply is due
+    /// to report it.
     pub fn event(&mut self, event: &RunEvent) -> Option<TimeSpent> {
         self.event_at(event, Instant::now())
     }
@@ -421,6 +557,31 @@ impl Ledger {
                 compaction.status == "running",
             ),
             RunEvent::BackgroundWait { wait } => self.background = wait.is_some(),
+            // The step in progress is the one the reply is at, from when its plan says so.
+            RunEvent::Plan { plan } => {
+                let step = plan
+                    .steps
+                    .iter()
+                    .find(|step| step.status == "running")
+                    .map(|step| step.title.clone());
+                if step != self.step {
+                    self.steps.push(StepMark {
+                        at: self.at(now),
+                        title: step.clone(),
+                    });
+                    self.step = step;
+                }
+            }
+            // A note of the model's own begins a stretch of the reply's work. Agent Studio's
+            // notices about the session are not the model's.
+            RunEvent::Progress { id, .. }
+                if !id.starts_with("studio-") && self.noted.insert(id.clone()) =>
+            {
+                self.notes.push(NoteMark {
+                    at: self.at(now),
+                    id: id.clone(),
+                });
+            }
             _ => {}
         }
         let due = self
@@ -432,16 +593,9 @@ impl Ledger {
     fn report(&mut self, now: Instant) -> TimeSpent {
         self.reported = Some(now);
         self.revision += 1;
-        let mut spent = self.spent.clone();
-        // What the model spends on a part not yet known reads as writing until it is, and a
-        // reply whose turn never began was starting.
-        for (kind, time) in [
-            (Kind::Writing, self.unsettled),
-            (Kind::Startup, self.opening),
-        ] {
-            if !time.is_zero() {
-                *spent.entry(kind).or_default() += time;
-            }
+        let mut spent: HashMap<&'static str, Duration> = HashMap::new();
+        for (kind, time) in &self.runs {
+            *spent.entry(kind.key()).or_default() += *time;
         }
         TimeSpent {
             version: 1,
@@ -449,11 +603,14 @@ impl Ledger {
             run_id: self.run_id.clone(),
             spent: spent
                 .into_iter()
-                .map(|(kind, time)| (kind.key(), time.as_millis() as u64))
+                .map(|(kind, time)| (kind, time.as_millis() as u64))
                 .filter(|(_, ms)| *ms > 0)
                 .collect(),
             requests: self.requests,
             retries: self.retries,
+            timeline: timeline(&self.runs),
+            steps: self.steps.clone(),
+            notes: self.notes.clone(),
         }
     }
 
@@ -522,12 +679,17 @@ mod tests {
         }
         fn spent(&mut self) -> Vec<(&'static str, u64)> {
             let report = self.ledger.end_at(self.now).unwrap();
+            let elapsed = (self.now - self.start).as_millis() as u64;
             let total: u64 = report.spent.values().sum();
             assert_eq!(
-                total,
-                (self.now - self.start).as_millis() as u64,
+                total, elapsed,
                 "every moment of the reply is accounted for once"
             );
+            let timeline = report
+                .timeline
+                .expect("a reply that took time has a timeline");
+            let stretches: u64 = timeline.runs.chunks(2).map(|run| run[1]).sum();
+            assert_eq!(stretches, elapsed, "the timeline is the same time in order");
             report.spent.into_iter().collect()
         }
     }
@@ -804,11 +966,111 @@ mod tests {
         let saved = serde_json::to_string(&last).unwrap();
         assert_eq!(
             saved,
-            r#"{"version":1,"revision":2,"runId":"run","spent":{"waiting":61000},"retries":1}"#
+            r#"{"version":1,"revision":2,"runId":"run","spent":{"waiting":61000},"retries":1,"timeline":{"kinds":["waiting"],"runs":[0,61000]}}"#
         );
         // Nothing is counted once the reply ended, or before it began.
         assert!(run.ledger.end_at(run.now).is_none());
         assert!(Ledger::new("idle").end().is_none());
+    }
+
+    #[test]
+    fn the_timeline_keeps_the_order_and_marks_say_when_each_step_and_note_began() {
+        use crate::protocol::plan::{Plan, Step};
+        let mut run = Run::new();
+        run.claude(prompt());
+        let plan = |statuses: [&str; 2]| RunEvent::Plan {
+            plan: Plan {
+                revision: 1,
+                explanation: None,
+                steps: ["Implement the fix", "Document it"]
+                    .into_iter()
+                    .zip(statuses)
+                    .enumerate()
+                    .map(|(index, (title, status))| Step {
+                        id: index.to_string(),
+                        title: title.into(),
+                        status: status.into(),
+                        active_form: None,
+                    })
+                    .collect(),
+            },
+        };
+        let note = |id: &str, revision: u64| RunEvent::Progress {
+            id: id.into(),
+            revision,
+            text: "PRIVATE".into(),
+        };
+        run.wait(2000)
+            .stream(block(0, json!({"type":"thinking","thinking":""})));
+        run.wait(3000).event(plan(["running", "pending"]));
+        run.event(note("msg-1", 1));
+        run.wait(4000).event(plan(["complete", "running"]));
+        // The same note written on, Agent Studio's own notice, and a plan that says the same.
+        run.event(note("msg-1", 2));
+        run.event(note("studio-session-missing", 1));
+        run.event(plan(["complete", "running"]));
+        run.wait(500).event(note("msg-2", 1));
+        run.wait(500).event(plan(["complete", "complete"]));
+        let report = run.ledger.end_at(run.now).unwrap();
+        let step = |at: u64, title: Option<&str>| StepMark {
+            at,
+            title: title.map(String::from),
+        };
+        assert_eq!(
+            report.steps,
+            [
+                step(5000, Some("Implement the fix")),
+                step(9000, Some("Document it")),
+                step(10_000, None),
+            ]
+        );
+        let noted = |at: u64, id: &str| NoteMark { at, id: id.into() };
+        assert_eq!(report.notes, [noted(5000, "msg-1"), noted(9500, "msg-2")]);
+        assert_eq!(
+            report.timeline,
+            Some(Timeline {
+                kinds: vec!["waiting", "thinking"],
+                runs: vec![0, 2000, 1, 8000],
+            })
+        );
+        let saved = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            saved["steps"],
+            json!([{"at":5000,"title":"Implement the fix"},{"at":9000,"title":"Document it"},{"at":10000}])
+        );
+        assert_eq!(saved["notes"][1], json!({"at":9500,"id":"msg-2"}));
+    }
+
+    #[test]
+    fn a_long_replys_timeline_joins_stretches_too_short_to_show() {
+        let seconds = Duration::from_secs;
+        let mut runs = vec![(Kind::Waiting, seconds(1000))];
+        // Forty seconds of the model thinking and writing in turns of a moment each.
+        for _ in 0..100 {
+            runs.push((Kind::Thinking, Duration::from_millis(300)));
+            runs.push((Kind::Unsettled, Duration::from_millis(100)));
+        }
+        runs.push((Kind::Commands, seconds(1960)));
+        runs.push((Kind::Opening, Duration::from_micros(400)));
+        assert_eq!(
+            timeline(&runs),
+            Some(Timeline {
+                kinds: vec!["waiting", "thinking", "commands"],
+                runs: vec![0, 1_000_000, 1, 40_000, 2, 1_960_000],
+            })
+        );
+        // A short reply keeps every stretch, and one that took no time has no timeline.
+        let short = [
+            (Kind::Opening, Duration::from_millis(12)),
+            (Kind::Thinking, Duration::from_millis(3)),
+            (Kind::Opening, Duration::from_millis(40)),
+        ];
+        assert_eq!(
+            timeline(&short).unwrap().runs,
+            [0, 12, 1, 3, 0, 40],
+            "kinds: startup, thinking"
+        );
+        assert_eq!(timeline(&[]), None);
     }
 
     #[test]
@@ -852,5 +1114,42 @@ mod tests {
         assert!(done.elapsed_ms.is_some_and(|elapsed| elapsed >= wrote));
         let saved = serde_json::to_value(&*done).unwrap();
         assert_eq!(saved["writeMs"], wrote);
+        // A transcript read after the fact has no moment to count from.
+        assert_eq!(saved.get("startMs"), None);
+    }
+
+    #[test]
+    fn calls_and_sub_agents_record_when_they_began_and_how_long_a_sub_agent_ran() {
+        let mut decoder = Decoder::default();
+        // The reply began two seconds ago.
+        decoder.time_from(Instant::now() - Duration::from_secs(2));
+        let mut records = |line: Value| {
+            decoder
+                .decode_value("claude", &line)
+                .into_iter()
+                .filter_map(|event| match event {
+                    RunEvent::Tool { tool } => Some(serde_json::to_value(&*tool).unwrap()),
+                    _ => None,
+                })
+                .next_back()
+        };
+        let call = |id: &str, name: &str| json!({"type":"assistant","parent_tool_use_id":null,"message":{"id":format!("m-{id}"),"content":[{"type":"tool_use","id":id,"name":name,"input":{"command":"ls","description":"Explore","prompt":"PRIVATE"}}]}});
+        let command = records(call("c1", "Bash")).expect("The command's record");
+        let began = command["startMs"].as_u64().expect("When the command began");
+        assert!((2000..7000).contains(&began), "{began}");
+        let done = records(result("c1")).expect("The command's result");
+        assert_eq!(done["startMs"], began);
+
+        let started = records(call("a1", "Agent")).expect("The sub-agent's record");
+        let agent = &started["agents"][0];
+        assert!(agent["startMs"].as_u64().is_some_and(|at| at >= began));
+        assert_eq!(agent.get("elapsedMs"), None, "it runs");
+        std::thread::sleep(Duration::from_millis(30));
+        let ended = records(result("a1")).expect("The sub-agent's result");
+        let agent = &ended["agents"][0];
+        assert_eq!(agent["status"], "complete");
+        assert_eq!(agent["startMs"], started["agents"][0]["startMs"]);
+        let ran = agent["elapsedMs"].as_u64().expect("How long it ran");
+        assert!((30..5000).contains(&ran), "{ran}");
     }
 }

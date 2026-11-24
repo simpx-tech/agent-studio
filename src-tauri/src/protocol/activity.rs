@@ -38,6 +38,12 @@ pub struct AgentActivity {
     /// Claude reported the launch as asynchronous: the child works on in the background.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     background: bool,
+    /// When the sub-agent began, in milliseconds into its reply, and how long it ran, each
+    /// stretch of a resumed one counted (`time_spent`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    elapsed_ms: Option<u64>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +55,9 @@ pub struct ToolActivity {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
+    /// When the record began, in milliseconds into its reply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_ms: Option<u64>,
     /// How much of `elapsed_ms` the model took to write the call, which Claude streams before
     /// the call runs: the rest is the call's own time.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -168,6 +177,7 @@ fn fresh(id: String, category: &str, name: &str) -> ToolActivity {
         name: clean(name),
         status: "running".into(),
         elapsed_ms: None,
+        start_ms: None,
         write_ms: None,
         progress: None,
         parent_id: None,
@@ -338,8 +348,21 @@ pub struct ToolDecoder {
     resumed: HashMap<String, subagents::Resumed>,
     /// How long the model took to write the call whose record is being made, by record.
     written: HashMap<String, u64>,
+    /// When the reply began, which its records count their start from. None for a transcript
+    /// read after the fact, whose records carry no times of their own.
+    origin: Option<std::time::Instant>,
+    /// Sub-agents that run: since when, and what each ran before this stretch.
+    agent_clocks: HashMap<String, (std::time::Instant, u64)>,
 }
 impl ToolDecoder {
+    /// The reply's records count their start from `origin`, the moment the reply began.
+    pub fn time_from(&mut self, origin: std::time::Instant) {
+        self.origin = Some(origin);
+    }
+    fn since_origin(&self) -> Option<u64> {
+        self.origin
+            .map(|origin| (origin.elapsed().as_millis() as u64).min(progress::MAX_ELAPSED_MS))
+    }
     pub fn owns_codex_thread(&self, thread: &str, root: &str) -> bool {
         thread == root
             || self
@@ -467,6 +490,9 @@ impl ToolDecoder {
             if tool.write_ms.is_none() {
                 tool.write_ms = previous.write_ms;
             }
+            tool.start_ms = previous.start_ms;
+        } else {
+            tool.start_ms = self.since_origin();
         }
         if let Some(written) = self.written.get(&tool.id) {
             tool.write_ms = Some(*written);
@@ -594,6 +620,32 @@ impl ToolDecoder {
         out: &mut Vec<ToolActivity>,
         streamed: bool,
     ) {
+        // Each sub-agent keeps when it began and, once it stops, how long it ran.
+        if let Some(now) = self.since_origin() {
+            for agent in &mut group.agents {
+                if agent.start_ms.is_none() {
+                    agent.start_ms = Some(now);
+                }
+                let running = agent.status == "running";
+                match self.agent_clocks.get(&agent.id) {
+                    None if running => {
+                        self.agent_clocks.insert(
+                            agent.id.clone(),
+                            (std::time::Instant::now(), agent.elapsed_ms.unwrap_or(0)),
+                        );
+                    }
+                    Some((since, before)) if !running => {
+                        agent.elapsed_ms = Some(
+                            before
+                                .saturating_add(since.elapsed().as_millis() as u64)
+                                .min(progress::MAX_ELAPSED_MS),
+                        );
+                        self.agent_clocks.remove(&agent.id);
+                    }
+                    _ => {}
+                }
+            }
+        }
         if !group.agents.is_empty() {
             group.status = if group.agents.iter().any(|a| a.status == "running") {
                 "running"
@@ -629,6 +681,8 @@ impl ToolDecoder {
             result: None,
             messages: vec![],
             background: false,
+            start_ms: None,
+            elapsed_ms: None,
         });
         group.agents.last_mut()
     }

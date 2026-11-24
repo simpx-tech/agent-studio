@@ -52,6 +52,8 @@ export const toolActivitySchema = z.object({
   inputTruncated: z.boolean().optional(),
   output: toolOutputSummarySchema.optional(),
   elapsedMs: z.number().int().min(0).max(31_536_000_000).optional(),
+  // When the record began, in milliseconds into its reply.
+  startMs: z.number().int().min(0).max(31_536_000_000).optional(),
   // How much of that the model took to write the call, before it ran.
   writeMs: z.number().int().min(0).max(31_536_000_000).optional(),
   progress: z
@@ -95,6 +97,9 @@ export const toolActivitySchema = z.object({
           .optional(),
         messagesTruncated: z.boolean().optional(),
         background: z.boolean().optional(),
+        // When the sub-agent began, in milliseconds into its reply, and how long it ran.
+        startMs: z.number().int().min(0).max(31_536_000_000).optional(),
+        elapsedMs: z.number().int().min(0).max(31_536_000_000).optional(),
       }),
     )
     .default([]),

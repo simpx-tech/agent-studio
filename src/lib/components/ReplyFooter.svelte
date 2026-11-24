@@ -9,7 +9,7 @@
   import type { RunningSubagent } from '$lib/subagents';
   import { planCountText, planProgress } from '$lib/plans';
   import { nativeWorkflowStatus } from '$lib/workflows';
-  import { timeReport, type TimeReport as Report } from '$lib/time-report';
+  import { timeReport } from '$lib/time-report';
   import TimeReport from './TimeReport.svelte';
   import FileChanges from './FileChanges.svelte';
   import AccountChanges from './AccountChanges.svelte';
@@ -22,8 +22,7 @@
   let {
     message,
     timeTotal,
-    chatTime,
-    chatTitle,
+    openTimeReport,
     responseChanges,
     chatChanges,
     responseMemory,
@@ -37,10 +36,8 @@
   }: {
     message: Message;
     timeTotal?: ReplyTimeTotal;
-    /** Where the whole chat's time went, worked out when its report is shown. */
-    chatTime?: Report;
-    /** The chat's title, which heads a copied time report. */
-    chatTitle?: string;
+    /** Opens the chat's time report on this reply. */
+    openTimeReport?: () => void;
     /** File edits apart from the agent's memory, of this reply and of the whole chat. */
     responseChanges: ChangeSummary;
     chatChanges: ChangeSummary;
@@ -296,13 +293,7 @@
     aria-labelledby={message.id + '-usage-toggle'}
     hidden={expanded !== 'usage'}
   >
-    {#if opened.has('usage')}<TimeReport
-        response={responseTime}
-        chat={chatTime ?? responseTime}
-        id={message.id + '-time'}
-        title={chatTitle}
-        scope={scope && `${scope}/time`}
-      />{/if}
+    {#if opened.has('usage')}<TimeReport report={responseTime} open={openTimeReport} />{/if}
     <div class="usage-breakdown">
       <dl>
         <div>

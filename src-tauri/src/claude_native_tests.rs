@@ -2330,6 +2330,17 @@ async fn installed_claude_reports_where_its_time_went() {
     );
     // One request ran the command and another answered.
     assert!(spent.requests >= 2, "{spent:?}");
+    // The same time in order, the command's stretch among it.
+    let timeline = spent
+        .timeline
+        .as_ref()
+        .expect("A reply that took time has a timeline");
+    let stretches: u64 = timeline.runs.chunks(2).map(|run| run[1]).sum();
+    assert!(
+        stretches <= elapsed && elapsed - stretches < 250,
+        "{stretches} of {elapsed}"
+    );
+    assert!(timeline.kinds.contains(&"commands"), "{timeline:?}");
     process.kill().await;
     // The command's record says how long the model took to write it, apart from its run.
     let events = events.lock().unwrap();
@@ -2345,8 +2356,116 @@ async fn installed_claude_reports_where_its_time_went() {
         .expect("No call recorded how long it took to write");
     let (wrote, ran) = (command.write_ms.unwrap(), command.elapsed_ms.unwrap());
     assert!(ran >= wrote + 4000, "wrote {wrote} of {ran}");
+    // It began once the reply had started, before it ended.
+    let began = command.start_ms.expect("When the command began");
+    assert!(
+        began > 0 && began + ran <= elapsed + 250,
+        "{began} + {ran} of {elapsed}"
+    );
     eprintln!(
         "The command took {wrote} ms to write and {} ms to run",
         ran - wrote
+    );
+}
+
+/// The ledger says which step of the reply's plan was in progress when, and its sub-agent
+/// records when it began and how long it ran, with its own calls under it.
+#[tokio::test]
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
+async fn installed_claude_times_its_plan_steps_and_its_sub_agent() {
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    let text = "This is an Agent Studio integration test in a disposable folder. Do exactly this, in order, and nothing else. 1. Record a plan of two steps with your task tools (TaskCreate and TaskUpdate, or TodoWrite): 'Wait three seconds' and 'Report'. Mark 'Wait three seconds' in progress. 2. Start one sub-agent with the Agent tool, described as 'Wait a moment', whose whole task is to run this exact command with Bash and then answer done: node -e \"setTimeout(()=>{},3000)\" . Wait for its answer. 3. Mark 'Wait three seconds' completed and 'Report' in progress. 4. Reply with just the word OK.";
+    let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"claude","model":"sonnet","instructions":""},"messages":[{"role":"user","text":text}]})).unwrap();
+    request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
+    request.native_session =
+        crate::providers::sessions::Session::prepare(root.path(), &request).unwrap();
+    let exe = crate::providers::resolve("claude").await.unwrap();
+    let (channel, ledger, events) = EventSink::timed(&request.run_id);
+    let started = std::time::Instant::now();
+    let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+        .await
+        .unwrap();
+    let mut process = crate::pool::Process::new(
+        exe,
+        command.spawn().unwrap(),
+        "real-time-steps-test".into(),
+        request.native_session.as_ref().unwrap().id().to_string(),
+    )
+    .unwrap();
+    let mut questions = Questions::default()
+        .open(&request.run_id, None, channel.clone())
+        .unwrap();
+    let result = tokio::time::timeout(
+        Duration::from_secs(300),
+        stream_turn(
+            &mut process,
+            &request,
+            Some(&channel),
+            CancellationToken::new(),
+            Some(&mut questions),
+            false,
+        ),
+    )
+    .await
+    .expect("Installed CLI test timed out");
+    let spent = ledger.lock().unwrap().end().expect("The ledger began");
+    let elapsed = started.elapsed().as_millis() as u64;
+    process.kill().await;
+    eprintln!("Claude in {elapsed} ms: {spent:?}");
+    let (status, _) = result.expect("Installed CLI failed");
+    assert_eq!(status, "complete");
+    // The plan's first step was in progress from some moment on, and another mark followed it.
+    let first = spent
+        .steps
+        .iter()
+        .position(|step| step.title.is_some())
+        .expect("No step of the plan was ever in progress");
+    assert!(spent.steps.len() > first + 1, "{:?}", spent.steps);
+    assert!(spent.steps.windows(2).all(|pair| pair[0].at <= pair[1].at));
+    assert!(spent.steps.last().unwrap().at <= elapsed);
+    // The model wrote notes or not; each that it wrote began within the reply.
+    assert!(
+        spent.notes.iter().all(|note| note.at <= elapsed),
+        "{:?}",
+        spent.notes
+    );
+    // The sub-agent's three seconds are the sub-agent's or, launched in the background, the
+    // wait for it.
+    let of = |kind: &str| spent.spent.get(kind).copied().unwrap_or(0);
+    assert!(of("agents") + of("background") >= 2000, "{spent:?}");
+    let events = events.lock().unwrap();
+    let records: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            RunEvent::Tool { tool } => Some(serde_json::to_value(&**tool).unwrap()),
+            _ => None,
+        })
+        .collect();
+    let group = records
+        .iter()
+        .rev()
+        .find(|record| record["category"] == "agent")
+        .expect("No sub-agent was recorded");
+    let agent = &group["agents"][0];
+    let began = agent["startMs"].as_u64().expect("When the sub-agent began");
+    let ran = agent["elapsedMs"]
+        .as_u64()
+        .expect("How long the sub-agent ran");
+    assert!(ran >= 3000 && began + ran <= elapsed + 250, "{agent}");
+    // Its own command names it as parent and began while it ran.
+    let child = records
+        .iter()
+        .rev()
+        .find(|record| record["parentId"] == agent["id"] && record["commandRun"] == true)
+        .expect("The sub-agent's command was not recorded under it");
+    let at = child["startMs"]
+        .as_u64()
+        .expect("When the sub-agent's command began");
+    assert!(at >= began && at <= began + ran, "{child}");
+    eprintln!(
+        "Steps {:?}; the sub-agent began at {began} ms and ran {ran} ms, its command from {at} ms",
+        spent.steps
     );
 }

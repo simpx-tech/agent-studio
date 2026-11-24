@@ -1,7 +1,8 @@
 // Opt-in real-provider proof that the desktop app records where a reply's time went and shows
 // it (docs/USAGE.md). Run against the isolated QA build of scripts/native-time-report.tauri.json
 // (docs/VERIFICATION.md, 2026-11-24); only that identity's data is changed. Each provider named
-// in the arguments (default: codex claude) runs one real reply that runs a four-second command.
+// in the arguments (default: codex claude) runs one real reply that plans two steps and runs a
+// four-second command in the first.
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -15,6 +16,8 @@ const page = await nativePage(19911, 'http://tauri.localhost/');
 const report = { checkedAt: new Date().toISOString(), replies: [] };
 let failure;
 try {
+  // The page may still be loading when its debugging port answers.
+  await page.waitFor(() => !!window.__TAURI_INTERNALS__?.invoke);
   assert.equal(
     await page.invoke('plugin:app|identifier'),
     'com.vinicius.agentstudio.time-report-qa',
@@ -102,7 +105,7 @@ try {
     await page.evaluate(() => {
       const input = document.querySelector('[aria-label="Message"]');
       input.value =
-        'This is an Agent Studio integration test in a disposable folder. Run this exact shell command once, in the foreground: node -e "setTimeout(()=>{},4000)" . Run nothing else. Then reply with just the word OK.';
+        'This is an Agent Studio integration test in a disposable folder. Do exactly this, in order, and nothing else. 1. Record a plan of two steps with your plan or task tool: "Run the command" and "Report". Mark "Run the command" in progress. 2. Run this exact shell command once, in the foreground: node -e "setTimeout(()=>{},4000)" . 3. Mark "Run the command" completed and "Report" in progress. 4. Reply with just the word OK.';
       input.dispatchEvent(new Event('input', { bubbles: true }));
     });
     await page.waitFor(
@@ -130,43 +133,69 @@ try {
     const command = reply.blocks.find((b) => b.tool?.command?.includes('setTimeout'))?.tool;
     assert(command?.elapsedMs >= 4000, JSON.stringify(command));
     if (provider === 'claude') assert(command.writeMs > 0, JSON.stringify(command));
-    // Its timing panel shows it.
+    // The same time in order, and the command's start within the reply.
+    const stretches = timeSpent.timeline.runs.reduce(
+      (sum, value, index) => sum + (index % 2 ? value : 0),
+      0,
+    );
+    assert(Math.abs(durationMs - stretches) < 1000, `${provider}: timeline ${stretches}`);
+    assert(command.startMs > 0 && command.startMs + command.elapsedMs <= durationMs + 1000);
+    // Its timing panel shows the summary, which opens the report.
     await page.evaluate(() =>
       [...document.querySelectorAll('[aria-label="Reply time, usage and cost"]')].at(-1).click(),
     );
     await page.waitFor(() => document.querySelector('.time-report .parts li'));
-    const shown = await page.evaluate(() => ({
-      total: document.querySelector('.time-report .report-total').innerText,
-      parts: [...document.querySelectorAll('.time-report .parts li')].map((row) =>
-        row.innerText.replace(/\s+/g, ' ').trim(),
+    await page.evaluate(() =>
+      [...document.querySelectorAll('.time-report .report-open')].at(-1).click(),
+    );
+    await page.waitFor(() => document.querySelector('.time-dialog[open] .ribbon'));
+    await sleep(700);
+    const rows = (selector) =>
+      page.evaluate(
+        (selector) =>
+          [...document.querySelectorAll(selector)].map((row) =>
+            row.innerText.replace(/\s+/g, ' ').trim(),
+          ),
+        selector,
+      );
+    const shown = {
+      total: (await rows('.time-dialog .total'))[0],
+      families: await rows('.time-dialog .families li'),
+      steps: await rows('.time-dialog [aria-labelledby="time-steps"].rows li'),
+      commands: await rows('.time-dialog [aria-labelledby="time-commands"] li'),
+      calls: await rows('.time-dialog .calls li'),
+      slices: await page.evaluate(
+        () => document.querySelectorAll('.time-dialog .ribbon span[data-family]').length,
       ),
-      calls: [...document.querySelectorAll('.time-report .calls li')].map((row) =>
-        row.innerText.replace(/\s+/g, ' ').trim(),
-      ),
-    }));
+    };
     assert(
-      shown.parts.some((row) => row.startsWith('Commands')),
+      shown.families.some((row) => row.startsWith('Commands and tools')),
       JSON.stringify(shown),
     );
+    assert(shown.slices >= 3, JSON.stringify(shown));
     assert(
       shown.calls.some((row) => row.includes('setTimeout')),
       JSON.stringify(shown),
     );
-    await page.evaluate(() =>
-      document.querySelector('.time-report').scrollIntoView({ block: 'center' }),
-    );
-    await sleep(400);
+    // A model that kept the plan it was asked for has its steps timed.
+    if (timeSpent.steps?.some((step) => step.title))
+      assert(shown.steps.length >= 1, JSON.stringify(shown));
     const capture = await page.cdp('Page.captureScreenshot', { format: 'png' });
     await writeFile(`${output}/native-${provider}.png`, Buffer.from(capture.data, 'base64'));
+    await page.evaluate(() =>
+      document.querySelector('.time-dialog [aria-label="Close time report"]').click(),
+    );
     report.replies.push({
       provider,
       model: reply.usage?.model,
       durationMs,
       timeSpent,
-      command: { elapsedMs: command.elapsedMs, writeMs: command.writeMs },
+      command: { startMs: command.startMs, elapsedMs: command.elapsedMs, writeMs: command.writeMs },
       shown,
     });
-    console.log(`${provider}: ${durationMs} ms as ${JSON.stringify(timeSpent.spent)}`);
+    console.log(
+      `${provider}: ${durationMs} ms as ${JSON.stringify(timeSpent.spent)}, steps ${JSON.stringify(timeSpent.steps ?? [])}`,
+    );
   }
   assert.deepEqual(page.errors, []);
 } catch (error) {

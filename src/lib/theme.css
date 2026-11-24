@@ -120,6 +120,13 @@
   --quota-guide-over: #eeb168;
   --quota-excess: #ee8276;
 
+  /* Time report: who spent a reply's time */
+  --time-model: #3987e5;
+  --time-work: #199e70;
+  --time-hold: #d95926;
+  --time-overhead: #7c7c86;
+  --time-unknown: #4a4a52;
+
   /* Code */
   --code-bg: #0c0c0e;
   --code-inline-bg: rgb(255 255 255 / 0.07);
@@ -329,6 +336,12 @@
   --quota-guide: #b5d49a;
   --quota-guide-over: #f1ad5c;
   --quota-excess: #e9695e;
+
+  --time-model: #2a78d6;
+  --time-work: #1baf7a;
+  --time-hold: #eb6834;
+  --time-overhead: #8d8d97;
+  --time-unknown: #c9c9cf;
 
   --code-bg: #f6f6f8;
   --code-inline-bg: rgb(0 0 0 / 0.05);

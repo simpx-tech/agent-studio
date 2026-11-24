@@ -81,6 +81,7 @@ test('the toolbar moves the open chat to history first and opens the next Active
     'Snooze',
     'Pin',
     'Fork conversation',
+    'Time report',
     'Model context',
     'Chat instructions',
   ]);

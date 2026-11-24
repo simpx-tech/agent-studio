@@ -18,6 +18,7 @@ export const appCommands: ComposerCommand[] = [
   ['instructions', ''],
   ['context', 'Model context'],
   ['usage', ''],
+  ['time', 'Time report'],
   ['rewind', ''],
   ['undo', 'Undo file edits'],
   ['import', 'Import chats'],

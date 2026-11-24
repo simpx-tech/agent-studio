@@ -86,6 +86,7 @@
     FolderSearch,
     Archive,
     BookOpen,
+    ChartNoAxesGantt,
     Paperclip,
     FileText,
     GitFork,
@@ -241,6 +242,7 @@
   import ConversationContextMenu from '$lib/components/ConversationContextMenu.svelte';
   import { forkConversation, forkPoint } from '$lib/forks';
   import ModelContext from '$lib/components/ModelContext.svelte';
+  import TimeReportDialog from '$lib/components/TimeReportDialog.svelte';
   import ModelMark from '$lib/components/ModelMark.svelte';
   import { applyRunEvent, savesAtOnce, toolElapsed } from '$lib/activity';
   import { planCountText, runningPlanProgress } from '$lib/plans';
@@ -425,7 +427,6 @@
     selectedModelName,
     replyTimeTotals,
   } from '$lib/replies';
-  import { timeReport } from '$lib/time-report';
   import UsagePanel from '$lib/components/UsagePanel.svelte';
   import QuotaBars, { quotaBarsWidth } from '$lib/components/QuotaBars.svelte';
   import type { BalanceAgent } from '$lib/components/NewChatSettings.svelte';
@@ -910,6 +911,8 @@
   let stopping = $state<Record<string, boolean>>({});
   let editorOpen = $state(false);
   let contextOpen = $state(false);
+  // The time report of a chat, opened on one of its replies or on the whole of it.
+  let timeReportOpen = $state<{ chat: string; reply?: string } | null>(null);
   let deletion = $state<{
     type: 'conversation' | 'draft';
     id: string;
@@ -2114,14 +2117,6 @@
       lastReplyConnection !== selectedSettings.connectionId,
   );
   const timeTotals = $derived(replyTimeTotals(active?.messages ?? []));
-  // Where the open chat's time went, worked out only once a reply's timing panel shows the
-  // whole chat. The report reads the chat without making it reactive (src/lib/detached.ts), so
-  // what changes it is named here: a reply's end, and the time a reply reports.
-  const chatTime = $derived.by(() => {
-    void timeTotals;
-    for (const message of active?.messages ?? []) void message.timeSpent?.revision;
-    return timeReport(active?.messages ?? [], { folder: active?.location?.path });
-  });
   // A chat from another day, or continued on one, shows where each of its days begins.
   const dayStarts = $derived(chatDays(active?.messages ?? [], today));
   const chatChanges = $derived(
@@ -3473,6 +3468,7 @@
               sidebarOpen = false;
               folderBrowserOpen = false;
               contextOpen = false;
+              timeReportOpen = null;
               editorOpen = false;
               templatesOpen = false;
               conversationMenu = null;
@@ -5086,6 +5082,7 @@
     switchDraft(currentDraftKey());
     editorOpen = false;
     contextOpen = false;
+    timeReportOpen = null;
     view = 'chat';
     if (reveal && (location || computerId)) {
       query = '';
@@ -5497,6 +5494,7 @@
     switchDraft(draftKey.chat(c.id));
     editorOpen = false;
     contextOpen = false;
+    timeReportOpen = null;
     view = 'chat';
     void scrollToEnd();
   }
@@ -5508,6 +5506,7 @@
     folderBrowserOpen = false;
     editorOpen = false;
     contextOpen = false;
+    timeReportOpen = null;
     view = 'chat';
     if (!activeId && scratchId === scratch.id) return;
     locationGeneration++;
@@ -7339,6 +7338,7 @@
     if (event.key === 'Escape') {
       editorOpen = false;
       contextOpen = false;
+      timeReportOpen = null;
       if (!deleting) deletion = null;
     }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'n') {
@@ -8396,6 +8396,13 @@
                   title="Fork conversation"
                   aria-label="Fork conversation"><GitFork size={16} /></button
                 >{/if}
+              {#if active?.messages.some((m) => m.role === 'assistant' && m.status !== 'running')}<button
+                  class="icon-button"
+                  title="Time report"
+                  aria-label="Time report"
+                  onclick={() => active && (timeReportOpen = { chat: active.id })}
+                  ><ChartNoAxesGantt size={16} /></button
+                >{/if}
               <button
                 class="icon-button"
                 title="Model context"
@@ -8461,8 +8468,9 @@
                     {chatChanges}
                     folder={active.location?.path}
                     timeTotal={timeTotals.get(m.id)}
-                    {chatTime}
-                    chatTitle={active.title}
+                    openTimeReport={m.role === 'assistant' && m.status !== 'running'
+                      ? () => active && (timeReportOpen = { chat: active.id, reply: m.id })
+                      : undefined}
                     switchNotice={switchNotices.get(m.id)}
                     switchColor={connectionColor(accountSwitches.get(m.id))}
                     agent={active.settings}
@@ -8743,6 +8751,9 @@
                   else if (name === 'instructions') editorOpen = true;
                   else if (name === 'fast' || name.startsWith('fast:')) commandFastMode(name);
                   else if (name === 'context') contextOpen = true;
+                  else if (name === 'time') {
+                    if (active) timeReportOpen = { chat: active.id };
+                  }
                   else if (name === 'usage') usageExpanded = true;
                   else if (name === 'rewind') openRewind();
                   else if (name === 'undo') openUndoFiles();
@@ -9062,6 +9073,13 @@
     close={() => (folderBrowserOpen = false)}
   />
 {/if}
+{#if timeReportOpen && active?.id === timeReportOpen.chat}<TimeReportDialog
+    messages={active.messages}
+    title={active.title}
+    folder={active.location?.path}
+    initial={timeReportOpen.reply}
+    close={() => (timeReportOpen = null)}
+  />{/if}
 {#if contextOpen}<ModelContext
     running={activeRunning}
     conversationId={active?.id}
@@ -9076,6 +9094,7 @@
     useSkill={(name, path) => {
       prompt = `Use the skill ${JSON.stringify(name)} at ${JSON.stringify(path)} for this request.\n\n${prompt}`;
       contextOpen = false;
+      timeReportOpen = null;
       void tick().then(() =>
         document.querySelector<HTMLTextAreaElement>('[aria-label="Message"]')?.focus(),
       );

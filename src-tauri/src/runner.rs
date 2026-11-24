@@ -153,6 +153,11 @@ impl EventSink {
             time: None,
         }
     }
+    /// When the run's reply began, for a run that keeps its time.
+    pub fn began(&self) -> Option<std::time::Instant> {
+        let ledger = self.time.as_ref()?;
+        ledger.lock().unwrap_or_else(|e| e.into_inner()).began()
+    }
     /// Hands the run's time ledger a line of its provider, when the run keeps one.
     pub fn time(&self, observe: impl FnOnce(&mut crate::protocol::time_spent::Ledger)) {
         if let Some(ledger) = &self.time {
@@ -835,6 +840,9 @@ async fn stream_turn(
             .map_err(|_| send_failed)?;
     }
     let mut decoder = Decoder::default();
+    if let Some(began) = channel.and_then(EventSink::began) {
+        decoder.time_from(began);
+    }
     decoder.cost_baseline = process.cost_total;
     decoder.expect_structured_output = request.agent.output_schema.is_some() && !request.compact;
     let mut tool_tick = tokio::time::interval(Duration::from_secs(1));
