@@ -612,6 +612,23 @@ const namedForms: Record<string, Forms> = {
   'List files': ['Listing', 'Listed', 'Listing of'],
   EnterPlanMode: ['Entering plan mode', 'Entered plan mode', 'Plan mode'],
   ExitPlanMode: ['Presenting the plan', 'Presented the plan', 'Plan'],
+  // Reserving this computer for a measurement (src-tauri/src/reservations.rs).
+  'Check the computer': ['Checking the computer', 'Checked the computer', 'Computer check'],
+  'Reserve the computer': [
+    'Reserving the computer',
+    'Reserved the computer',
+    'Reservation of the computer',
+  ],
+  'Wait for the computer': [
+    'Waiting for the computer',
+    'Waited for the computer',
+    'Wait for the computer',
+  ],
+  'Release the computer': [
+    'Releasing the computer',
+    'Released the computer',
+    'Release of the computer',
+  ],
 };
 const iconForms: Partial<Record<ToolIconKey, Forms>> = {
   monitor: ['Watching', 'Watched', 'Watch'],

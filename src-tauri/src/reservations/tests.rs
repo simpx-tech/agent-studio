@@ -92,9 +92,11 @@ async fn the_window_opens_once_other_chats_commands_finish() {
 async fn the_gate_counts_refusals_and_the_report_tells_what_happened() {
     let broker = broker_with(vec![], None);
     broker.reserve("run-bench", "bench", "Profile", None);
-    assert!(broker.gate("bench", "cargo build").is_none());
-    assert!(broker.gate("ui", "git log -3").is_none());
-    let reason = broker.gate("ui", "Build.bat Game Win64 Shipping").unwrap();
+    assert!(broker.gate("bench", "cargo build", None).is_none());
+    assert!(broker.gate("ui", "git log -3", None).is_none());
+    let reason = broker
+        .gate("ui", "Build.bat Game Win64 Shipping", None)
+        .unwrap();
     assert!(reason.contains("it has been measuring for"), "{reason}");
     assert!(reason.contains("pc_wait"), "{reason}");
     // A command another chat runs anyway, such as a Codex chat's, is in the report.
@@ -120,7 +122,7 @@ async fn the_gate_counts_refusals_and_the_report_tells_what_happened() {
     assert_eq!(report.record["held"]["refused"], 1);
     assert_eq!(report.record["endedBy"], "release");
     assert!(broker.release("bench").is_none());
-    assert!(broker.gate("ui", "Build.bat").is_none());
+    assert!(broker.gate("ui", "Build.bat", None).is_none());
 }
 
 #[tokio::test]
@@ -187,7 +189,7 @@ async fn reservations_take_turns_and_a_reply_that_ends_releases_its_own() {
         ["open", "queued"]
     );
     // The queued chat's own commands wait for the first too.
-    assert!(broker.gate("ui", "cargo build").is_some());
+    assert!(broker.gate("ui", "cargo build", None).is_some());
     // Reserving again only brings the reservation up to date.
     broker.reserve("run-ui-2", "ui", "Second, again", None);
     assert_eq!(broker.snapshot().reservations.len(), 2);
@@ -236,6 +238,59 @@ async fn a_wait_ends_when_its_call_stops() {
     );
 }
 
+#[tokio::test]
+async fn a_call_takes_its_command_once_claude_streams_it() {
+    let broker = broker_with(vec![], None);
+    broker.run_started("run-ui", "ui");
+    let mut decoder = ToolDecoder::default();
+    let mut call = |input: Value| {
+        decoder
+            .decode(
+                "claude",
+                &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"b1","name":"Bash","input":input}]}}),
+            )
+            .pop()
+            .unwrap()
+    };
+    broker.tool("run-ui", &call(json!({})));
+    broker.reserve("run-bench", "bench", "Benchmark", None);
+    assert_eq!(
+        broker.snapshot().reservations[0].waiting_for[0].label,
+        "Run command"
+    );
+    broker.tool(
+        "run-ui",
+        &call(json!({"command":"Build.bat Game Win64 Development"})),
+    );
+    assert_eq!(
+        broker.snapshot().reservations[0].waiting_for[0].label,
+        "`Build.bat Game Win64 Development`"
+    );
+}
+
+#[tokio::test]
+async fn a_command_the_gate_refused_never_counts_as_run() {
+    let broker = broker_with(vec![], None);
+    broker.run_started("run-ui", "ui");
+    broker.reserve("run-bench", "bench", "Benchmark", None);
+    // Claude Code reports the call as started before it asks the gate, which refuses it.
+    let (build, built) = command("late", "cargo build");
+    broker.tool("run-ui", &build);
+    assert!(broker.gate("ui", "cargo build", Some(&build.id)).is_some());
+    broker.tool("run-ui", &build);
+    broker.tool("run-ui", &built);
+    let report = broker.release("bench").unwrap();
+    assert!(
+        report
+            .text
+            .contains("During it, no other chat ran a command."),
+        "{}",
+        report.text
+    );
+    assert!(report.text.contains("1 command waited"), "{}", report.text);
+    assert!(broker.lock().refused.is_empty());
+}
+
 #[test]
 fn held_time_goes_to_what_kept_the_window_closed() {
     let t0 = Instant::now();
@@ -261,6 +316,7 @@ fn held_time_goes_to_what_kept_the_window_closed() {
         blockers: vec![span("build", 0, 4), span("cook", 2, 6)],
         others: vec![],
         refused: 0,
+        refused_calls: HashSet::new(),
         measure: machine::Window::default(),
     };
     let waits = vec![

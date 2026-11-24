@@ -106,6 +106,9 @@ struct State {
     /// Chats waiting in `pc_wait` for the computer to be free, kept until no reservation they
     /// overlap is left to report them.
     waits: Vec<Wait>,
+    /// Calls the gate refused, which Claude Code reports as started before it asks the gate:
+    /// they never ran, so they count for nothing until they end.
+    refused: HashSet<String>,
     next: u64,
     ticking: bool,
 }
@@ -117,6 +120,9 @@ struct Run {
 struct Call {
     label: String,
     light: bool,
+    /// The lengths of the command and description it was read from: Claude streams a call's
+    /// input, so its first report may name neither.
+    read: (usize, usize),
 }
 struct Wait {
     id: u64,
@@ -142,6 +148,8 @@ struct Reservation {
     others: Vec<Span>,
     /// Commands of other chats refused while it held the computer.
     refused: u32,
+    /// Those commands' calls, which its report leaves out of what ran.
+    refused_calls: HashSet<String>,
     measure: machine::Window,
 }
 #[derive(Clone, Debug)]
@@ -208,20 +216,31 @@ impl Broker {
         }
         let update = {
             let mut state = self.lock();
+            if state.refused.contains(&tool.id) {
+                if tool.status != "running" {
+                    state.refused.remove(&tool.id);
+                }
+                return;
+            }
             let Some(run) = state.runs.get_mut(run_id) else {
                 return;
             };
-            let known = run.calls.contains_key(&tool.id);
             if tool.status == "running" {
-                if known {
+                let command = tool.command().unwrap_or_default();
+                let read = (command.len(), tool.detail().map_or(0, str::len));
+                if run
+                    .calls
+                    .get(&tool.id)
+                    .is_some_and(|call| call.read == read)
+                {
                     return;
                 }
-                let command = tool.command().unwrap_or_default();
                 run.calls.insert(
                     tool.id.clone(),
                     Call {
                         label: label_of(tool),
                         light: !command.is_empty() && light::is_light(command),
+                        read,
                     },
                 );
             } else if run.calls.remove(&tool.id).is_none() {
@@ -323,6 +342,7 @@ impl Broker {
                     blockers: vec![],
                     others: vec![],
                     refused: 0,
+                    refused_calls: HashSet::new(),
                     measure: machine::Window::default(),
                 });
             }
@@ -426,15 +446,33 @@ impl Broker {
     }
 
     /// Whether a command `conversation` wants to start must wait: the reason to give, or None.
-    pub fn gate(&self, conversation: &str, command: &str) -> Option<String> {
-        let mut state = self.lock();
-        let first = state.queue.first_mut()?;
-        if first.conversation == conversation || light::is_light(command) {
-            return None;
+    /// `call` is the tool activity identity of the call asking, which then never ran.
+    pub fn gate(&self, conversation: &str, command: &str, call: Option<&str>) -> Option<String> {
+        let (reason, snapshot) = {
+            let mut state = self.lock();
+            let first = state.queue.first_mut()?;
+            if first.conversation == conversation || light::is_light(command) {
+                return None;
+            }
+            first.refused += 1;
+            if let Some(call) = call {
+                first.refused_calls.insert(call.into());
+                state.refused.insert(call.into());
+                for run in state.runs.values_mut() {
+                    run.calls.remove(call);
+                }
+            }
+            let reason = self.refusal(&state.queue[0]);
+            (reason, self.settled(&mut state, Instant::now()))
+        };
+        if let Some(snapshot) = snapshot {
+            self.publish(snapshot);
         }
-        first.refused += 1;
-        let first = &state.queue[0];
-        Some(format!(
+        Some(reason)
+    }
+
+    fn refusal(&self, first: &Reservation) -> String {
+        format!(
             "This command did not run: {} reserved this computer for a performance measurement ({}), and other chats' commands wait until it ends, {}. Call mcp__agent_studio__pc_wait, which returns once the computer is free, then run the same command again. Meanwhile keep reading and editing files; light commands such as git status, ls and rg still run.",
             self.chat(&first.conversation),
             first.purpose,
@@ -449,7 +487,7 @@ impl Broker {
                 ),
                 None => "and it waits for other chats' commands to finish first".into(),
             }
-        ))
+        )
     }
 
     /// Waits for `conversation`'s turn: the window of its own reservation, or else for no other
@@ -754,14 +792,22 @@ impl Broker {
                 duration(now.saturating_duration_since(r.asked))
             )),
         }
-        let blockers = summed(&r.blockers, r.opened.unwrap_or(now));
+        // A command the gate refused never ran, though Claude Code reported it as started.
+        let ran = |spans: &[Span]| -> Vec<Span> {
+            spans
+                .iter()
+                .filter(|s| !r.refused_calls.contains(&s.key))
+                .cloned()
+                .collect()
+        };
+        let blockers = summed(&ran(&r.blockers), r.opened.unwrap_or(now));
         if blockers.is_empty() {
             lines.push("Nothing of other chats' kept the window closed.".into());
         } else {
             lines.push(format!("Before it opened: {}.", self.spans_text(&blockers)));
         }
         if r.opened.is_some() {
-            let others = summed(&r.others, now);
+            let others = summed(&ran(&r.others), now);
             if others.is_empty() {
                 lines.push("During it, no other chat ran a command.".into());
             } else {
@@ -815,7 +861,7 @@ impl Broker {
             "waitedMs": opened_after.map(ms),
             "windowMs": window.map(ms),
             "blockers": blockers.iter().map(|(conversation, label, time)| json!({"conversationId": conversation, "label": label, "ms": ms(*time)})).collect::<Vec<_>>(),
-            "others": summed(&r.others, now).iter().map(|(conversation, label, time)| json!({"conversationId": conversation, "label": label, "ms": ms(*time)})).collect::<Vec<_>>(),
+            "others": summed(&ran(&r.others), now).iter().map(|(conversation, label, time)| json!({"conversationId": conversation, "label": label, "ms": ms(*time)})).collect::<Vec<_>>(),
             "held": {
                 "chats": held.chats,
                 "ms": ms(held.total),
@@ -934,14 +980,22 @@ fn settle(state: &mut State, items: &[Item], now: Instant) -> bool {
     changed
 }
 
-/// Starts a span for each item not yet followed and ends those whose work ended.
+/// Starts a span for each item not yet followed, ends those whose work ended, and names the
+/// others as their work is now known: a call's first report may lack its command.
 fn track(spans: &mut Vec<Span>, items: &[&Item], now: Instant) -> bool {
     let mut changed = false;
-    let live: HashSet<&str> = items.iter().map(|i| i.key.as_str()).collect();
+    let live: HashMap<&str, &Item> = items.iter().map(|i| (i.key.as_str(), *i)).collect();
     for span in spans.iter_mut().filter(|s| s.until.is_none()) {
-        if !live.contains(span.key.as_str()) {
-            span.until = Some(now);
-            changed = true;
+        match live.get(span.key.as_str()) {
+            None => {
+                span.until = Some(now);
+                changed = true;
+            }
+            Some(item) if item.label != span.label => {
+                span.label = item.label.clone();
+                changed = true;
+            }
+            Some(_) => {}
         }
     }
     for item in items {
@@ -1004,7 +1058,11 @@ fn held(r: &Reservation, waits: &[Wait], now: Instant) -> Held {
             continue;
         }
         let mut points: Vec<Instant> = vec![from, closed_until];
-        for span in &r.blockers {
+        for span in r
+            .blockers
+            .iter()
+            .filter(|s| !r.refused_calls.contains(&s.key))
+        {
             for point in [Some(span.from), span.until].into_iter().flatten() {
                 if point > from && point < closed_until {
                     points.push(point);
@@ -1018,6 +1076,7 @@ fn held(r: &Reservation, waits: &[Wait], now: Instant) -> Held {
             let active: Vec<&Span> = r
                 .blockers
                 .iter()
+                .filter(|s| !r.refused_calls.contains(&s.key))
                 .filter(|s| s.from <= a && s.until.unwrap_or(now) >= b)
                 .collect();
             if active.is_empty() {

@@ -48,7 +48,9 @@ or its reply ends.
   command again. A refusal rather than a held answer: a process parked between replies has nobody
   to answer its hooks, so the hook's timeout is 30 seconds, and a command an unobserved turn of a
   parked process starts goes ahead after it. Claude Code names an SDK callback
-  `PreToolUse:Callback`, which Work history leaves out.
+  `PreToolUse:Callback`, which Work history leaves out. It also reports a call as started before
+  it asks the gate, so a call the gate refused counts for nothing: it never keeps a window closed
+  nor shows in a report as work that ran.
 - **Light commands** run anyway (`light.rs`): reading files, listing folders, searching text and
   asking Git about the checkout, every part of the command line. A command substitution, a script
   block, `Invoke-Expression` or any program the list does not name makes the command wait.

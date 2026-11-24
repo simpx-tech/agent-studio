@@ -119,7 +119,13 @@ impl Session {
         let input = &request["input"];
         let refusal = if input["hook_event_name"] == "PreToolUse" {
             let command = input["tool_input"]["command"].as_str().unwrap_or_default();
-            self.broker.gate(&self.conversation, command)
+            // The call's activity identity, as the tool decoder names a Claude call.
+            let call = input["tool_use_id"]
+                .as_str()
+                .or_else(|| request["tool_use_id"].as_str())
+                .map(|id| format!("claude:{id}"));
+            self.broker
+                .gate(&self.conversation, command, call.as_deref())
         } else {
             None
         };
