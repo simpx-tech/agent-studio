@@ -119,6 +119,28 @@ test('each Claude line has its own print and tint beside its version, and a repl
   expect(
     await picker.locator('.selected-name').evaluate((name) => name.scrollWidth <= name.clientWidth),
   ).toBe(true);
+  // The composer shows the next message's model beside its send button, so it stays in sight
+  // while writing: the print and the version, named on hover.
+  const composer = page.getByRole('form', { name: 'Message composer', exact: true });
+  const send = composer.getByRole('button', { name: 'Send message', exact: true });
+  const badge = (name: string) => composer.getByRole('img', { name, exact: true });
+  await expect(badge('Opus 5.5')).toHaveAttribute('title', 'Opus 5.5');
+  await expect(badge('Opus 5.5').locator('.model-mark')).toHaveAttribute('data-line', 'opus');
+  await expect(badge('Opus 5.5').locator('.model-mark svg')).toBeVisible();
+  await expect(badge('Opus 5.5').locator('.version')).toHaveText('5.5');
+  expect(await tint(badge('Opus 5.5').locator('.model-mark'))).toBe(await tint(avatar(newer)));
+  // Beside the send button, as tall as it is.
+  const besideSend = async (name: string) => {
+    const mark = (await badge(name).locator('.model-mark').boundingBox())!;
+    const button = (await send.boundingBox())!;
+    const gap = button.x - mark.x - mark.width;
+    expect(gap).toBeGreaterThan(0);
+    expect(gap).toBeLessThan(12);
+    expect(mark.y).toBeCloseTo(button.y, 0);
+    expect(mark.height).toBeCloseTo(button.height, 0);
+  };
+  await besideSend('Opus 5.5');
+  await composer.screenshot({ path: `${output}/composer-${test.info().project.name}.png` });
   await picker.click();
   const options = page.getByRole('option');
   const marks = options.locator('.model-mark');
@@ -168,6 +190,27 @@ test('each Claude line has its own print and tint beside its version, and a repl
   await expect(picker.locator('.model-mark .version')).toHaveCount(0);
   await expect(picker.locator('.selected-name')).toHaveText('Haiku 4.5');
   expect(await tint(picker.locator('.model-mark'))).toBe(tints[3]);
+  // The composer's mark follows the choice.
+  await expect(badge('Haiku 4.5').locator('.model-mark')).toHaveAttribute('data-line', 'haiku');
+  await expect(badge('Haiku 4.5').locator('.version')).toHaveText('4.5');
+  expect(await tint(badge('Haiku 4.5').locator('.model-mark'))).toBe(tints[3]);
+  await expect(badge('Opus 5.5')).toHaveCount(0);
+  // Without a version it is the mark alone, CLI default's provider glyph in a square.
+  await picker.click();
+  await page.getByRole('option', { name: 'CLI default', exact: true }).click();
+  const unresolved = badge('CLI default').locator('.model-mark');
+  await expect(unresolved).toHaveAttribute('data-line', 'none');
+  await expect(unresolved).toHaveText('✳\uFE0E');
+  const square = (await unresolved.boundingBox())!;
+  expect(square.width).toBe(square.height);
+  await besideSend('CLI default');
+  // A phone keeps it beside the send button, on another row when the tools leave no room.
+  await picker.click();
+  await page.getByRole('option', { name: 'Opus 5.5', exact: true }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await besideSend('Opus 5.5');
+  expect(await composer.evaluate((form) => form.scrollWidth <= form.clientWidth)).toBe(true);
+  await composer.screenshot({ path: `${output}/composer-phone-${test.info().project.name}.png` });
 });
 
 test('Settings keeps Claude Code and Codex updated automatically and Connections shows their versions', async ({

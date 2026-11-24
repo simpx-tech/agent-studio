@@ -1969,9 +1969,8 @@
       ]),
     ),
   );
-  const selectedModelMark = $derived(
-    modelMark(selectedSettings.provider, selectedModelName(selectedSettings.model, availableModels)),
-  );
+  const selectedModelTitle = $derived(selectedModelName(selectedSettings.model, availableModels));
+  const selectedModelMark = $derived(modelMark(selectedSettings.provider, selectedModelTitle));
   const currentModel = $derived(
     availableModels.find((model) => model.id === selectedSettings.model)!,
   );
@@ -9411,18 +9410,31 @@
                     ><CircleStop size={16} />{activeStopping
                       ? 'Stopping…'
                       : 'Stop response'}</button
-                  ><button
-                    class="send-button"
-                    type="submit"
-                    disabled={!canQueue || (!prompt.trim() && !attachedImages.length)}
-                    aria-label={waitingReply ? 'Send message' : 'Queue message'}
-                    title={waitingReply ? 'Send now' : 'Send after this reply'}><ArrowUp size={19} /></button
-                  >{:else}<button
-                    class="send-button"
-                    type="submit"
-                    disabled={!canSend || comparing || (!prompt.trim() && !attachedImages.length)}
-                    aria-label="Send message"><ArrowUp size={19} /></button
                   >{/if}
+                <!-- The model the message goes to stays in sight while writing; the Model picker
+                     above chooses it. It wraps with the send button on narrow composers. A
+                     comparison's runs name their own models above the message instead. -->
+                <div class="composer-send">
+                  {#if !compareDraft}<span
+                      class="composer-model"
+                      role="img"
+                      aria-label={selectedModelTitle}
+                      title={selectedModelTitle}
+                      ><ModelMark mark={selectedModelMark} variant="badge" /></span
+                    >{/if}{#if activeRunning}<button
+                      class="send-button"
+                      type="submit"
+                      disabled={!canQueue || (!prompt.trim() && !attachedImages.length)}
+                      aria-label={waitingReply ? 'Send message' : 'Queue message'}
+                      title={waitingReply ? 'Send now' : 'Send after this reply'}
+                      ><ArrowUp size={19} /></button
+                    >{:else}<button
+                      class="send-button"
+                      type="submit"
+                      disabled={!canSend || comparing || (!prompt.trim() && !attachedImages.length)}
+                      aria-label="Send message"><ArrowUp size={19} /></button
+                    >{/if}
+                </div>
               </div>
             </form>
             <UsagePanel

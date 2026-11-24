@@ -2658,6 +2658,18 @@ pre {
   object-fit: contain;
   border-radius: var(--radius-md);
 }
+/* The next message's model beside the send button, so a wrong model shows while writing. */
+.composer-send {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.composer-model {
+  display: inline-flex;
+  /* As tall as the send button beside it. */
+  --model-badge-size: var(--control-md);
+  font-size: var(--text-base);
+}
 .send-button {
   width: var(--control-md);
   height: var(--control-md);
@@ -3418,6 +3430,10 @@ pre {
   .composer .attach-button {
     width: 44px;
     height: 44px;
+  }
+  .composer .composer-model {
+    --model-badge-size: 44px;
+    font-size: var(--text-md);
   }
   /* A full touch target around the button, which stays small to keep clear of the prose. */
   .jump-to-end::after {

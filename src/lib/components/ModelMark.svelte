@@ -1,11 +1,13 @@
 <script lang="ts">
   import type { ModelMark } from '$lib/model-marks';
   import ModelIcon from './ModelIcon.svelte';
-  // A model's print beside its version: a pill in the Model picker, and a tile on a reply's
-  // avatar with the version beneath the print. The version always stays readable. The toolbar's
-  // chip draws the print alone, since the model's name beside it already shows the version. A
-  // model of no known line shows its provider's glyph in place of a print.
-  let { mark, variant }: { mark: ModelMark; variant: 'chip' | 'pill' | 'tile' } = $props();
+  // A model's print beside its version: a pill in the Model picker, a badge beside the composer's
+  // send button, and a tile on a reply's avatar with the version beneath the print. The version
+  // always stays readable. The toolbar's chip draws the print alone, since the model's name
+  // beside it already shows the version. A model of no known line shows its provider's glyph in
+  // place of a print.
+  let { mark, variant }: { mark: ModelMark; variant: 'chip' | 'pill' | 'badge' | 'tile' } =
+    $props();
   const version = $derived(variant === 'chip' ? undefined : mark.version);
 </script>
 
@@ -69,20 +71,32 @@
   .chip .glyph {
     font-size: 13px;
   }
-  /* Pills share one width for the usual versions, so the names beside them line up. */
+  /* Pills share one width for the usual versions, so the names beside them line up. A badge,
+     alone beside the composer's send button, has the button's corners, takes its height
+     (`--model-badge-size`) and text size from the composer, and is as wide as what it shows:
+     its print alone without a version. */
+  .pill,
+  .badge {
+    height: var(--mark-size);
+  }
   .pill {
     --mark-size: 26px;
-    height: var(--mark-size);
     min-width: 58px;
     border-radius: var(--radius-md);
     font-size: var(--text-sm);
   }
-  .pill .version {
+  .badge {
+    --mark-size: var(--model-badge-size, 26px);
+    border-radius: var(--radius-lg);
+  }
+  .pill .version,
+  .badge .version {
     flex: 1;
     padding: 0 6px;
     text-align: center;
   }
-  .pill .glyph {
+  .pill .glyph,
+  .badge .glyph {
     font-size: 15px;
   }
   /* Without a version a pill keeps the same width. A print stays at its start, in line with the
