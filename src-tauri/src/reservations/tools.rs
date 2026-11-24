@@ -124,8 +124,12 @@ impl Session {
                 .as_str()
                 .or_else(|| request["tool_use_id"].as_str())
                 .map(|id| format!("claude:{id}"));
-            self.broker
-                .gate(&self.conversation, command, call.as_deref())
+            self.broker.gate(
+                &self.conversation,
+                command,
+                call.as_deref(),
+                "mcp__agent_studio__pc_wait",
+            )
         } else {
             None
         };

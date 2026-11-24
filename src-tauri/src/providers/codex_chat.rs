@@ -74,7 +74,7 @@ const HELD_BACK: &[&str] = &[
     "call_mcp_tool",
     "pc_status",
     "pc_reserve",
-    "pc_wait",
+    // pc_wait stays loaded: a command the gate refuses names it (reservations/codex_gate.rs).
     "pc_release",
 ];
 /// The workflow tools held back too, except for an orchestrator, whose work they are. A static
@@ -1038,10 +1038,12 @@ mod tests {
         let (held, loaded) = split(dynamic_tools(&request));
         // Every tool held back is one the chat has, so a renamed tool fails here.
         assert_eq!(held, sorted(&[HELD_BACK, HELD_BACK_WORKFLOW]));
-        // The ones replies use often stay loaded, and the workflow assistant's two.
+        // The ones replies use often stay loaded, the workflow assistant's two, and pc_wait,
+        // which a command the gate refuses names.
         assert_eq!(
             loaded,
             [
+                "pc_wait",
                 "send_files",
                 "show_artifact",
                 "studio_ask_user",

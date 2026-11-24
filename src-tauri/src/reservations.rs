@@ -15,6 +15,7 @@
 //! and how long the other chats waited and because of what. Each report is kept in app data
 //! `reservations/history.jsonl`. Reservations take turns, first come first served, and nothing is
 //! capped: a reservation, a wait and a queue last as long as their chats need.
+pub mod codex_gate;
 pub mod jobs;
 mod light;
 pub mod machine;
@@ -446,8 +447,15 @@ impl Broker {
     }
 
     /// Whether a command `conversation` wants to start must wait: the reason to give, or None.
-    /// `call` is the tool activity identity of the call asking, which then never ran.
-    pub fn gate(&self, conversation: &str, command: &str, call: Option<&str>) -> Option<String> {
+    /// `call` is the tool activity identity of the call asking, which then never ran, and `wait`
+    /// the name the asking agent calls `pc_wait` by.
+    pub fn gate(
+        &self,
+        conversation: &str,
+        command: &str,
+        call: Option<&str>,
+        wait: &str,
+    ) -> Option<String> {
         let (reason, snapshot) = {
             let mut state = self.lock();
             let first = state.queue.first_mut()?;
@@ -462,7 +470,7 @@ impl Broker {
                     run.calls.remove(call);
                 }
             }
-            let reason = self.refusal(&state.queue[0]);
+            let reason = self.refusal(&state.queue[0], wait);
             (reason, self.settled(&mut state, Instant::now()))
         };
         if let Some(snapshot) = snapshot {
@@ -471,9 +479,9 @@ impl Broker {
         Some(reason)
     }
 
-    fn refusal(&self, first: &Reservation) -> String {
+    fn refusal(&self, first: &Reservation, wait: &str) -> String {
         format!(
-            "This command did not run: {} reserved this computer for a performance measurement ({}), and other chats' commands wait until it ends, {}. Call mcp__agent_studio__pc_wait, which returns once the computer is free, then run the same command again. Meanwhile keep reading and editing files; light commands such as git status, ls and rg still run.",
+            "This command did not run: {} reserved this computer for a performance measurement ({}), and other chats' commands wait until it ends, {}. Call {wait}, which returns once the computer is free, then run the same command again. Meanwhile keep reading and editing files; light commands such as git status, ls and rg still run.",
             self.chat(&first.conversation),
             first.purpose,
             match first.opened {

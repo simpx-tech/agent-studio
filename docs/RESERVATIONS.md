@@ -54,10 +54,25 @@ or its reply ends.
 - **Light commands** run anyway (`light.rs`): reading files, listing folders, searching text and
   asking Git about the checkout, every part of the command line. A command substitution, a script
   block, `Invoke-Expression` or any program the list does not name makes the command wait.
-- **Codex chats** get the same tools, but their commands are not held yet: Codex's app-server has
-  no hook a client answers before a command. Its command approval requests and its `preToolUse`
-  hooks (`thread/start` takes per-thread configuration) are the candidates. Until one is in place,
-  a Codex command that runs during a window is in the report.
+- **Codex chats** on Windows get the same refusal (`reservations/codex_gate.rs`, found
+  2026-11-24 on Codex 0.172). Codex runs `preToolUse` hooks before a shell command (its tool is
+  `Bash` to hooks, as in Claude Code) and blocks it when one answers `permissionDecision: deny`
+  with a reason. Each Codex chat's app-server starts with such a hook given as a session flag,
+  `-c hooks.PreToolUse=[...]`, which Codex adds to the user's own hooks: this app's program in
+  its gate mode (`--pc-gate`), run as PowerShell runs a quoted path (`& '…' --pc-gate`; Codex
+  runs hook commands through PowerShell, and a hook that fails lets its command run). The gate
+  reads the hook's input, asks the running app over a named pipe whether the chat may run the
+  command (the pipe's name and the chat's id reach it in the app-server's environment), and
+  prints Codex's refusal when it may not. Codex runs a session-flag hook only once it is
+  trusted by a hash of its definition, which it does not document: once per Codex executable
+  and gate command, an app-server started with the hook and no thread lists its hooks
+  (`hooks/list`), and the key and hash it reports go with every launch after
+  (`-c hooks.state={<key> = {trusted_hash = …}}`, merged with the user's own trust entries),
+  kept in memory and in app data `reservations/codex-gate.json`. Work history shows the gate
+  only when it blocks a command. `thread/start`'s `config` does not register hooks, and the
+  `untrusted` approval mode, whose requests the app could have held, is gone from Codex 0.172.
+  WSL distributions run their hooks through another shell and have no pipe to this app, so a
+  WSL Codex chat's commands are not held yet: one that runs during a window is in the report.
 - **What runs** is what the replies running on this computer report: each command and monitor
   from its start until it ends (`Broker::tool`, fed by every chat run's events), and the
   background work chats' CLIs keep (`background_work`).
@@ -104,8 +119,8 @@ The Viewer shows none.
 
 ## Not yet
 
-- Holding Codex chats' commands (see above), and freezing a process a chat starts during a window
-  when nothing else can hold it.
+- Holding WSL Codex chats' commands (see above), and freezing a process a chat starts during a
+  window when nothing else can hold it.
 - `pc_stop` for processes a chat that is no longer replying left running, messages between chats,
   and a chat handing over something it holds (an editor) to the one measuring.
 - The history of reservations in the window.

@@ -77,6 +77,11 @@ impl ToolDecoder {
             return false;
         }
         let value = if prompt { &p["item"] } else { &p["run"] };
+        // Agent Studio's own command gate (`reservations::codex_gate`), the only hook it gives
+        // Codex as a session flag, runs before every command: it shows only when it blocks one.
+        if !prompt && value["source"] == "sessionFlags" && value["status"] != "blocked" {
+            return true;
+        }
         let Some(id) = identifier(&value["id"]) else {
             return true;
         };
@@ -242,6 +247,23 @@ mod tests {
         assert!(decoder.text.is_empty());
         let buffered = crate::protocol::hooks::startup_hook(&v).unwrap();
         assert!(!buffered.to_string().contains("PRIVATE"));
+    }
+
+    #[test]
+    fn the_command_gate_of_agent_studio_shows_only_when_it_blocks() {
+        let mut d = ToolDecoder::default();
+        let run = |status: &str| json!({"id":"pre-tool-use:3:C:\\<session-flags>\\config.toml:exec-1","eventName":"preToolUse","handlerType":"command","executionMode":"sync","scope":"turn","source":"sessionFlags","sourcePath":"C:\\<session-flags>\\config.toml","status":status,"entries":[]});
+        let event = |method: &str, status: &str| json!({"method":method,"params":{"threadId":"root","turnId":"t","run":run(status)}});
+        assert!(d
+            .codex_server(&event("hook/started", "running"), "root")
+            .is_empty());
+        assert!(d
+            .codex_server(&event("hook/completed", "completed"), "root")
+            .is_empty());
+        let blocked = d.codex_server(&event("hook/completed", "blocked"), "root");
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].status, "blocked");
+        assert_eq!(blocked[0].name, "PreToolUse hook");
     }
 
     #[test]

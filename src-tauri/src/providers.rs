@@ -1261,6 +1261,8 @@ pub async fn chat_command(
     runtime: &Path,
     exe: &Executable,
 ) -> Result<Command, String> {
+    // This app's data folder, where Codex's gate keeps the trust Codex gave it.
+    let data = runtime.parent().map(Path::to_path_buf);
     let standalone = crate::standalone::prepare(
         runtime.parent().ok_or("Cannot locate conversation data")?,
         request,
@@ -1336,6 +1338,21 @@ pub async fn chat_command(
                 c.args(["app-server", "--stdio", "-c", "web_search=\"live\""]);
                 for entry in &request.shared_context.codex_overrides {
                     c.args(["-c", entry]);
+                }
+                // Its commands wait while another chat measures (reservations/codex_gate.rs).
+                if let (Some(conversation), Some(data)) =
+                    (request.conversation_id.as_deref(), data.as_deref())
+                {
+                    if let Some(gate) =
+                        crate::reservations::codex_gate::launch(exe, conversation, data).await
+                    {
+                        for flag in &gate.flags {
+                            c.args(["-c", flag]);
+                        }
+                        for (key, value) in gate.env {
+                            c.env(key, value);
+                        }
+                    }
                 }
             } else {
                 c.args([

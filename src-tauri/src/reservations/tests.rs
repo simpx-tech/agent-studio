@@ -92,10 +92,12 @@ async fn the_window_opens_once_other_chats_commands_finish() {
 async fn the_gate_counts_refusals_and_the_report_tells_what_happened() {
     let broker = broker_with(vec![], None);
     broker.reserve("run-bench", "bench", "Profile", None);
-    assert!(broker.gate("bench", "cargo build", None).is_none());
-    assert!(broker.gate("ui", "git log -3", None).is_none());
+    assert!(broker
+        .gate("bench", "cargo build", None, "pc_wait")
+        .is_none());
+    assert!(broker.gate("ui", "git log -3", None, "pc_wait").is_none());
     let reason = broker
-        .gate("ui", "Build.bat Game Win64 Shipping", None)
+        .gate("ui", "Build.bat Game Win64 Shipping", None, "pc_wait")
         .unwrap();
     assert!(reason.contains("it has been measuring for"), "{reason}");
     assert!(reason.contains("pc_wait"), "{reason}");
@@ -122,7 +124,7 @@ async fn the_gate_counts_refusals_and_the_report_tells_what_happened() {
     assert_eq!(report.record["held"]["refused"], 1);
     assert_eq!(report.record["endedBy"], "release");
     assert!(broker.release("bench").is_none());
-    assert!(broker.gate("ui", "Build.bat", None).is_none());
+    assert!(broker.gate("ui", "Build.bat", None, "pc_wait").is_none());
 }
 
 #[tokio::test]
@@ -189,7 +191,7 @@ async fn reservations_take_turns_and_a_reply_that_ends_releases_its_own() {
         ["open", "queued"]
     );
     // The queued chat's own commands wait for the first too.
-    assert!(broker.gate("ui", "cargo build", None).is_some());
+    assert!(broker.gate("ui", "cargo build", None, "pc_wait").is_some());
     // Reserving again only brings the reservation up to date.
     broker.reserve("run-ui-2", "ui", "Second, again", None);
     assert_eq!(broker.snapshot().reservations.len(), 2);
@@ -276,7 +278,9 @@ async fn a_command_the_gate_refused_never_counts_as_run() {
     // Claude Code reports the call as started before it asks the gate, which refuses it.
     let (build, built) = command("late", "cargo build");
     broker.tool("run-ui", &build);
-    assert!(broker.gate("ui", "cargo build", Some(&build.id)).is_some());
+    assert!(broker
+        .gate("ui", "cargo build", Some(&build.id), "pc_wait")
+        .is_some());
     broker.tool("run-ui", &build);
     broker.tool("run-ui", &built);
     let report = broker.release("bench").unwrap();

@@ -2157,6 +2157,14 @@ async fn release_for_shutdown(app: &tauri::AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Codex runs this program before a chat's shell commands to ask the running app whether
+    // another chat holds the computer (reservations/codex_gate.rs): it answers and exits at once.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == reservations::codex_gate::GATE_ARG)
+    {
+        std::process::exit(reservations::codex_gate::gate_main());
+    }
     // A server's settings leave the environment before any thread or process starts.
     server::init();
     // The VPS updater asks a release whether it runs as a server before deploying it.
@@ -2268,7 +2276,13 @@ pub fn run() {
         .manage(watchdog::Watchdog::default())
         .manage(window_recovery::Recovery::default())
         .setup(|app| {
-            app.manage(reservations_broker(app.handle()));
+            let reservations = reservations_broker(app.handle());
+            app.manage(reservations.clone());
+            // Codex chats' gate asks on a named pipe of its own (reservations/codex_gate.rs).
+            #[cfg(windows)]
+            reservations::codex_gate::serve(reservations);
+            #[cfg(not(windows))]
+            drop(reservations);
             tray::setup(app.handle());
             // The taskbar overlay is set off the window thread, on the window's own handle.
             #[cfg(windows)]
