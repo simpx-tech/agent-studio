@@ -49,6 +49,7 @@ pub(crate) fn background_request(
         native_session: None,
         shared_context: Default::default(),
         claude_default_model: None,
+        worktree: None,
         workflow: None,
         mission: None,
         conversation_only: true,

@@ -2548,6 +2548,12 @@ pre {
   color: var(--warning);
   background: var(--warning-soft);
 }
+/* A phone's composer keeps Compare's icon alone, beside Build/Plan, Fast and Templates. */
+@media (max-width: 520px) {
+  .compare-toggle .compare-label {
+    display: none;
+  }
+}
 .attach-button {
   width: var(--control-md);
   height: var(--control-md);

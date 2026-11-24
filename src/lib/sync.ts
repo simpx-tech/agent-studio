@@ -30,6 +30,7 @@ import { mergeAccountColors, sameAccountColors } from './account-colors.ts';
 import { mergeSnoozes, sameSnoozes } from './snoozes.ts';
 import { mergePins, samePins } from './pins.ts';
 import { mergeSidebarOrder, sameSidebarOrder } from './sidebar-order.ts';
+import { mergeComparisons, sameComparisons } from './comparisons.ts';
 import { jsonEqual } from './json-equal.ts';
 
 export type SharedWorkspace = Pick<
@@ -45,6 +46,7 @@ export type SharedWorkspace = Pick<
   | 'snoozes'
   | 'pins'
   | 'sidebarOrder'
+  | 'comparisons'
 >;
 export const sharedSchema = workspaceSchema.pick({
   fleet: true,
@@ -58,6 +60,7 @@ export const sharedSchema = workspaceSchema.pick({
   snoozes: true,
   pins: true,
   sidebarOrder: true,
+  comparisons: true,
 });
 /** One conversation as replicated, so a sync can validate and compare it by itself. */
 export const sharedChatSchema = sharedSchema.shape.conversations.element;
@@ -144,7 +147,8 @@ export function sameShared(a: SharedWorkspace, b: SharedWorkspace): boolean {
     (!a.accountColors || sameAccountColors(a.accountColors, b.accountColors)) &&
     (!a.snoozes || sameSnoozes(a.snoozes, b.snoozes)) &&
     (!a.pins || samePins(a.pins, b.pins)) &&
-    (!a.sidebarOrder || sameSidebarOrder(a.sidebarOrder, b.sidebarOrder))
+    (!a.sidebarOrder || sameSidebarOrder(a.sidebarOrder, b.sidebarOrder)) &&
+    (!a.comparisons || sameComparisons(a.comparisons, b.comparisons))
   );
 }
 /**
@@ -168,7 +172,8 @@ export function sameMeta(a: SharedMeta, b: SharedMeta): boolean {
     sameAccountColors(a.accountColors, b.accountColors) &&
     sameSnoozes(a.snoozes, b.snoozes) &&
     samePins(a.pins, b.pins) &&
-    sameSidebarOrder(a.sidebarOrder, b.sidebarOrder)
+    sameSidebarOrder(a.sidebarOrder, b.sidebarOrder) &&
+    sameComparisons(a.comparisons, b.comparisons)
   );
 }
 
@@ -736,6 +741,7 @@ export function mergeShared(
     ...sidebarOrderField(
       mergeSidebarOrder(base.sidebarOrder, local.sidebarOrder, remote.sidebarOrder),
     ),
+    ...comparisonsField(mergeComparisons(base.comparisons, local.comparisons, remote.comparisons)),
   };
 }
 // An absent value follows the default text, so it stays absent rather than undefined.
@@ -752,6 +758,8 @@ const snoozesField = (value: SharedWorkspace['snoozes']) =>
 const pinsField = (value: SharedWorkspace['pins']) => (value === undefined ? {} : { pins: value });
 const sidebarOrderField = (value: SharedWorkspace['sidebarOrder']) =>
   value === undefined ? {} : { sidebarOrder: value };
+const comparisonsField = (value: SharedWorkspace['comparisons']) =>
+  value === undefined ? {} : { comparisons: value };
 export type Presence = {
   accountUpdates?: import('./live-usage').AccountUpdate[];
   /**

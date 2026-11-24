@@ -30,6 +30,7 @@ COPY src/lib/account-colors.ts ./src/lib/
 COPY src/lib/snoozes.ts ./src/lib/
 COPY src/lib/pins.ts ./src/lib/
 COPY src/lib/sidebar-order.ts ./src/lib/
+COPY src/lib/comparisons.ts ./src/lib/
 COPY src/lib/sent-files.ts ./src/lib/
 COPY src/lib/tool-output.ts ./src/lib/
 COPY src/lib/usage-limits.ts ./src/lib/

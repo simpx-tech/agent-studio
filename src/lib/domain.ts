@@ -44,6 +44,7 @@ import { accountColorsSchema } from './account-colors.ts';
 import { snoozesSchema } from './snoozes.ts';
 import { pinsSchema } from './pins.ts';
 import { sidebarOrderSchema } from './sidebar-order.ts';
+import { comparisonsSchema } from './comparisons.ts';
 import {
   workflowSchema,
   workflowProgressSchema,
@@ -363,6 +364,8 @@ export const workspaceSchema = z.object({
   pins: pinsSchema.optional(),
   // The order the reader gave the sidebar's chats, folders and computers.
   sidebarOrder: sidebarOrderSchema.optional(),
+  // Tasks sent as several runs side by side, each a chat of its own (docs/COMPARISONS.md).
+  comparisons: comparisonsSchema.optional(),
 });
 export type Workspace = z.infer<typeof workspaceSchema>;
 export type ProviderStatus = {

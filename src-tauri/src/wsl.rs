@@ -399,6 +399,7 @@ mod tests {
             "folders-windows-path.sh",
             "console-launch.sh",
             "console-store.sh",
+            "worktree-include.sh",
         ];
         for (name, source) in names.iter().zip([
             include_str!("wsl-env.sh"),
@@ -410,6 +411,7 @@ mod tests {
             include_str!("folders-windows-path.sh"),
             include_str!("console-launch.sh"),
             include_str!("console-store.sh"),
+            include_str!("worktree-include.sh"),
         ]) {
             assert!(!embedded_script(source).contains('\r'), "{name}");
             // The repository pins these files to LF so every checkout embeds them unchanged.

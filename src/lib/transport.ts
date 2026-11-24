@@ -305,6 +305,36 @@ export const checkCliUpdates = async (): Promise<CliUpdates> =>
  * Installs Claude Code or Codex inside one of this computer's WSL distributions with its
  * provider's own installer, and returns the version it installed.
  */
+const createdWorktreesSchema = z.object({
+  snapshot: z.string(),
+  worktrees: z.array(z.object({ path: z.string(), branch: z.string() })),
+});
+/**
+ * Has this computer make a git worktree for each run of a comparison in a project folder, from
+ * one snapshot of the folder (src-tauri/src/worktrees.rs, docs/COMPARISONS.md).
+ */
+export async function createComparisonWorktrees(
+  environmentId: string,
+  path: string,
+  comparisonId: string,
+  count: number,
+) {
+  if (!desktop()) throw new Error('Compare in a project folder from Agent Studio on its computer.');
+  return createdWorktreesSchema.parse(
+    await invoke('create_comparison_worktrees', { environmentId, path, comparisonId, count }),
+  );
+}
+const changesSchema = z.array(z.object({ path: z.string(), status: z.string() }));
+/** The files a comparison's run changed, and with `apply` those changes put into its folder. */
+export async function comparisonChanges(comparisonId: string, run: number, apply: boolean) {
+  if (!desktop()) throw new Error('Open this comparison on the computer that ran it.');
+  return changesSchema.parse(await invoke('comparison_changes', { comparisonId, run, apply }));
+}
+/** Removes a comparison's worktrees and their branches, with the changes in them. */
+export async function removeComparisonWorktrees(comparisonId: string) {
+  if (!desktop()) throw new Error('Open this comparison on the computer that ran it.');
+  await invoke('remove_comparison_worktrees', { comparisonId });
+}
 export async function installCli(provider: UpdatedCli, environmentId: string): Promise<string> {
   if (!desktop()) throw new Error('Install CLIs from Agent Studio on the computer that runs them.');
   return z.string().parse(await invoke('install_cli', { provider, environmentId }));
@@ -387,7 +417,12 @@ function notifyDesktop(workspace: Pick<Workspace, 'conversations'>) {
   for (const notice of desktopNotices(workspace)) {
     // Consume all lifecycle events, including suppressed ones, so switching
     // chats later cannot replay an alert the reader already saw.
-    if (notice.conversationId === foregroundConversation()) continue;
+    const shown = foregroundConversation();
+    if (
+      notice.conversationId === shown ||
+      (!!shown && !!notice.conversationId && shownTogether(shown).includes(notice.conversationId))
+    )
+      continue;
     // A workflow's chats end quietly, and the chats of its runs ask nothing of their own: the
     // workflow alerts for what matters (docs/WORKFLOWS.md).
     if (
@@ -402,6 +437,12 @@ function notifyDesktop(workspace: Pick<Workspace, 'conversations'>) {
   }
 }
 let notificationConversationId: () => string | undefined = () => undefined;
+// Chats read together with the one on screen, such as the runs of a comparison shown side by side,
+// whose alerts the reader needs no more than its own (docs/COMPARISONS.md).
+let shownTogether: (id: string) => readonly string[] = () => [];
+export function setShownTogether(chats: (id: string) => readonly string[]) {
+  shownTogether = chats;
+}
 let notificationViewId = '';
 let notificationViewRevision = 0;
 /** This desktop app runs as a server, with no one at its window (`src-tauri/src/server.rs`). */
@@ -2367,6 +2408,9 @@ export async function pollRelay(urgent = false): Promise<Presence[] | null> {
             ...(!remote.workspace.pins && merged.pins ? { pins: undefined } : {}),
             ...(!remote.workspace.sidebarOrder && merged.sidebarOrder
               ? { sidebarOrder: undefined }
+              : {}),
+            ...(!remote.workspace.comparisons && merged.comparisons
+              ? { comparisons: undefined }
               : {}),
           };
           const mergedJson = JSON.stringify(unsent);

@@ -430,6 +430,12 @@ pub(crate) async fn execute(
         .join(directory);
     std::fs::create_dir_all(&root)
         .map_err(|_| "Cannot create the conversation runtime directory")?;
+    // A comparison's run learns that it works in a worktree of its own.
+    if request.tools_enabled() && request.conversation_id.is_some() {
+        if let (Some(data), Some(location)) = (root.parent(), &request.location) {
+            request.worktree = crate::worktrees::note(data, location);
+        }
+    }
     let exe = crate::providers::resolve(&request.agent.provider).await?;
     // Conversation replies keep their tool results on this computer; titles and other
     // restricted runs have no tools to record.

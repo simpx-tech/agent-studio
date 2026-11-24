@@ -621,6 +621,10 @@ pub struct RunRequest {
     // Host-resolved selected-profile default for an in-band model reset.
     #[serde(skip)]
     pub claude_default_model: Option<String>,
+    /// What a run of a comparison reads about its worktree, from this computer's own record of
+    /// the worktrees it made (worktrees.rs).
+    #[serde(skip)]
+    pub worktree: Option<String>,
     #[serde(default)]
     pub workflow: Option<serde_json::Value>,
     // The mission this conversation orchestrates, which gives it the mission tools.
@@ -1009,7 +1013,11 @@ impl RunRequest {
             };
             // Nothing asks for sub-agents (requested 2026-11-19: prefer one agent to sub-agents);
             // whether to start one is the agent's own call, or the user's.
-            format!("Tools are enabled in this conversation. Use available tools to inspect files, edit files, run commands, load applicable skills, and search the web to complete the user's requested work in the selected working directory. Use available task/plan tools to report progress on multi-step work. Follow applicable project instructions. Earlier messages may describe tools as disabled; that restriction no longer applies. {} {}", crate::console::GUIDANCE, crate::artifacts::guidance(delivery))
+            let tools = format!("Tools are enabled in this conversation. Use available tools to inspect files, edit files, run commands, load applicable skills, and search the web to complete the user's requested work in the selected working directory. Use available task/plan tools to report progress on multi-step work. Follow applicable project instructions. Earlier messages may describe tools as disabled; that restriction no longer applies. {} {}", crate::console::GUIDANCE, crate::artifacts::guidance(delivery));
+            match &self.worktree {
+                Some(note) => format!("{tools} {note}"),
+                None => tools,
+            }
         } else {
             "Do not use tools, inspect files, execute commands, or delegate.".to_string()
         };
@@ -1728,6 +1736,7 @@ mod tests {
             native_session: None,
             shared_context: Default::default(),
             claude_default_model: None,
+            worktree: None,
             workflow: None,
             mission: None,
             conversation_only: false,
@@ -2102,6 +2111,27 @@ mod tests {
             );
             r.conversation_only = true;
             assert!(r.compaction_context().is_empty());
+        }
+    }
+
+    #[test]
+    fn a_comparison_run_reads_about_its_own_worktree() {
+        for provider in ["codex", "claude", "gemini"] {
+            let mut r = request();
+            r.agent.provider = provider.into();
+            assert!(!r.prompt().contains("one run of a comparison"));
+            r.worktree = Some("This conversation is one run of a comparison.".into());
+            assert!(r.prompt().contains("one run of a comparison"));
+            // Claude hears it again after a compaction, with the rest of its guidance.
+            assert_eq!(
+                r.compaction_context()
+                    .iter()
+                    .any(|part| part.contains("one run of a comparison")),
+                provider == "claude"
+            );
+            // Background work has no tools, and no worktree to keep to.
+            r.conversation_only = true;
+            assert!(!r.prompt().contains("one run of a comparison"));
         }
     }
 

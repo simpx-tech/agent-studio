@@ -56,6 +56,7 @@ mod usage;
 mod watchdog;
 mod window_recovery;
 mod workflow_files;
+mod worktrees;
 mod wsl;
 use std::io::Write;
 use std::sync::Mutex;
@@ -682,6 +683,44 @@ async fn list_folders(
     path: String,
 ) -> Result<folders::FolderListing, String> {
     folders::list(app, environment_id, path).await
+}
+/// The git worktrees that keep a comparison's runs apart (worktrees.rs, docs/COMPARISONS.md).
+#[tauri::command]
+async fn create_comparison_worktrees(
+    app: tauri::AppHandle,
+    call: calls::Call,
+    environment_id: String,
+    path: String,
+    comparison_id: String,
+    count: u32,
+) -> Result<worktrees::Created, String> {
+    call.once(worktrees::create(
+        app,
+        environment_id,
+        path,
+        comparison_id,
+        count,
+    ))
+    .await
+}
+#[tauri::command]
+async fn comparison_changes(
+    app: tauri::AppHandle,
+    call: calls::Call,
+    comparison_id: String,
+    run: u32,
+    apply: bool,
+) -> Result<Vec<worktrees::Change>, String> {
+    call.once(worktrees::changes(app, comparison_id, run as usize, apply))
+        .await
+}
+#[tauri::command]
+async fn remove_comparison_worktrees(
+    app: tauri::AppHandle,
+    call: calls::Call,
+    comparison_id: String,
+) -> Result<(), String> {
+    call.once(worktrees::remove(app, comparison_id)).await
 }
 #[tauri::command]
 async fn detect_connection(
@@ -2423,6 +2462,9 @@ pub fn run() {
             discover_wsl,
             inspect_environment_clis,
             list_folders,
+            create_comparison_worktrees,
+            comparison_changes,
+            remove_comparison_worktrees,
             detect_connection,
             share_claude_files,
             detect_environment_login,

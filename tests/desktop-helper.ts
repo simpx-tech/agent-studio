@@ -376,6 +376,36 @@ export async function mockDesktop(page: Page, mode = 'success') {
                       ? '/home/test/.local/bin/' + id
                       : null,
             }));
+          // A comparison's worktrees (src-tauri/src/worktrees.rs): tests read `worktreeCalls`,
+          // `test-worktree-error` fails making them and `test-worktree-changes` is what a run changed.
+          if (
+            [
+              'create_comparison_worktrees',
+              'comparison_changes',
+              'remove_comparison_worktrees',
+            ].includes(command)
+          ) {
+            const w = window as any;
+            (w.worktreeCalls ??= []).push({ command, ...args });
+            if (command === 'create_comparison_worktrees') {
+              const failure = localStorage.getItem('test-worktree-error');
+              if (failure) throw failure;
+              const short = args.comparisonId.replaceAll('-', '').slice(0, 8);
+              return {
+                snapshot: 'abc123',
+                worktrees: Array.from({ length: args.count }, (_, i) => ({
+                  path: `C:\\Users\\test\\AppData\\Local\\studio\\worktrees\\${short}-${i + 1}\\studio`,
+                  branch: `agent-studio/compare-${short}-${i + 1}`,
+                })),
+              };
+            }
+            if (command === 'comparison_changes')
+              return JSON.parse(
+                localStorage.getItem('test-worktree-changes') ??
+                  '[{"path":"src/app.ts","status":"modified"},{"path":"src/new.ts","status":"added"}]',
+              );
+            return null;
+          }
           // Installing a CLI in WSL: tests read `installCalls`, and `test-install-error` fails it.
           if (command === 'install_cli') {
             const w = window as any;

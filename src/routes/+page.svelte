@@ -104,6 +104,7 @@
     History as HistoryIcon,
     SearchX,
     Gauge,
+    Columns3,
   } from '@lucide/svelte';
   import { pcReservationTitle, type PcReservation } from '$lib/pc-reservations';
   import {
@@ -229,6 +230,9 @@
     runScreenAction,
     saveScreenData,
     setQuietChats,
+    setShownTogether,
+    createComparisonWorktrees,
+    removeComparisonWorktrees,
     workflowHookUrl as webhookUrl,
   } from '$lib/transport';
   import { notificationWorkflow } from '$lib/notifications';
@@ -312,6 +316,22 @@
     withoutSnooze,
   } from '$lib/snoozes';
   import { pinIndex, withPin, withoutPin } from '$lib/pins';
+  import {
+    changedComparison,
+    comparisonIndex,
+    comparisonRunning,
+    laterRuns,
+    leadChat,
+    listedChats,
+    quietRun,
+    waitingRuns,
+    withComparison,
+    withoutComparison,
+    type Comparison,
+  } from '$lib/comparisons';
+  import ComparisonView, { type ComparedRun } from '$lib/components/ComparisonView.svelte';
+  import CompareRuns from '$lib/components/CompareRuns.svelte';
+  import ComparisonDialog from '$lib/components/ComparisonDialog.svelte';
   import { orderIndex, withMove, withoutRanks } from '$lib/sidebar-order';
   import {
     focusItem,
@@ -427,6 +447,7 @@
   import {
     fastModeName,
     replyAccountSwitches,
+    replyModelName,
     replySettingsChanged,
     replySwitches,
     selectedModelName,
@@ -604,7 +625,14 @@
       void notifyWorkflow(summary.id, alert);
     },
   });
-  const hiddenChats = $derived(workflows.chats);
+  // A workflow's chats stay with their workflow, and a comparison's later runs with its first.
+  const hiddenChats = $derived(
+    workspace.comparisons?.length
+      ? new Set([...workflows.chats, ...laterRuns(workspace.comparisons)])
+      : workflows.chats,
+  );
+  // Comparisons by the chats of their runs (src/lib/comparisons.ts, docs/COMPARISONS.md).
+  const comparisonsByChat = $derived(comparisonIndex(workspace.comparisons));
   let modelGeneration = 0;
   let models = $state<ModelCatalog>(structuredClone(fallbackModels));
   let modelsLoading = $state(false);
@@ -1950,9 +1978,9 @@
     })),
   );
   const recent = $derived(
-    [...workspace.conversations]
-      // A workflow's chats stay with their workflow.
-      .filter((c) => !hiddenChats.has(c.id))
+    // A workflow's chats stay with their workflow, and a comparison is listed as one chat.
+    listedChats(workspace.conversations, workspace.comparisons)
+      .filter((c) => !workflows.chats.has(c.id))
       .filter((c) =>
         `${c.title} ${providers[c.settings.provider].name} ${c.location?.path ?? ''} ${computers.find((computer) => computer.id === (c.location ? locationComputerId(c.location) : ''))?.name ?? ''}`
           .toLowerCase()
@@ -2025,7 +2053,11 @@
   const snoozeOf = (c: Conversation) => snoozeState(snoozesByChat.get(c.id), c, lastStart);
   const heldChat = (id: string) => workspace.conversations.find((c) => c.id === id);
   const pendingChats = $derived(
-    pendingChatCount(workspace.conversations.filter((c) => !hiddenChats.has(c.id))),
+    pendingChatCount(
+      listedChats(workspace.conversations, workspace.comparisons).filter(
+        (c) => !workflows.chats.has(c.id),
+      ),
+    ),
   );
   // Chats whose reply finished while the reader was elsewhere keep a dot in the sidebar until
   // they are opened. Reading state belongs to this window: never saved, exported or synced.
@@ -3161,8 +3193,11 @@
         history.replaceState(null, '', window.location.pathname + window.location.search);
       return;
     }
-    const conversation = workspace.conversations.find((c) => c.id === notificationTarget);
+    const alerted = comparisonsByChat.get(notificationTarget);
+    const target = alerted ? leadChat(alerted) : notificationTarget;
+    const conversation = workspace.conversations.find((c) => c.id === target);
     if (!conversation) return; // A cold start may still be downloading the checkpoint.
+    if (alerted) delete comparisonRunOpen[alerted.id];
     // Unsent drafts stay with their own chat. Only an image still being read waits for it.
     if (activeId !== conversation.id && imagesLoading) return;
     notificationTarget = undefined;
@@ -3221,9 +3256,26 @@
     let disposed = false;
     // A workflow's chats end without an alert of their own, and its runs' chats raise none.
     setQuietChats(
-      () => workflows.chats,
+      () => {
+        // The runs of a comparison end quietly but the last, which announces them all.
+        const list = workspace.comparisons;
+        if (!list?.length) return workflows.chats;
+        const quiet = new Set(workflows.chats);
+        for (const comparison of list)
+          for (const run of comparison.runs)
+            if (quietRun(run.conversationId, workspace.conversations, list))
+              quiet.add(run.conversationId);
+        return quiet;
+      },
       () => workflows.isolated,
     );
+    // A comparison on screen shows every run: none needs an alert of its own.
+    setShownTogether((id) => {
+      const comparison = comparisonsByChat.get(id);
+      return comparison && comparisonGrid && leadChat(comparison) === id
+        ? comparison.runs.map((run) => run.conversationId)
+        : [];
+    });
     const stopAccountUpdates = watchAccountUpdates(applyAccountUpdate);
     const stopBackgroundWork = watchBackgroundWork(applyBackgroundWork);
     const stopPcReservations = watchPcReservations(
@@ -5270,8 +5322,341 @@
   // below it in its folder, else above it there (a search match first), or to a new chat in that
   // folder when none is left, never to another folder's chat. From the sidebar, the view and the
   // phone drawer stay as they are.
-  function archiveConversation(c: Conversation, fromSidebar = false) {
-    if (!loaded || c.archived || conversationRunning(c)) return;
+  // Comparisons (docs/COMPARISONS.md): one task sent as several runs, each a chat of its own,
+  // shown side by side.
+  type CompareDraft = {
+    choices: { id: string; settings: ChatSettings; count: number }[];
+    oneAtATime: boolean;
+  };
+  // The runs a new chat in Compare mode sends, by scratch chat, in this window's memory only.
+  let compareDrafts = $state<Record<string, CompareDraft>>({});
+  let comparing = $state(false);
+  // Comparisons whose run is open as a chat of its own instead of the comparison.
+  let comparisonRunOpen = $state<Record<string, boolean>>({});
+  let comparisonDialog = $state<{ id: string; kind: 'apply' | 'remove' } | null>(null);
+  const compareDraft = $derived(
+    !active && !currentScratch?.workflow ? compareDrafts[scratchId] : undefined,
+  );
+  const activeComparison = $derived(active ? comparisonsByChat.get(active.id) : undefined);
+  const comparisonGrid = $derived(
+    !!activeComparison &&
+      !!active &&
+      leadChat(activeComparison) === active.id &&
+      !comparisonRunOpen[activeComparison.id],
+  );
+  /** A run's model, reasoning and account, as the run picker and its column name it. */
+  function runLabel(settings: ChatSettings, modelName?: string) {
+    const catalog = modelCache.get(modelScopeKey(settings))?.catalog ?? fallbackModels;
+    const name =
+      modelName ||
+      selectedModelName(settings.model, modelChoices(catalog, settings.provider, settings.model));
+    const label = [name, reasoningName(settings.reasoning), ...(settings.fastMode ? ['Fast'] : [])]
+      .filter(Boolean)
+      .join(' · ');
+    const account = settings.connectionId
+      ? accountName(workspace.fleet, settings.connectionId)
+      : undefined;
+    return {
+      label,
+      mark: modelMark(settings.provider, name),
+      ...(account
+        ? {
+            account: {
+              name: account,
+              color: connectionColor(settings.connectionId) ?? 'var(--account-gray)',
+            },
+          }
+        : {}),
+    };
+  }
+  const comparedRuns = $derived.by((): ComparedRun[] => {
+    const comparison = activeComparison;
+    if (!comparison || !comparisonGrid) return [];
+    const shown = comparison.runs.map((run) => {
+      const chat = heldChat(run.conversationId);
+      const reply = chat?.messages.find((m) => m.role === 'assistant');
+      const named = chat
+        ? runLabel(reply?.settings ?? chat.settings, reply ? replyModelName(reply) : undefined)
+        : { label: 'Deleted run', mark: modelMark('claude', '') };
+      return {
+        id: run.conversationId,
+        chat,
+        ...named,
+        ...(run.branch && !comparison.removed ? { branch: run.branch } : {}),
+        key: `${named.label}|${chat?.settings.connectionId ?? ''}`,
+      };
+    });
+    // Runs of the same model, reasoning and account are numbered.
+    const counts = new Map<string, number>();
+    for (const run of shown) counts.set(run.key, (counts.get(run.key) ?? 0) + 1);
+    const seen = new Map<string, number>();
+    return shown.map(({ key, ...run }) => {
+      if ((counts.get(key) ?? 0) < 2) return run;
+      const repeat = (seen.get(key) ?? 0) + 1;
+      seen.set(key, repeat);
+      return { ...run, repeat };
+    });
+  });
+  // Whether this computer made a comparison's worktrees, which only it can apply or remove.
+  const madeHere = (comparison: Comparison) =>
+    desktop() &&
+    !!comparison.location &&
+    executionHost(workspace.fleet, comparison.location.environmentId) === installation?.id;
+  function toggleCompare() {
+    if (compareDrafts[scratchId]) delete compareDrafts[scratchId];
+    else
+      compareDrafts[scratchId] = {
+        choices: [
+          {
+            id: crypto.randomUUID(),
+            settings: structuredClone($state.snapshot(selectedSettings)),
+            count: 1,
+          },
+        ],
+        oneAtATime: false,
+      };
+    attachmentError = '';
+    void tick().then(() => composerInput?.focus());
+  }
+  const sameRun = (a: ChatSettings, b: ChatSettings) =>
+    a.provider === b.provider &&
+    (a.connectionId ?? '') === (b.connectionId ?? '') &&
+    a.model === b.model &&
+    a.reasoning === b.reasoning &&
+    !!a.fastMode === !!b.fastMode;
+  // Adds the toolbar's choice, or runs it once more when it is there already.
+  function addCompareChoice() {
+    const draft = compareDrafts[scratchId];
+    if (!draft) return;
+    const settings = structuredClone($state.snapshot(selectedSettings));
+    const same = draft.choices.find((choice) => sameRun(choice.settings, settings));
+    if (same) same.count++;
+    else draft.choices.push({ id: crypto.randomUUID(), settings, count: 1 });
+    attachmentError = '';
+  }
+  function setCompareCount(id: string, count: number) {
+    const draft = compareDrafts[scratchId];
+    if (!draft) return;
+    if (count > 0) {
+      const choice = draft.choices.find((c) => c.id === id);
+      if (choice) choice.count = count;
+    } else draft.choices = draft.choices.filter((choice) => choice.id !== id);
+  }
+  /**
+   * Sends the composer's task as a comparison: a chat per run, each in a git worktree of the folder
+   * made from one snapshot of it, or without a folder in a Standalone folder of its own.
+   */
+  async function sendComparison() {
+    const draft = compareDraft,
+      key = scratchId,
+      sentDraft = composerDraftKey;
+    if (!draft || comparing || !loaded) return;
+    const text = prompt.trim();
+    const images = attachedImages;
+    if (!text && !images.length) return;
+    const choices = $state.snapshot(draft.choices);
+    const settingsList = choices.flatMap((choice) =>
+      Array.from({ length: choice.count }, () => choice.settings),
+    );
+    if (settingsList.length < 2) {
+      attachmentError = 'Add another run.';
+      return;
+    }
+    const location = selectedLocation ? structuredClone($state.snapshot(selectedLocation)) : undefined;
+    for (const choice of choices)
+      if (!readyToSend({ settings: choice.settings, location } as Conversation)) {
+        attachmentError = `${runLabel(choice.settings).label} cannot run on this computer now.`;
+        return;
+      }
+    const id = crypto.randomUUID();
+    const session = workspaceSession;
+    comparing = true;
+    attachmentError = '';
+    try {
+      const stored = images.length ? await storeChatImages(images) : [];
+      let made: Awaited<ReturnType<typeof createComparisonWorktrees>> | undefined;
+      if (location?.path) {
+        if (!desktop() || executionHost(workspace.fleet, location.environmentId) !== installation?.id)
+          throw new Error('Compare in a project folder from Agent Studio on its computer.');
+        made = await createComparisonWorktrees(
+          location.environmentId,
+          location.path,
+          id,
+          settingsList.length,
+        );
+      }
+      if (session !== workspaceSession) return;
+      const now = new Date().toISOString();
+      const chats: Conversation[] = settingsList.map((settings, i) => ({
+        id: crypto.randomUUID(),
+        settings: structuredClone(settings),
+        ...(location
+          ? { location: { ...location, ...(made ? { path: made.worktrees[i].path } : {}) } }
+          : {}),
+        title: text.slice(0, 80) || 'Image conversation',
+        titleStatus: 'pending',
+        createdAt: now,
+        updatedAt: now,
+        messages: [],
+      }));
+      for (const chat of chats) addUserMessage(chat, { text, images: stored }, now);
+      workspace.conversations.unshift(...chats);
+      workspace.comparisons = withComparison($state.snapshot(workspace.comparisons), {
+        id,
+        createdAt: now,
+        ...(location ? { location } : {}),
+        isolation: made ? 'worktree' : 'standalone',
+        runs: chats.map((chat, i) => ({
+          conversationId: chat.id,
+          ...(made ? { worktree: i, branch: made.worktrees[i].branch } : {}),
+        })),
+        ...(draft.oneAtATime ? { oneAtATime: true } : {}),
+        at: now,
+      });
+      saveSettingsSoon();
+      prompt = '';
+      clearImages();
+      forgetDraft(sentDraft);
+      delete compareDrafts[key];
+      const live = chats.map((chat) => heldChat(chat.id)!);
+      activeId = live[0].id;
+      composerDraftKey = draftKey.chat(live[0].id);
+      dropScratch(sentDraft);
+      for (const chat of draft.oneAtATime ? live.slice(1) : []) void persistChat(chat.id);
+      for (const chat of draft.oneAtATime ? live.slice(0, 1) : live) startRun(chat);
+      void nameComparison(live[0], text, location);
+    } catch (error) {
+      if (session === workspaceSession) attachmentError = String(error).replace(/^Error: /, '');
+    } finally {
+      if (session === workspaceSession) comparing = false;
+    }
+  }
+  function startRun(conversation: Conversation) {
+    const { provider, model } = conversation.settings;
+    const catalog = modelCache.get(modelScopeKey(conversation.settings))?.catalog ?? fallbackModels;
+    void startReply(conversation, {
+      now: new Date().toISOString(),
+      modelName: selectedModelName(model, modelChoices(catalog, provider, model)),
+    });
+  }
+  function startWaitingRun(id: string) {
+    const chat = heldChat(id);
+    if (chat && !conversationRunning(chat) && !chat.messages.some((m) => m.role === 'assistant'))
+      startRun(chat);
+  }
+  // The next run of a comparison that runs one at a time, once none runs, started by the
+  // computer that runs it.
+  function advanceComparison(id: string) {
+    const comparison = comparisonsByChat.get(id);
+    if (!comparison?.oneAtATime) return;
+    const chats = new Map(
+      comparison.runs.flatMap((run) => {
+        const chat = heldChat(run.conversationId);
+        return chat ? [[run.conversationId, chat] as const] : [];
+      }),
+    );
+    if (comparisonRunning(comparison, chats)) return;
+    const next = waitingRuns(comparison, chats)[0];
+    if (next && runsHere(next.settings.connectionId)) startRun(next);
+  }
+  // One title names a comparison: its first run's, which the other runs take.
+  async function nameComparison(lead: Conversation, text: string, location?: ChatLocation) {
+    const session = workspaceSession;
+    await nameConversation(
+      lead.id,
+      lead.settings.provider,
+      text || 'A conversation about attached images',
+      lead.title,
+      lead.settings.connectionId,
+    );
+    if (session !== workspaceSession) return;
+    const named = heldChat(lead.id);
+    const comparison = comparisonsByChat.get(lead.id);
+    if (!named || !comparison || named.titleStatus === 'pending') return;
+    for (const run of comparison.runs.slice(1)) {
+      const chat = heldChat(run.conversationId);
+      if (!chat || chat.titleStatus !== 'pending') continue;
+      chat.title = named.title;
+      chat.titleStatus = named.titleStatus;
+      if (named.titleSource) chat.titleSource = { ...named.titleSource };
+      saveSoon(chat.id);
+    }
+    void chooseFolderIcon(session, lead.id, location, lead.settings, text);
+  }
+  function pickRun(comparisonId: string, conversationId: string | undefined) {
+    workspace.comparisons = changedComparison(
+      $state.snapshot(workspace.comparisons),
+      comparisonId,
+      () => ({ picked: conversationId }),
+    );
+    saveSettingsSoon();
+  }
+  // A run's own chat, to read it whole or go on with it.
+  function openComparisonRun(id: string) {
+    const chat = heldChat(id);
+    const comparison = comparisonsByChat.get(id);
+    if (!chat || !comparison) return;
+    openConversation(chat);
+    comparisonRunOpen[comparison.id] = true;
+  }
+  function openComparison(comparison: Comparison) {
+    const lead = heldChat(leadChat(comparison));
+    if (lead) openConversation(lead);
+  }
+  // Lets go of the runs' parked CLIs, whose working folders are the worktrees.
+  async function releaseRuns(comparison: Comparison) {
+    for (const run of comparison.runs) {
+      const chat = heldChat(run.conversationId);
+      if (chat) await releaseConversation(chat.id, chat.settings.connectionId).catch(() => {});
+    }
+  }
+  function markComparison(id: string, change: Partial<Comparison>) {
+    workspace.comparisons = changedComparison(
+      $state.snapshot(workspace.comparisons),
+      id,
+      () => change,
+    );
+    saveSettingsSoon();
+  }
+  function removeWorktreesOf(comparison: Comparison) {
+    if (comparison.isolation !== 'worktree' || comparison.removed || !madeHere(comparison)) return;
+    void removeComparisonWorktrees(comparison.id).catch((e) => {
+      notice = `The comparison's worktrees were kept: ${String(e).replace(/^Error: /, '')}`;
+    });
+  }
+  async function deleteComparisonRuns(comparison: Comparison, lead: string, session: number) {
+    for (const run of comparison.runs) {
+      if (run.conversationId === lead) continue;
+      const chat = heldChat(run.conversationId);
+      if (!chat) continue;
+      const owned = runs[chat.id];
+      const reply = chat.messages.find((m) => m.status === 'running');
+      if (owned) stopping[chat.id] = true;
+      const runId = owned ?? reply?.runId;
+      if (runId)
+        await cancelRun(runId, reply?.settings?.connectionId ?? chat.settings.connectionId, true);
+      if (session !== workspaceSession) return;
+      delete queued[chat.id];
+      await releaseConversation(chat.id, chat.settings.connectionId).catch(() => {});
+      await cancelTitle(chat.id).catch(() => {});
+      if (session !== workspaceSession) return;
+      workspace.conversations = workspace.conversations.filter((c) => c.id !== chat.id);
+      await persistChat(chat.id);
+      forgetDraft(draftKey.chat(chat.id));
+      forgetChat(chat.id);
+    }
+    workspace.comparisons = withoutComparison($state.snapshot(workspace.comparisons), comparison.id);
+    delete comparisonRunOpen[comparison.id];
+    saveSettingsSoon();
+  }
+  function archiveConversation(row: Conversation, fromSidebar = false) {
+    // A comparison's row is its first run's chat read as the whole comparison: every run moves.
+    const c = heldChat(row.id) ?? row;
+    const comparison = comparisonsByChat.get(c.id);
+    const moved = comparison
+      ? comparison.runs.flatMap((run) => heldChat(run.conversationId) ?? [])
+      : [c];
+    if (!loaded || c.archived || moved.some(conversationRunning)) return;
     const open = c.id === activeId;
     const unfiltered = () =>
       groupConversations(
@@ -5290,11 +5675,13 @@
       ? (nextActiveConversation(conversationGroups, c.id) ??
         (query ? nextActiveConversation(unfiltered(), c.id) : undefined))
       : undefined;
-    c.archived = true;
-    c.updatedAt = new Date().toISOString();
-    saveSoon(c.id);
-    // Closing a chat is the user's call, and it closes the chat's parked CLI process too.
-    void closeConversation(c.id, c.settings.connectionId).catch(() => {});
+    for (const chat of moved) {
+      chat.archived = true;
+      chat.updatedAt = new Date().toISOString();
+      saveSoon(chat.id);
+      // Closing a chat is the user's call, and it closes the chat's parked CLI process too.
+      void closeConversation(chat.id, chat.settings.connectionId).catch(() => {});
+    }
     if (!open) return;
     const shown = view,
       drawer = sidebarOpen;
@@ -5339,7 +5726,7 @@
       open = c.id === activeId;
     if ('messages' in c) {
       archiveConversation(c, true);
-      if (!c.archived) return;
+      if (!(heldChat(c.id) ?? c).archived) return;
     } else discardScratch(c.id);
     if (!focused) return;
     void tick().then(() => {
@@ -5524,6 +5911,8 @@
   // Another chat opens as the reader left it in this window (`showPlace`), or at its end when
   // `latest`, as from an alert about it.
   function openConversation(c: Conversation, latest = false) {
+    const compared = comparisonsByChat.get(c.id);
+    if (compared && leadChat(compared) === c.id) delete comparisonRunOpen[compared.id];
     if (latest) recalled(recalls.get(c.id), 'chat').set('place', undefined);
     delete finishedChats[c.id];
     templatesOpen = false;
@@ -5858,7 +6247,11 @@
     const runId = ownedRun ?? reply?.runId;
     deleting = true;
     deletionError = '';
+    const compared = comparisonsByChat.get(target.id);
     try {
+      // A comparison goes whole: its other runs first, its first run's chat below.
+      if (compared) await deleteComparisonRuns(compared, target.id, session);
+      if (session !== workspaceSession) return;
       if (ownedRun) stopping[target.id] = true;
       if (runId)
         await cancelRun(runId, reply?.settings?.connectionId ?? target.settings.connectionId, true);
@@ -5886,6 +6279,8 @@
       // The saved order leaves it out, and a sync sees it gone from the baseline.
       await persistChat(target.id);
       if (session !== workspaceSession) return;
+      // Its worktrees go with it, once no CLI of its runs holds them.
+      if (compared) removeWorktreesOf(compared);
       // Its unsent draft and its panels are deleted with the conversation.
       forgetDraft(draftKey.chat(target.id));
       rewoundDrafts.delete(target.id);
@@ -6392,6 +6787,8 @@
   }
   async function send(retry = false, queuedMessage?: QueuedMessage, compactRequest?: string) {
     if (activeSteering || readOnlyChat) return;
+    // A new chat in Compare mode sends its task as the runs of a comparison.
+    if (!retry && !queuedMessage && !compactRequest && compareDraft) return void sendComparison();
     if (preparingCommand) return;
     if (queuedMessage?.mentions?.length && queuedMessage.mentionConnectionId !== selectedSettings.connectionId) {
       const restored = restoreToDraft([queuedMessage], prompt, attachedImages);
@@ -6951,6 +7348,8 @@
         void refreshUsage(responseSettings, true);
         // A workflow waiting for this reply goes on at once.
         workflows.nudge();
+        // The next run of a comparison that runs one at a time starts as this one ends.
+        advanceComparison(conversation.id);
         if (releaseAfterReply.has(conversation.id))
           setTimeout(() => releaseWorkflowChat(conversation.id));
       } else if (session === workspaceSession && takingOver[conversation.id] === takeOver?.itemId)
@@ -7115,7 +7514,7 @@
       reply.autoContinue ||
       reply.compact ||
       limitedReply(conversation)?.id !== reply.id ||
-      hiddenChats.has(conversation.id)
+      workflows.chats.has(conversation.id)
     )
       return;
     reply.autoContinue = startedPlan(Date.now());
@@ -7125,7 +7524,7 @@
   /** Whether this computer runs a chat's next reply, and so makes it go on after a limit. */
   function drivesContinue(conversation: Conversation) {
     const { settings, location } = conversation;
-    if (!desktop() || hiddenChats.has(conversation.id)) return false;
+    if (!desktop() || workflows.chats.has(conversation.id)) return false;
     if (settings.connectionId) return runsHere(settings.connectionId);
     return (
       !!location &&
@@ -7461,13 +7860,15 @@
     monitors,
     plan,
     snoozed,
-  )}{@const uses = rowUses(c, runningReply)}
+  )}{@const uses = rowUses(c, runningReply)}{@const compared = comparisonsByChat.get(c.id)}{@const current =
+    view === 'chat' &&
+    (activeId === c.id || (!!activeComparison && leadChat(activeComparison) === c.id))}
   <div class="conversation-row" data-order={c.id}>
     <button
       class="conversation-item"
       class:pinned-item={!!pinned}
-      class:current={activeId === c.id && view === 'chat'}
-      aria-current={activeId === c.id && view === 'chat' ? 'page' : undefined}
+      class:current={current}
+      aria-current={current ? 'page' : undefined}
       aria-describedby={`uses-${c.id}`}
       aria-haspopup="menu"
       data-conversation={c.id}
@@ -7492,12 +7893,20 @@
           longPressedConversation = undefined;
         } else openConversation(c);
       }}
-      title={[c.title, ...notes].join(' · ')}
-      aria-label={notes.length
-        ? [c.title, ...notes.map((note) => note.toLowerCase())].join(', ')
+      title={[c.title, ...(compared ? [`${compared.runs.length} runs`] : []), ...notes].join(' · ')}
+      aria-label={notes.length || compared
+        ? [
+            c.title,
+            ...(compared ? [`comparison of ${compared.runs.length} runs`] : []),
+            ...notes.map((note) => note.toLowerCase()),
+          ].join(', ')
         : undefined}
       >{#if finished}<i class="conversation-finished" aria-hidden="true"
-        ></i>{:else if pinned?.location?.path}<FolderIcon
+        ></i>{:else if compared}<Columns3
+          size={13}
+          class="conversation-compare"
+          aria-hidden="true"
+        />{:else if pinned?.location?.path}<FolderIcon
           icon={folderIconOf(iconsByFolder, pinned.location)?.icon}
           size={13}
         />{:else if pinned}<MessageCircle size={13} aria-hidden="true" />{/if}<span>{c.title}</span
@@ -7537,6 +7946,24 @@
       >{/if}
   </div>
 {/snippet}
+
+{#snippet comparedMessage(chat: Conversation, m: Message)}<MessageView
+    message={m}
+    questionDrafts={m.runId ? questionDrafts[m.runId] : undefined}
+    idle={waitsForWork(m)}
+    background={messageBackgroundWork(m, hostBackground[chat.id])}
+    folder={chat.location?.path}
+    agent={chat.settings}
+    retry={() => {}}
+    {openArtifact}
+    openTimeReport={m.role === 'assistant' && m.status !== 'running'
+      ? () => (timeReportOpen = { chat: chat.id, reply: m.id })
+      : undefined}
+    openScreen={(card) => openScreen(card.environmentId, card.id)}
+    openPage={claudePagesInApp()
+      ? (card) => openPage(activeId ?? chat.id, card, (m.settings ?? chat.settings).connectionId)
+      : undefined}
+  />{/snippet}
 
 {#if !desktop() && !paired}
   <WorkspaceLogin
@@ -8174,7 +8601,31 @@
         class:chat-open={graphFirst && workflowChatShown}
         bind:clientWidth={chatWorkspaceWidth}
       >
-        <section
+        {#if comparisonGrid && activeComparison}{@const comparison = activeComparison}<section
+            id="chat-area"
+            class="chat-layout"
+            aria-label="Chat"
+          >
+            <ComparisonView
+              {comparison}
+              title={active?.title ?? ''}
+              folder={comparison.location?.path ? folderName(comparison.location.path) : undefined}
+              runs={comparedRuns}
+              canApply={comparison.isolation === 'worktree' &&
+                !!comparison.picked &&
+                !comparison.removed &&
+                madeHere(comparison)}
+              canRemove={comparison.isolation === 'worktree' &&
+                !comparison.removed &&
+                madeHere(comparison)}
+              message={comparedMessage}
+              open={openComparisonRun}
+              pick={(id) => pickRun(comparison.id, id)}
+              start={startWaitingRun}
+              apply={() => (comparisonDialog = { id: comparison.id, kind: 'apply' })}
+              removeWorktrees={() => (comparisonDialog = { id: comparison.id, kind: 'remove' })}
+            />
+          </section>{:else}<section
           id="chat-area"
           class="chat-layout"
           class:workflow-chat-card={graphFirst}
@@ -8213,6 +8664,17 @@
                 >Workflow · <strong>{activeWorkflow.title}</strong></span
               ><button class="text-button" onclick={() => openWorkflow(activeWorkflow.id)}
                 >Open workflow</button
+              >
+            </div>{/if}
+          {#if activeComparison && !comparisonGrid}{@const comparison = activeComparison}<div
+              class="workflow-banner comparison-banner"
+              role="note"
+            >
+              <Columns3 size={14} aria-hidden="true" /><span
+                >Run {comparison.runs.findIndex((run) => run.conversationId === activeId) + 1} of {comparison
+                  .runs.length}</span
+              ><button class="text-button" onclick={() => openComparison(comparison)}
+                >Back to comparison</button
               >
             </div>{/if}
           <div class="chat-toolbar" aria-label="Conversation settings">
@@ -8740,6 +9202,19 @@
                       >
                     </li>{/each}
                 </ul>{/if}
+              {#if compareDraft}{@const draft = compareDraft}<CompareRuns
+                  choices={draft.choices.map((choice) => ({
+                    id: choice.id,
+                    count: choice.count,
+                    ...runLabel(choice.settings),
+                  }))}
+                  next={runLabel(selectedSettings)}
+                  oneAtATime={draft.oneAtATime}
+                  disabled={comparing}
+                  add={addCompareChoice}
+                  count={setCompareCount}
+                  sequence={(value) => (draft.oneAtATime = value)}
+                />{/if}
               {#if attachedImages.length}<ImageAttachments
                   images={attachedImages}
                   remove={(id) => {
@@ -8763,7 +9238,9 @@
               <textarea
                 bind:this={composerInput}
                 aria-label="Message"
-                placeholder={activeRunning && !waitingReply
+                placeholder={compareDraft
+                  ? 'Describe the task…'
+                  : activeRunning && !waitingReply
                   ? `Message ${selectedAgent.name} after this reply…`
                   : currentScratch?.workflow && !currentScratch.workflow.id
                     ? currentScratch.workflow.mode === 'mission'
@@ -8838,6 +9315,7 @@
                 }}
               />
               {#if imagesLoading}<p class="attachment-notice" role="status">Reading images…</p>{/if}
+              {#if comparing}<p class="attachment-notice" role="status">Preparing the runs…</p>{/if}
               {#if imagesSending}<p class="attachment-notice" role="status">{desktop() ? 'Saving images…' : 'Uploading images…'}</p>{/if}
               {#if attachmentError}<p class="attachment-notice" role="alert">{attachmentError}</p>
               {:else if attachedImages.length && !imagesSupported}<p
@@ -8870,6 +9348,17 @@
                       onclick={() =>
                         changeSettings({ ...selectedSettings, fastMode: !selectedSettings.fastMode })}
                       ><Zap size={16} aria-hidden="true" />Fast</button
+                    >{/if}
+                  {#if !active && !currentScratch?.workflow}<button
+                      type="button"
+                      class="fast-toggle compare-toggle"
+                      aria-label="Compare"
+                      aria-pressed={!!compareDraft}
+                      disabled={!loaded || comparing}
+                      onclick={toggleCompare}
+                      ><Columns3 size={16} aria-hidden="true" /><span class="compare-label"
+                        >Compare</span
+                      ></button
                     >{/if}
                   <button
                     type="button"
@@ -8907,7 +9396,7 @@
                   >{:else}<button
                     class="send-button"
                     type="submit"
-                    disabled={!canSend || (!prompt.trim() && !attachedImages.length)}
+                    disabled={!canSend || comparing || (!prompt.trim() && !attachedImages.length)}
                     aria-label="Send message"><ArrowUp size={19} /></button
                   >{/if}
               </div>
@@ -8929,7 +9418,7 @@
               accountUnavailable={!canQueryConnection(selectedSettings.connectionId, selectedSettings.provider)}
             />{/if}
           </div>
-        </section>
+        </section>{/if}
         <!-- The gap between a workflow's chat card and its graph resizes the card. -->
         {#if graphFirst && workflowChatShown && viewportWidth > 760}<PanelResize
             gutter={16}
@@ -9240,6 +9729,28 @@
     />
   {/key}
 {/if}
+{#if comparisonDialog}{@const dialog = comparisonDialog}{@const comparison = workspace.comparisons?.find(
+    (c) => c.id === dialog.id,
+  )}{#if comparison}{@const picked = comparison.runs.find(
+      (run) => run.conversationId === comparison.picked,
+    )}<ComparisonDialog
+      kind={dialog.kind}
+      comparisonId={comparison.id}
+      run={picked?.worktree ?? 0}
+      folder={comparison.location?.path ? folderName(comparison.location.path) : 'the folder'}
+      runs={comparison.runs.length}
+      close={() => {
+        if (comparisonDialog === dialog) comparisonDialog = null;
+      }}
+      prepare={() => releaseRuns(comparison)}
+      done={() =>
+        markComparison(
+          comparison.id,
+          dialog.kind === 'apply'
+            ? { applied: new Date().toISOString() }
+            : { removed: new Date().toISOString() },
+        )}
+    />{/if}{/if}
 {#if historyAction && active?.id === historyAction.conversationId}
   {@const action = historyAction}
   {#key `${workspaceSession}:${active.id}:${historyAction.kind}:${historyAction.runId ?? ''}`}

@@ -13,6 +13,7 @@ import { readState, stateParts, writeState, type State } from '../scripts/vps/st
 import { lightChat, messagesById, restoreChat } from '../src/lib/light-chats.ts';
 import { jobAwaitsAnswer, pushService, type PushSender } from './push.ts';
 import { pendingChatCount } from '../src/lib/notifications.ts';
+import { listedChats, quietRun } from '../src/lib/comparisons.ts';
 import { answerSchema } from '../src/lib/questions.ts';
 import { elicitationInputSchema } from '../src/lib/elicitations.ts';
 import { steeringInputSchema } from '../src/lib/steering.ts';
@@ -369,12 +370,15 @@ export function createRelay({
       active,
       sessionActive: (identity) => active() && sessions.active(identity),
       send: pushSender,
-      // A workflow's chats stay out of the count, as they stay out of the chat lists.
+      // A workflow's chats stay out of the count, as they stay out of the chat lists, and a
+      // comparison counts once.
       pendingCount: () =>
         pendingChatCount(
-          ((chats) => state.workspace.conversations.filter((c) => !chats.has(c.id)))(
-            workflows.workflowChats(),
-          ),
+          ((chats) =>
+            listedChats(
+              state.workspace.conversations.filter((c) => !chats.has(c.id)),
+              state.workspace.comparisons,
+            ))(workflows.workflowChats()),
           new Map(
             [...jobs.values()]
               .filter((job) => job.method === 'run')
@@ -383,7 +387,10 @@ export function createRelay({
         ),
       conversationTitle: (id) => state.workspace.conversations.find((c) => c.id === id)?.title,
       conversationExists: (id) => state.workspace.conversations.some((c) => c.id === id),
-      quiet: (id) => workflows.workflowChats().has(id),
+      // The runs of a comparison end quietly but the last, which announces them all.
+      quiet: (id) =>
+        workflows.workflowChats().has(id) ||
+        quietRun(id, state.workspace.conversations, state.workspace.comparisons),
       isolated: (id) => workflows.runChats().has(id),
     });
     const images = imageStore(directory, now);
