@@ -43,6 +43,22 @@ describe('reservations of this computer', () => {
         title,
       ),
     ).toBe('Computer reserved: Benchmark of chunk meshing · Chunk benchmark · Waiting for 1 command');
+    // A chat asked to hand over what it holds is no command.
+    expect(
+      pcReservationTitle(
+        [
+          reservation({
+            waitingFor: [
+              { conversationId: 'ui', label: '`Build.bat`' },
+              { conversationId: 'art', label: 'handing over', handOver: true },
+            ],
+          }),
+        ],
+        title,
+      ),
+    ).toBe(
+      'Computer reserved: Benchmark of chunk meshing · Chunk benchmark · Waiting for 1 command and 1 chat to hand over',
+    );
     expect(
       pcReservationTitle(
         [reservation({ phase: 'open', held: 2 }), reservation({ id: 'pc-2', phase: 'queued' })],

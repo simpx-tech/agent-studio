@@ -544,6 +544,39 @@ describe('activity groups', () => {
     expect(activityGroupSummary(messages, 'complete').icon).toBe('message');
   });
 
+  it('names messages between chats on this computer by who sent them and who they went to', () => {
+    // src-tauri/src/reservations.rs: a reply that read another chat's message shows it.
+    const received = tool('studio-message:ui:1', {
+      name: 'Message from another chat',
+      operation: 'receivedMessage',
+      detail: 'the chat "Chunk benchmark" (id 3f2a91c0)',
+      status: 'complete',
+    });
+    const sent = tool('sent', {
+      name: 'Message a chat',
+      operation: 'sendMessage',
+      detail: 'Fix inventory UI',
+      status: 'complete',
+    });
+    expect(liveAction(received, 'complete')).toMatchObject({
+      icon: 'message',
+      verb: 'Received a message from',
+      target: 'the chat "Chunk benchmark" (id 3f2a91c0)',
+    });
+    expect(liveAction(sent, 'complete')).toMatchObject({
+      icon: 'message',
+      verb: 'Messaged',
+      target: 'Fix inventory UI',
+    });
+    expect(activityGroupSummary([received, sent], 'complete').label).toBe(
+      'Received 1 agent message and sent 1 agent message',
+    );
+    expect(
+      liveAction(tool('stop', { name: "Stop a chat's programs", operation: 'pc' }), 'running')
+        .verb,
+    ).toBe("Stopping a chat's programs");
+  });
+
   it('shows an older reply’s activity limit as a note after its calls, not as a call', () => {
     const run = tool('run', { name: 'Run command' });
     const limit = tool('activity-limit', { name: 'Activity limit reached', status: 'unknown' });

@@ -319,17 +319,34 @@ pub struct Now {
     memory_available: u64,
     /// Programs by owner: processes, CPU and memory.
     programs: Vec<(Owner, String, usize, f64, u64)>,
+    /// What each chat left running, by conversation (`programs`).
+    pub left: HashMap<String, Vec<super::programs::Program>>,
 }
 
 /// Reads the computer twice, a second apart.
 pub async fn now(members: Members) -> Option<Now> {
     let first = tauri::async_runtime::spawn_blocking(read).await.ok()??;
     tokio::time::sleep(Duration::from_secs(1)).await;
-    let second = tauri::async_runtime::spawn_blocking(read).await.ok()??;
-    Some(now_from(&first, &second, &members, std::process::id()))
+    let (second, windows) =
+        tauri::async_runtime::spawn_blocking(|| (read(), super::programs::windows()))
+            .await
+            .ok()?;
+    Some(now_from(
+        &first,
+        &second?,
+        &members,
+        std::process::id(),
+        &windows,
+    ))
 }
 
-fn now_from(first: &Reading, second: &Reading, members: &Members, app: u32) -> Now {
+fn now_from(
+    first: &Reading,
+    second: &Reading,
+    members: &Members,
+    app: u32,
+    windows: &HashSet<u32>,
+) -> Now {
     let owners = Owners::new(second, members, app);
     let cpu: HashMap<u32, f64> = usage(first, second)
         .map(|u| u.processes.into_iter().collect())
@@ -351,6 +368,7 @@ fn now_from(first: &Reading, second: &Reading, members: &Members, app: u32) -> N
             .into_iter()
             .map(|((owner, name), (count, cpu, memory))| (owner, name, count, cpu, memory))
             .collect(),
+        left: super::programs::left_running(second, members, Some(&cpu), windows),
     }
 }
 
@@ -417,7 +435,7 @@ fn count(processes: usize) -> String {
         String::new()
     }
 }
-fn percent(value: f64) -> String {
+pub(super) fn percent(value: f64) -> String {
     if value < 10.0 {
         format!("{value:.1}%")
     } else {
@@ -427,7 +445,7 @@ fn percent(value: f64) -> String {
 fn round(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
 }
-fn bytes(value: u64) -> String {
+pub(super) fn bytes(value: u64) -> String {
     let gb = value as f64 / 1_073_741_824.0;
     if gb >= 1.0 {
         format!("{gb:.1} GB")
@@ -796,7 +814,8 @@ mod tests {
             chats: HashMap::from([(5, "art".to_string())]),
             roots: HashMap::new(),
         };
-        let text = now_from(&first, &second, &members, 10).text(|c| format!("the chat \"{c}\""));
+        let text = now_from(&first, &second, &members, 10, &HashSet::new())
+            .text(|c| format!("the chat \"{c}\""));
         assert!(
             text.starts_with("The computer now: CPU 25%, memory 40.0 GB of 64.0 GB in use."),
             "{text}"

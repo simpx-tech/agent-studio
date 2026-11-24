@@ -278,7 +278,8 @@ async fn listen(
     }
 }
 
-/// One question of the gate: may this chat run this command?
+/// One question of the gate: may this chat run this command? Messages other chats sent the
+/// chat's own agent come with the answer.
 #[cfg(windows)]
 async fn answer(
     pipe: tokio::net::windows::named_pipe::NamedPipeServer,
@@ -290,18 +291,54 @@ async fn answer(
     BufReader::new(read).read_line(&mut line).await?;
     let request: Value = serde_json::from_str(&line).unwrap_or_default();
     let reply = match (request["chat"].as_str(), request["command"].as_str()) {
-        (Some(chat), Some(command)) => broker
-            .gate(chat, command, request["call"].as_str(), "pc_wait")
-            .map_or_else(|| json!({}), |reason| json!({"deny": reason})),
+        (Some(chat), Some(command)) => {
+            let deny = broker.gate(chat, command, request["call"].as_str(), "pc_wait");
+            // A sub-agent works in a thread of its own: messages wait for the chat's own agent.
+            let messages = request["thread"]
+                .as_str()
+                .filter(|thread| broker.main_thread(chat, thread))
+                .and_then(|_| broker.deliver(chat));
+            match (deny, messages) {
+                (Some(deny), Some(messages)) => json!({"deny": format!("{deny}\n\n{messages}")}),
+                (Some(deny), None) => json!({"deny": deny}),
+                (None, Some(messages)) => json!({"context": messages}),
+                (None, None) => json!({}),
+            }
+        }
         _ => json!({}),
     };
     write.write_all(format!("{reply}\n").as_bytes()).await?;
     write.flush().await
 }
 
-/// Asks the app on `pipe` whether `chat` may run `command`: the reason it may not, or None.
-/// None too when the app does not answer, since a gate that fails holds nothing.
-pub fn ask(pipe: &str, chat: &str, command: &str, call: Option<&str>) -> Option<String> {
+/// What the app answers the gate.
+#[derive(Debug, Default, PartialEq)]
+pub struct Reply {
+    /// Why the command must wait.
+    pub deny: Option<String>,
+    /// Messages for the chat's agent, while its command runs.
+    pub context: Option<String>,
+}
+
+/// Asks the app on `pipe` whether `chat` may run `command` in `thread`. Nothing when the app
+/// does not answer, since a gate that fails holds nothing.
+pub fn ask(
+    pipe: &str,
+    chat: &str,
+    command: &str,
+    call: Option<&str>,
+    thread: Option<&str>,
+) -> Reply {
+    asked(pipe, chat, command, call, thread).unwrap_or_default()
+}
+
+fn asked(
+    pipe: &str,
+    chat: &str,
+    command: &str,
+    call: Option<&str>,
+    thread: Option<&str>,
+) -> Option<Reply> {
     use std::io::{BufRead, BufReader, Write};
     // Between two questions the pipe has no instance waiting for a moment.
     let mut file = None;
@@ -325,17 +362,21 @@ pub fn ask(pipe: &str, chat: &str, command: &str, call: Option<&str>) -> Option<
     writeln!(
         file,
         "{}",
-        json!({"chat": chat, "command": command, "call": call})
+        json!({"chat": chat, "command": command, "call": call, "thread": thread})
     )
     .ok()?;
     let mut line = String::new();
     BufReader::new(file).read_line(&mut line).ok()?;
     let reply: Value = serde_json::from_str(&line).ok()?;
-    reply["deny"].as_str().map(String::from)
+    Some(Reply {
+        deny: reply["deny"].as_str().map(String::from),
+        context: reply["context"].as_str().map(String::from),
+    })
 }
 
 /// This program as Codex's gate hook: reads the hook's input, asks the app, and prints Codex's
-/// refusal when the command must wait. Always exits 0: a gate that fails lets the command run.
+/// refusal when the command must wait, or the messages the chat's agent reads as it runs.
+/// Always exits 0: a gate that fails lets the command run.
 pub fn gate_main() -> i32 {
     use std::io::Read;
     let mut input = String::new();
@@ -343,31 +384,45 @@ pub fn gate_main() -> i32 {
     let (Ok(pipe), Ok(chat)) = (std::env::var(PIPE_ENV), std::env::var(CHAT_ENV)) else {
         return 0;
     };
-    if let Some(output) = refusal(&input, |command, call| ask(&pipe, &chat, command, call)) {
+    if let Some(output) = refusal(&input, |command, call, thread| {
+        ask(&pipe, &chat, command, call, thread)
+    }) {
         print!("{output}");
     }
     0
 }
 
 /// The hook's output for its input, given how the app answers.
-fn refusal(input: &str, ask: impl FnOnce(&str, Option<&str>) -> Option<String>) -> Option<String> {
+fn refusal(
+    input: &str,
+    ask: impl FnOnce(&str, Option<&str>, Option<&str>) -> Reply,
+) -> Option<String> {
     let hook: Value = serde_json::from_str(input).ok()?;
     if hook["hook_event_name"] != "PreToolUse" {
         return None;
     }
     let command = hook["tool_input"]["command"].as_str().unwrap_or_default();
+    let thread = hook["session_id"].as_str();
     // The call's activity identity, as the tool decoder names a Codex call.
-    let call = match (hook["session_id"].as_str(), hook["tool_use_id"].as_str()) {
+    let call = match (thread, hook["tool_use_id"].as_str()) {
         (Some(thread), Some(id)) => Some(format!("codex:{thread}:{id}")),
         _ => None,
     };
-    let reason = ask(command, call.as_deref())?;
-    Some(
-        json!({"hookSpecificOutput":{
+    let output = match ask(command, call.as_deref(), thread) {
+        Reply {
+            deny: Some(reason), ..
+        } => json!({"hookSpecificOutput":{
             "hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":reason
-        }})
-        .to_string(),
-    )
+        }}),
+        Reply {
+            context: Some(context),
+            ..
+        } => json!({"hookSpecificOutput":{
+            "hookEventName":"PreToolUse","additionalContext":context
+        }}),
+        Reply { .. } => return None,
+    };
+    Some(output.to_string())
 }
 
 #[cfg(test)]
@@ -426,14 +481,25 @@ mod tests {
     fn the_hook_refuses_only_what_the_app_refuses_and_names_the_call() {
         let input = json!({"session_id":"t1","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cargo build"},"tool_use_id":"exec-1"}).to_string();
         let mut asked = None;
-        let output = refusal(&input, |command, call| {
-            asked = Some((command.to_string(), call.map(String::from)));
-            Some("Wait for the benchmark.".into())
+        let output = refusal(&input, |command, call, thread| {
+            asked = Some((
+                command.to_string(),
+                call.map(String::from),
+                thread.map(String::from),
+            ));
+            Reply {
+                deny: Some("Wait for the benchmark.".into()),
+                context: None,
+            }
         })
         .unwrap();
         assert_eq!(
             asked,
-            Some(("cargo build".into(), Some("codex:t1:exec-1".into())))
+            Some((
+                "cargo build".into(),
+                Some("codex:t1:exec-1".into()),
+                Some("t1".into())
+            ))
         );
         let output: Value = serde_json::from_str(&output).unwrap();
         assert_eq!(output["hookSpecificOutput"]["permissionDecision"], "deny");
@@ -441,10 +507,21 @@ mod tests {
             output["hookSpecificOutput"]["permissionDecisionReason"],
             "Wait for the benchmark."
         );
-        assert!(refusal(&input, |_, _| None).is_none());
-        assert!(refusal("not json", |_, _| panic!("never asked")).is_none());
+        // Messages reach the agent beside a command that runs.
+        let context = refusal(&input, |_, _, _| Reply {
+            deny: None,
+            context: Some("A message from another chat.".into()),
+        })
+        .unwrap();
+        let context: Value = serde_json::from_str(&context).unwrap();
+        assert_eq!(
+            context["hookSpecificOutput"],
+            json!({"hookEventName":"PreToolUse","additionalContext":"A message from another chat."})
+        );
+        assert!(refusal(&input, |_, _, _| Reply::default()).is_none());
+        assert!(refusal("not json", |_, _, _| panic!("never asked")).is_none());
         let other = json!({"hook_event_name":"PostToolUse"}).to_string();
-        assert!(refusal(&other, |_, _| panic!("never asked")).is_none());
+        assert!(refusal(&other, |_, _, _| panic!("never asked")).is_none());
     }
 
     /// Run with `cargo test --lib installed_codex -- --ignored` on a computer with Codex.
@@ -481,30 +558,58 @@ mod tests {
             async move { listen(&name, broker, Some(ready)).await }
         });
         accepting.await.unwrap();
-        let ask_now = |chat: &'static str, command: &'static str| {
+        let ask_in = |chat: &'static str, command: &'static str, thread: &'static str| {
             let name = name.clone();
-            tokio::task::spawn_blocking(move || ask(&name, chat, command, Some("codex:t:c")))
+            tokio::task::spawn_blocking(move || {
+                ask(&name, chat, command, Some("codex:t:c"), Some(thread))
+            })
         };
-        assert_eq!(ask_now("ui", "cargo build").await.unwrap(), None);
+        let ask_now = |chat: &'static str, command: &'static str| ask_in(chat, command, "t");
+        assert_eq!(
+            ask_now("ui", "cargo build").await.unwrap(),
+            Reply::default()
+        );
         broker.reserve("run-bench", "bench", "Benchmark", None);
-        let reason = ask_now("ui", "cargo build").await.unwrap().unwrap();
+        let reason = ask_now("ui", "cargo build").await.unwrap().deny.unwrap();
         assert!(reason.contains("Call pc_wait"), "{reason}");
         assert!(reason.contains("the chat \"Chunk benchmark\""), "{reason}");
-        assert_eq!(ask_now("ui", "git status").await.unwrap(), None);
-        assert_eq!(ask_now("bench", "cargo build").await.unwrap(), None);
+        assert_eq!(ask_now("ui", "git status").await.unwrap(), Reply::default());
+        assert_eq!(
+            ask_now("bench", "cargo build").await.unwrap(),
+            Reply::default()
+        );
         // Questions side by side all get their answer.
         let answers =
             futures_util::future::join_all((0..8).map(|_| ask_now("ui", "npm test"))).await;
-        assert!(answers.into_iter().all(|answer| answer.unwrap().is_some()));
+        assert!(answers
+            .into_iter()
+            .all(|answer| answer.unwrap().deny.is_some()));
+        // A message goes to the chat's own agent, never to a sub-agent's thread.
+        broker.run_started("run-ui", "ui");
+        broker.attach("run-ui", "ui", None);
+        broker.thread("run-ui", "t");
+        broker
+            .message("bench", "ui", "Close your editor when you can.", false)
+            .unwrap();
+        assert_eq!(
+            ask_in("ui", "git status", "sub-agent").await.unwrap(),
+            Reply::default()
+        );
+        let context = ask_now("ui", "git status").await.unwrap().context.unwrap();
+        assert!(
+            context.contains("Close your editor when you can."),
+            "{context}"
+        );
         // No app on the pipe: the command runs.
         assert_eq!(
             ask(
                 r"\\.\pipe\agent-studio-pc-nobody",
                 "ui",
                 "cargo build",
+                None,
                 None
             ),
-            None
+            Reply::default()
         );
     }
 }

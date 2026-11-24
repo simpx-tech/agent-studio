@@ -884,7 +884,7 @@ export function toolVisual(
     return tool.name === 'Open web page'
       ? { icon: 'page', title: tool.name, detail: tool.sources[0]?.url ?? tool.query }
       : { icon: 'web', title: tool.name, detail: tool.query };
-  if (tool.operation === 'sendMessage')
+  if (tool.operation === 'sendMessage' || tool.operation === 'receivedMessage')
     return { icon: 'message', title: tool.name, detail: tool.detail };
   if (tool.operation === 'listAgents')
     return { icon: 'directory', title: tool.name, detail: tool.detail };

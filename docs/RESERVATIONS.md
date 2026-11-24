@@ -10,24 +10,27 @@ computer getting quiet by itself, which never happens while several chats work.
 
 The native broker is `src-tauri/src/reservations.rs`, with `reservations/tools.rs` (the agents'
 tools and the gate), `reservations/light.rs` (light commands), `reservations/machine.rs`
-(measuring the computer) and `reservations/jobs.rs` (which chat a process belongs to). Every
+(measuring the computer), `reservations/jobs.rs` (which chat a process belongs to) and
+`reservations/programs.rs` (programs chats left running, and stopping them). Every
 Windows chat and the WSL distributions this computer manages share one broker, since they share
 the computer.
 
 ## How a measurement goes
 
 1. **Prepare.** The agent builds, cooks and finishes its own background work first, and calls
-   `pc_status`, which lists what other chats run, the busiest and largest programs and whose they
-   are: a chat's, Agent Studio's, the system's, or the user's own. Programs the user started are
-   the only thing an agent asks the user about, with `studio_ask_user` (close them, or measure
-   anyway), and it asks before reserving, so no other chat waits on the answer.
+   `pc_status`, which lists what other chats run, the programs chats left running, the busiest
+   and largest programs and whose they are: a chat's, Agent Studio's, the system's, or the user's
+   own. Programs the user started are the only thing an agent asks the user about, with
+   `studio_ask_user` (close them, or measure anyway), and it asks before reserving, so no other
+   chat waits on the answer. What chats left running it handles itself (below).
 2. **Reserve.** `pc_reserve` with a purpose and, optionally, the minutes the measurement takes.
    From that moment other chats' new commands wait, except light ones. The answer lists what
    still runs.
 3. **Wait for the window.** `pc_wait` returns once no other chat runs a command, nor background
-   work that a reply of its own still runs and waits on. Background work a chat left running
-   after its reply ended (a dev server, a watcher) does not keep the window closed; it is listed
-   so that the agent can decide, and it shows in the report.
+   work that a reply of its own still runs and waits on, nor holds what it was asked to hand over.
+   Background work and programs a chat left running after its reply ended (a dev server, an
+   editor) do not keep the window closed; they are listed, with the programs other chats left
+   running, so that the agent can stop them first, and they show in the report.
 4. **Measure** at once: warm up, run several times.
 5. **Release** with `pc_release` right after capturing, and analyze afterwards. The answer is the
    report. A reservation also ends by itself when the reply that made it ends.
@@ -81,6 +84,48 @@ or its reply ends.
 tools, goes back to the CLI through the run's own channel (`Session::rx`), so a long wait never
 holds up the reply's loop, and Stop ends it.
 
+## Coordinating with other chats
+
+Agents coordinate by themselves, so the user is asked only about the user's own programs
+(requested 2026-11-24).
+
+- **Messages.** `chat_message` writes to another chat that is replying on this computer. It reads
+  the message with its next tool call: in a Claude chat, a `PostToolUse` hook callback that every
+  chat process registers beside the gate answers with the message as `additionalContext` (10
+  seconds' timeout, for the same reason as the gate's); in a Codex chat, the gate before its
+  next command does (`codex_gate`, `additionalContext` beside a command it lets run, which
+  Codex 0.172 hands the model); and in either, the answer of any of these tools, a message
+  ending a `pc_wait` early. Only the chat's own agent reads it, never a sub-agent: Claude names a
+  sub-agent's calls with `agent_id`, and a Codex sub-agent works in a thread of its own, which
+  the gate compares with the chat's. The reply shows it in its Work history as a record of its
+  own, Message from another chat, with the text in its details. A chat that is not replying
+  cannot read one, so the sender is told at once, and a message its reader's reply ended before
+  reading goes back to its sender as a notice. Codex refuses a steer without input, so no message
+  reaches a chat as the user's.
+- **Handing over.** A chat may still need something the measurement waits for, such as an editor
+  it works with. Rather than waiting for its whole reply, the chat holding the computer asks it
+  with `chat_message` and `hand_over`: that chat's commands run again while it finishes, and the
+  window waits for it (an open window closes again, its readings dropped). It hands over with
+  `pc_release`: Agent Studio closes the programs it left running, its commands wait like the
+  others' from then on, and its background work no longer keeps the window closed. Its reply
+  ending ends the ask too, closing nothing, and a chat that read an ask hears when the
+  measurement no longer needs it.
+- **Stopping.** `pc_stop` stops what a chat that is not replying left running, or the calling
+  chat's own programs: the programs `pc_status` lists for it by number, and with `background`
+  the background work its CLI keeps, by releasing that CLI as History does (its next reply starts
+  it again). A replying chat is asked to hand over instead.
+
+A **program** a chat left running is a process in its job outside its CLI's own process tree,
+such as an editor or a server a command started and let go, grouped with the processes it started
+under the topmost of them. Windows only: elsewhere a process that outlives its parent says nothing
+of whose it was. A program with a window is asked to close as its close button asks
+(`WM_CLOSE` to its shown top-level windows, a window another shown window owns closing with it),
+so it may still ask about unsaved work, and it is waited for while it works on closing: one that
+sits idle for 15 seconds may be asking something, and one still busy after two minutes is left to
+finish, both reported so that the agent asks the user. What it leaves running without a window
+then ends. A program without a window is ended. Every process is checked by when it began before
+anything is sent to it, so a process that took another's id is never touched.
+
 ## Whose a process is
 
 On Windows each chat CLI runs in a job object of its own (`jobs.rs`), which every process it starts
@@ -97,7 +142,9 @@ program on Windows. Linux server hosts tell processes apart by their parent chai
 reservation:
 
 - when the window opened after the reservation, and how long it stayed open;
-- what kept it closed, each chat's command with how long it ran meanwhile;
+- what kept it closed, each chat's command with how long it ran meanwhile, and the chats asked
+  to hand over, with when they read the request and how and when it ended;
+- what was stopped while it held the computer, and by which chat;
 - other chats' work that ran while it was open anyway (Codex commands, work left running);
 - the computer while it was open, read every two seconds: CPU on average and at most, the
   measuring chat's processes apart from everything else, memory in use and free, and the busiest
@@ -111,8 +158,8 @@ A reply waiting in `pc_wait` counts that time as **Waiting for the computer** in
 ## In the window
 
 While the computer is reserved, a gauge in the sidebar's footer, beside Connections, names the
-chat and its purpose on hover with where it stands (waiting for commands, measuring, chats
-waiting, reservations in line) and opens that chat. It is in the warning colour while other
+chat and its purpose on hover with where it stands (waiting for commands or for chats to hand
+over, measuring, chats waiting, reservations in line) and opens that chat. It is in the warning colour while other
 chats' work finishes and in the accent while the measurement runs. The window follows
 reservations through `studio-pc` events and `pc_state`; nothing about them is saved or synced.
 The Viewer shows none.
@@ -121,6 +168,5 @@ The Viewer shows none.
 
 - Holding WSL Codex chats' commands (see above), and freezing a process a chat starts during a
   window when nothing else can hold it.
-- `pc_stop` for processes a chat that is no longer replying left running, messages between chats,
-  and a chat handing over something it holds (an editor) to the one measuring.
+- Programs a WSL chat left running, which run inside the distribution's virtual machine.
 - The history of reservations in the window.

@@ -206,6 +206,7 @@ const kindIcons: Record<keyof typeof phrases, ToolIconKey> = {
   background: 'background',
   backgroundAgent: 'agent',
   message: 'message',
+  received: 'message',
   directory: 'directory',
   skill: 'skill',
   image: 'image',
@@ -259,6 +260,8 @@ function action(tool: ToolActivity): keyof typeof phrases {
   if (tool.category === 'search') return tool.name === 'Open web page' ? 'browse' : 'search';
   if (tool.category === 'agent') return 'agent';
   if (tool.operation === 'sendMessage') return 'message';
+  // A message another chat on this computer sent the reply (src-tauri/src/reservations.rs).
+  if (tool.operation === 'receivedMessage') return 'received';
   if (tool.operation === 'listAgents') return 'directory';
   if (tool.category === 'skill') return 'skill';
   if (['View image', 'view_image'].includes(tool.name)) return 'image';
@@ -287,6 +290,7 @@ const phrases = {
   background: ['background task', 'background tasks', 'started #', 'started #', '#'],
   backgroundAgent: ['background sub-agent', 'background sub-agents', 'started #', 'started #', '#'],
   message: ['agent message', 'agent messages', 'sent #', 'sending #', '#'],
+  received: ['agent message', 'agent messages', 'received #', 'receiving #', '#'],
   directory: ['agent list', 'agent lists', 'checked #', 'checking #', '#'],
   skill: ['skill', 'skills', 'used #', 'using #', '#'],
   image: ['image', 'images', 'viewed #', 'viewing #', '#'],
@@ -577,6 +581,7 @@ const liveForms: Record<keyof typeof phrases, Forms> = {
     'Background sub-agent',
   ],
   message: ['Messaging', 'Messaged', 'Message to'],
+  received: ['Receiving a message from', 'Received a message from', 'Message from'],
   directory: ['Listing agents', 'Listed agents', 'Agent list'],
   skill: ['Using skill', 'Used skill', 'Skill'],
   image: ['Viewing', 'Viewed', 'Image'],
@@ -628,6 +633,11 @@ const namedForms: Record<string, Forms> = {
     'Releasing the computer',
     'Released the computer',
     'Release of the computer',
+  ],
+  "Stop a chat's programs": [
+    "Stopping a chat's programs",
+    "Stopped a chat's programs",
+    "Stop of a chat's programs",
   ],
 };
 const iconForms: Partial<Record<ToolIconKey, Forms>> = {
@@ -710,6 +720,7 @@ function liveTarget(
       };
     }
     case 'message':
+    case 'received':
       return { target: tool.detail };
     case 'skill':
       return { target: tool.name.startsWith('Skill: ') ? tool.name.slice(7) : undefined };

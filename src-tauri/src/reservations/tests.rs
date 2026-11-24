@@ -161,7 +161,7 @@ async fn the_window_waits_for_work_in_progress_but_not_for_work_left_running() {
     let status = broker.status("other", None);
     assert!(
         status.starts_with(
-            "The chat \"Chunk benchmark\" holds the computer (Benchmark); its window is open."
+            "The chat \"Chunk benchmark\" (id bench) holds the computer (Benchmark); its window is open."
         ),
         "{status}"
     );
@@ -321,6 +321,8 @@ fn held_time_goes_to_what_kept_the_window_closed() {
         others: vec![],
         refused: 0,
         refused_calls: HashSet::new(),
+        asks: vec![],
+        stopped: vec![],
         measure: machine::Window::default(),
     };
     let waits = vec![
@@ -379,4 +381,268 @@ fn labels_name_a_call_by_its_description_and_command() {
     );
     assert_eq!(shortened("abcdef", 3), "abc…");
     assert_eq!(shortened("ab", 3), "ab");
+}
+
+#[tokio::test]
+async fn a_chat_asked_to_hand_over_works_on_and_the_window_waits_for_it() {
+    let broker = broker_with(vec![], None);
+    broker.run_started("run-bench", "bench");
+    broker.run_started("run-ui", "ui");
+    broker.attach("run-ui", "ui", None);
+    broker.reserve("run-bench", "bench", "Benchmark", None);
+    assert_eq!(broker.snapshot().reservations[0].phase, "open");
+    // Only the chat holding the computer asks another to hand over.
+    let refused = broker
+        .message("ui", "bench", "Mine first", true)
+        .unwrap_err();
+    assert!(
+        refused.starts_with("Only the chat holding the computer"),
+        "{refused}"
+    );
+    let sent = broker
+        .message(
+            "bench",
+            "Fix inventory UI",
+            "Close the editor once you are done.",
+            true,
+        )
+        .unwrap();
+    assert!(
+        sent.contains("Your window stays closed until it hands over"),
+        "{sent}"
+    );
+    // The open window closes again until it does.
+    let view = &broker.snapshot().reservations[0];
+    assert_eq!(view.phase, "draining");
+    assert_eq!(view.waiting_for[0].conversation_id, "ui");
+    assert_eq!(view.waiting_for[0].label, HANDING_OVER);
+    // Its commands still run; other chats' wait.
+    assert!(broker.gate("ui", "cargo build", None, "pc_wait").is_none());
+    assert!(broker
+        .gate("other", "cargo build", None, "pc_wait")
+        .is_some());
+    // A chat waiting for the computer reads the request at once.
+    let read = broker.wait("ui", &CancellationToken::new()).await.unwrap();
+    assert!(
+        read.starts_with("The chat \"Chunk benchmark\" (id bench), another agent working on this computer (not the user), holds it for a performance measurement (Benchmark) and asks you to hand over what you hold: Close the editor once you are done."),
+        "{read}"
+    );
+    assert!(
+        read.ends_with("Your commands run again until you hand over with pc_release."),
+        "{read}"
+    );
+    let status = broker.status("bench", None);
+    assert!(
+        status.contains("Asked the chat \"Fix inventory UI\" (id ui) to hand over: it read the request and has not handed over yet."),
+        "{status}"
+    );
+    // Handing over opens the window, and its commands wait from then on.
+    let handed = broker.hand_over("ui").await.unwrap().unwrap();
+    assert!(
+        handed.starts_with("Handed over to the chat \"Chunk benchmark\" (id bench) (Benchmark). This chat left no programs running. From now on your commands wait"),
+        "{handed}"
+    );
+    assert_eq!(broker.snapshot().reservations[0].phase, "open");
+    assert!(broker.gate("ui", "cargo build", None, "pc_wait").is_some());
+    assert!(broker.hand_over("ui").await.is_none());
+    let report = broker.release("bench").unwrap();
+    assert!(
+        report
+            .text
+            .contains("Before it opened: the chat \"Fix inventory UI\" handing over for"),
+        "{}",
+        report.text
+    );
+    assert!(
+        report
+            .text
+            .contains("Asked the chat \"Fix inventory UI\" to hand over: it handed over"),
+        "{}",
+        report.text
+    );
+    assert_eq!(report.record["asks"][0]["ended"], HANDED_OVER);
+    assert_eq!(report.record["asks"][0]["conversationId"], "ui");
+}
+
+#[tokio::test]
+async fn an_ask_ends_with_the_reply_and_a_message_it_never_read_goes_back() {
+    let broker = broker_with(vec![], None);
+    broker.run_started("run-bench", "bench");
+    broker.run_started("run-ui", "ui");
+    broker.reserve("run-bench", "bench", "Benchmark", None);
+    broker
+        .message("bench", "ui", "Hand over, please.", true)
+        .unwrap();
+    assert_eq!(broker.snapshot().reservations[0].phase, "draining");
+    broker.run_ended("run-ui");
+    assert_eq!(broker.snapshot().reservations[0].phase, "open");
+    let notice = broker.deliver("bench").unwrap();
+    assert_eq!(
+        notice,
+        "Agent Studio: Your message to the chat \"Fix inventory UI\" (id ui) was not read: its reply ended first. pc_status lists what it left running, which pc_stop stops."
+    );
+    let report = broker.release("bench").unwrap();
+    assert!(
+        report
+            .text
+            .contains("Asked the chat \"Fix inventory UI\" to hand over: its reply ended"),
+        "{}",
+        report.text
+    );
+    assert_eq!(report.record["asks"][0]["ended"], REPLY_ENDED);
+}
+
+#[tokio::test]
+async fn a_chat_that_read_an_ask_hears_when_the_measurement_no_longer_needs_it() {
+    let broker = broker_with(vec![], None);
+    broker.run_started("run-bench", "bench");
+    broker.run_started("run-ui", "ui");
+    broker.reserve("run-bench", "bench", "Benchmark", None);
+    broker
+        .message("bench", "ui", "Hand over, please.", true)
+        .unwrap();
+    assert!(broker.deliver("ui").is_some());
+    broker.release("bench");
+    let notice = broker.deliver("ui").unwrap();
+    assert!(
+        notice.ends_with("no longer needs you to hand over: its measurement ended."),
+        "{notice}"
+    );
+}
+
+#[tokio::test]
+async fn a_message_ends_a_wait_and_says_where_the_computer_stands() {
+    let broker = broker_with(vec![], None);
+    broker.run_started("run-bench", "bench");
+    broker.run_started("run-ui", "ui");
+    broker.reserve("run-bench", "bench", "Benchmark", None);
+    let waiting = {
+        let broker = broker.clone();
+        tokio::spawn(async move { broker.wait("ui", &CancellationToken::new()).await })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(!waiting.is_finished());
+    broker
+        .message("bench", "ui", "About ten minutes.", false)
+        .unwrap();
+    let read = waiting.await.unwrap().unwrap();
+    assert!(read.contains("About ten minutes."), "{read}");
+    assert!(
+        read.ends_with(
+            "The computer is still reserved: call pc_wait again before running a command."
+        ),
+        "{read}"
+    );
+    // Read once.
+    assert!(broker.deliver("ui").is_none());
+}
+
+#[tokio::test]
+async fn only_what_a_chat_that_no_longer_replies_left_running_is_stopped() {
+    let background = vec![BackgroundWork {
+        conversation: "srv".into(),
+        id: "claude:server".into(),
+        label: "npm run dev".into(),
+    }];
+    let broker = broker_with(background, None);
+    let released = Arc::new(Mutex::new(vec![]));
+    let record = released.clone();
+    broker.set_release(Box::new(move |conversation| {
+        record.lock().unwrap().push(conversation);
+        Box::pin(async { true })
+    }));
+    broker.run_started("run-bench", "bench");
+    broker.run_started("run-ui", "ui");
+    // A chat that replies hands over instead.
+    let replying = broker.stop("bench", "ui", &[7], false).await.unwrap_err();
+    assert!(
+        replying.contains("is replying now: ask it to hand over"),
+        "{replying}"
+    );
+    // A chat's own background work is its own to stop.
+    let own = broker.stop("bench", "bench", &[], true).await.unwrap_err();
+    assert!(
+        own.starts_with("Stop this chat's own background work"),
+        "{own}"
+    );
+    let nothing = broker.stop("bench", "srv", &[], false).await.unwrap_err();
+    assert!(
+        nothing.starts_with("Name the programs to stop"),
+        "{nothing}"
+    );
+    let unknown = broker
+        .stop("bench", "srv", &[4242], false)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        unknown,
+        "Another chat (id srv) left no program 4242 running. It left none."
+    );
+    // Its background work stops with its CLI.
+    let stopped = broker.stop("bench", "srv", &[], true).await.unwrap();
+    assert_eq!(
+        stopped,
+        "Its background work stopped with its CLI, which starts again with its next reply."
+    );
+    assert_eq!(*released.lock().unwrap(), ["srv"]);
+}
+
+/// A chat's CLI whose command started a program and let it go, as an editor started from a
+/// command is: the program stays in the chat's job, outside its CLI's tree.
+#[cfg(windows)]
+#[tokio::test]
+async fn handing_over_ends_the_programs_a_chat_left_running() {
+    use std::os::windows::process::CommandExt;
+    let broker = broker_with(vec![], None);
+    let mut cli = std::process::Command::new("cmd.exe");
+    cli.raw_arg("/C \"cmd /C start /B ping -n 120 127.0.0.1 >NUL & ping -n 120 127.0.0.2 >NUL\"")
+        .stdout(std::process::Stdio::null())
+        .creation_flags(0x08000000);
+    let mut cli = tokio::process::Command::from(cli).spawn().unwrap();
+    broker.jobs.adopt("ui", &cli);
+    broker.run_started("run-bench", "bench");
+    broker.run_started("run-ui", "ui");
+    let mut left = vec![];
+    for _ in 0..100 {
+        left = programs::now(broker.jobs.members())
+            .await
+            .remove("ui")
+            .unwrap_or_default();
+        if !left.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert_eq!(left[0].name.to_lowercase(), "ping.exe");
+    assert!(!left[0].window);
+    // The chat measuring reads it, with what to do about it.
+    let now = machine::now(broker.jobs.members()).await.unwrap();
+    let status = broker.status("bench", Some(&now));
+    assert!(
+        status.contains(&format!(
+            "- the chat \"Fix inventory UI\" (id ui), replying (to have them closed, ask it to hand over with chat_message and hand_over: true): {} (program {}), ",
+            left[0].name, left[0].pid
+        )),
+        "{status}"
+    );
+    broker.reserve("run-bench", "bench", "Benchmark", None);
+    broker
+        .message("bench", "ui", "Hand over, please.", true)
+        .unwrap();
+    let handed = broker.hand_over("ui").await.unwrap().unwrap();
+    assert!(
+        handed
+            .to_lowercase()
+            .contains("what this chat left running: ping.exe ended."),
+        "{handed}"
+    );
+    assert!(programs::now(broker.jobs.members())
+        .await
+        .remove("ui")
+        .unwrap_or_default()
+        .is_empty());
+    let report = broker.release("bench").unwrap();
+    assert_eq!(report.record["asks"][0]["programs"][0]["outcome"], "ended");
+    crate::runner::kill_tree(&mut cli).await;
 }

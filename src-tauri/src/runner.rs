@@ -298,11 +298,19 @@ pub async fn run(
     {
         if request.tools_enabled() && matches!(request.agent.provider.as_str(), "claude" | "codex")
         {
-            questions.pc = Some(crate::reservations::tools::Session::new(
+            let session = crate::reservations::tools::Session::new(
                 broker.clone(),
                 conversation,
                 &request.run_id,
-            ));
+            );
+            // The messages other chats send it show in its Work history.
+            let shown = output.clone();
+            session.show(Arc::new(move |tool| {
+                let _ = shown.send(RunEvent::Tool {
+                    tool: Box::new(tool),
+                });
+            }));
+            questions.pc = Some(session);
         }
     }
     let tracking = matches!(request.agent.provider.as_str(), "claude" | "codex")
@@ -870,7 +878,8 @@ async fn stream_turn(
         prompt_sent = settings.advance(process, &prompt).await?;
     } else {
         // The process keeps these hooks for every later reply, each answering them as it runs:
-        // compactions, and in a chat that can reserve this computer, its gate before commands.
+        // compactions, and in a chat that can reserve this computer, its gate before commands
+        // and the messages other chats send it after each call.
         let mut hooks = crate::providers::after_compaction::hooks();
         if questions.as_ref().is_some_and(|q| q.pc.is_some()) {
             if let (Some(all), serde_json::Value::Object(gate)) =

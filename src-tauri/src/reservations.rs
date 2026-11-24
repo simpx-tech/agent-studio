@@ -15,10 +15,18 @@
 //! and how long the other chats waited and because of what. Each report is kept in app data
 //! `reservations/history.jsonl`. Reservations take turns, first come first served, and nothing is
 //! capped: a reservation, a wait and a queue last as long as their chats need.
+//!
+//! Chats coordinate by themselves (`chat_message`): a message reaches a replying chat with its
+//! next tool call. The chat holding the computer may ask a replying chat to hand over what it
+//! holds, such as an editor it still works with: that chat's commands then run again while it
+//! finishes, the window waits for it, and once it hands over (`pc_release`) Agent Studio closes
+//! the programs it left running (`programs`) and holds its commands like the others'. Programs a
+//! chat that no longer replies left running are stopped with `pc_stop`.
 pub mod codex_gate;
 pub mod jobs;
 mod light;
 pub mod machine;
+pub mod programs;
 pub mod tools;
 
 use crate::protocol::activity::ToolActivity;
@@ -48,6 +56,18 @@ pub struct BackgroundWork {
 pub type Emit = Box<dyn Fn(&Snapshot) + Send + Sync>;
 pub type Titles = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 pub type Background = Box<dyn Fn() -> Vec<BackgroundWork> + Send + Sync>;
+/// Shows a record in a reply's Work history: the messages it read.
+pub type Sink = Arc<dyn Fn(ToolActivity) + Send + Sync>;
+/// Releases the CLI a chat keeps between replies, with the background work it runs. Returns
+/// whether one was kept.
+pub type Release =
+    Box<dyn Fn(String) -> futures_util::future::BoxFuture<'static, bool> + Send + Sync>;
+
+/// What keeps a window closed while a chat asked to hand over finishes.
+const HANDING_OVER: &str = "handing over";
+/// How an ask to hand over ended.
+const HANDED_OVER: &str = "handed over";
+const REPLY_ENDED: &str = "reply ended";
 
 /// What this computer's window shows of the reservations.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -78,6 +98,9 @@ pub struct View {
 pub struct Blocker {
     pub conversation_id: String,
     pub label: String,
+    /// A chat asked to hand over what it holds, rather than a command.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hand_over: bool,
 }
 
 /// A report on a reservation that ended, for the chat that held it and the history.
@@ -94,6 +117,7 @@ pub struct Broker {
     titles: Titles,
     background: Background,
     history: Option<PathBuf>,
+    release: std::sync::OnceLock<Release>,
     /// Which chat each process belongs to.
     pub jobs: jobs::Jobs,
 }
@@ -110,8 +134,46 @@ struct State {
     /// Calls the gate refused, which Claude Code reports as started before it asks the gate:
     /// they never ran, so they count for nothing until they end.
     refused: HashSet<String>,
+    /// Messages their chats have not read yet, oldest first.
+    messages: Vec<Message>,
+    /// The replies that read messages, by run id.
+    readers: HashMap<String, Reader>,
     next: u64,
     ticking: bool,
+}
+/// A message to a chat, from another chat or from Agent Studio.
+struct Message {
+    from: Option<String>,
+    to: String,
+    text: String,
+    /// The chat holding the computer asks the reader to hand over what it holds.
+    hand_over: bool,
+}
+/// A reply that reads messages: where it shows them, and for Codex the thread of its own agent,
+/// whose commands alone take them.
+struct Reader {
+    conversation: String,
+    sink: Option<Sink>,
+    thread: Option<String>,
+}
+/// A chat asked to hand over what it holds before a window opens.
+struct Ask {
+    conversation: String,
+    asked: Instant,
+    read: Option<Instant>,
+    /// When and how it ended.
+    ended: Option<(Instant, &'static str)>,
+    /// What it left running is being closed.
+    closing: bool,
+    closed: Vec<programs::Stopped>,
+}
+/// Programs a chat stopped while a reservation held the computer.
+struct Stopping {
+    by: String,
+    conversation: String,
+    outcomes: Vec<programs::Stopped>,
+    /// Its background work stopped with its CLI.
+    background: bool,
 }
 struct Run {
     conversation: String,
@@ -151,6 +213,10 @@ struct Reservation {
     refused: u32,
     /// Those commands' calls, which its report leaves out of what ran.
     refused_calls: HashSet<String>,
+    /// Chats it asked to hand over what they hold.
+    asks: Vec<Ask>,
+    /// Programs chats stopped while it held the computer.
+    stopped: Vec<Stopping>,
     measure: machine::Window,
 }
 #[derive(Clone, Debug)]
@@ -162,6 +228,7 @@ struct Span {
     until: Option<Instant>,
 }
 /// Work another chat runs now.
+#[derive(Clone)]
 struct Item {
     key: String,
     conversation: String,
@@ -169,6 +236,8 @@ struct Item {
     light: bool,
     /// Its reply still runs, so it is work in progress rather than something left running.
     in_progress: bool,
+    /// Background work its CLI keeps.
+    background: bool,
 }
 
 impl Broker {
@@ -185,8 +254,46 @@ impl Broker {
             titles,
             background,
             history,
+            release: std::sync::OnceLock::new(),
             jobs: jobs::Jobs::default(),
         })
+    }
+
+    /// How `pc_stop` releases a chat's CLI with its background work.
+    pub fn set_release(&self, release: Release) {
+        let _ = self.release.set(release);
+    }
+
+    /// A reply of `conversation` reads its messages, shown with `sink` when it has one.
+    pub fn attach(&self, run_id: &str, conversation: &str, sink: Option<Sink>) {
+        self.lock().readers.insert(
+            run_id.into(),
+            Reader {
+                conversation: conversation.into(),
+                sink,
+                thread: None,
+            },
+        );
+    }
+
+    pub fn detach(&self, run_id: &str) {
+        self.lock().readers.remove(run_id);
+    }
+
+    /// The Codex thread a reply's own agent works in.
+    pub fn thread(&self, run_id: &str, thread: &str) {
+        if let Some(reader) = self.lock().readers.get_mut(run_id) {
+            reader.thread = Some(thread.into());
+        }
+    }
+
+    /// Whether `thread` is the one `conversation`'s own Codex agent works in, rather than a
+    /// sub-agent's, which does not read its messages.
+    pub fn main_thread(&self, conversation: &str, thread: &str) -> bool {
+        self.lock()
+            .readers
+            .values()
+            .any(|r| r.conversation == conversation && r.thread.as_deref() == Some(thread))
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -258,16 +365,28 @@ impl Broker {
     pub fn run_ended(&self, run_id: &str) {
         let (report, snapshot) = {
             let mut state = self.lock();
-            state.runs.remove(run_id);
+            let now = Instant::now();
+            let ended = state.runs.remove(run_id).map(|run| run.conversation);
+            state.readers.remove(run_id);
             let report = state
                 .queue
                 .iter()
                 .position(|r| r.run_id == run_id)
-                .map(|index| self.end(&mut state, index, Instant::now(), "reply"));
-            let changed = self.settled(&mut state, Instant::now());
+                .map(|index| self.end(&mut state, index, now, "reply"));
+            // Unless another reply of its chat took over, what the chat was asked ends with it.
+            let asks_ended = match ended {
+                Some(conversation)
+                    if !state.runs.values().any(|r| r.conversation == conversation) =>
+                {
+                    self.reply_gone(&mut state, &conversation, now)
+                }
+                _ => false,
+            };
+            let changed = self.settled(&mut state, now);
             let snapshot = match (&report, changed) {
                 (_, Some(snapshot)) => Some(snapshot),
                 (Some(_), None) => Some(self.view(&state)),
+                (None, None) if asks_ended => Some(self.view(&state)),
                 (None, None) => None,
             };
             (report, snapshot)
@@ -292,6 +411,422 @@ impl Broker {
         if let Some(snapshot) = update {
             self.publish(snapshot);
         }
+    }
+
+    /// `conversation` no longer replies: what it was asked to hand over ends, and the messages
+    /// it did not read go back to their senders as a notice. Returns whether an ask ended.
+    fn reply_gone(&self, state: &mut State, conversation: &str, now: Instant) -> bool {
+        let mut ended = false;
+        for reservation in state.queue.iter_mut() {
+            for ask in reservation
+                .asks
+                .iter_mut()
+                .filter(|a| a.conversation == conversation && a.ended.is_none() && !a.closing)
+            {
+                ask.ended = Some((now, REPLY_ENDED));
+                ended = true;
+            }
+        }
+        let (unread, rest): (Vec<Message>, Vec<Message>) = std::mem::take(&mut state.messages)
+            .into_iter()
+            .partition(|m| m.to == conversation);
+        state.messages = rest;
+        for message in unread {
+            let Some(from) = message.from else { continue };
+            if state.runs.values().any(|r| r.conversation == from) {
+                state.messages.push(Message {
+                    from: None,
+                    to: from,
+                    text: format!(
+                        "Your message to {} was not read: its reply ended first. pc_status lists what it left running, which pc_stop stops.",
+                        self.named(conversation)
+                    ),
+                    hand_over: false,
+                });
+            }
+        }
+        ended
+    }
+
+    /// Sends `text` from `from` to the chat `to` names, which reads it with its next tool call.
+    /// With `hand_over`, the chat holding the computer asks that chat to hand over what it holds:
+    /// its commands run again until it does, and the window waits for it.
+    pub fn message(
+        &self,
+        from: &str,
+        to: &str,
+        text: &str,
+        hand_over: bool,
+    ) -> Result<String, String> {
+        let to = self.resolve(to)?;
+        if to == from {
+            return Err("That is this chat.".into());
+        }
+        let snapshot = {
+            let mut state = self.lock();
+            if !state.runs.values().any(|r| r.conversation == to) {
+                return Err(format!(
+                    "{} is not replying now, so it cannot read messages. pc_status lists what it left running, which pc_stop stops.",
+                    capitalized(&self.named(&to))
+                ));
+            }
+            let now = Instant::now();
+            if hand_over {
+                let Some(first) = state.queue.first_mut().filter(|r| r.conversation == from) else {
+                    return Err("Only the chat holding the computer, first in line, asks another to hand over: reserve it with pc_reserve, and ask once pc_status says this chat holds it.".into());
+                };
+                if !first
+                    .asks
+                    .iter()
+                    .any(|a| a.conversation == to && a.ended.is_none())
+                {
+                    first.asks.push(Ask {
+                        conversation: to.clone(),
+                        asked: now,
+                        read: None,
+                        ended: None,
+                        closing: false,
+                        closed: vec![],
+                    });
+                }
+                // An open window closes again until the chat hands over.
+                if first.opened.take().is_some() {
+                    first.opened_at = None;
+                    first.measure = machine::Window::default();
+                    first.others.clear();
+                }
+            }
+            state.messages.push(Message {
+                from: Some(from.into()),
+                to: to.clone(),
+                text: text.trim().into(),
+                hand_over,
+            });
+            self.settled(&mut state, now);
+            self.view(&state)
+        };
+        self.publish(snapshot);
+        Ok(if hand_over {
+            format!(
+                "Sent: {} reads it with its next tool call, and its commands run again until it hands over. Your window stays closed until it hands over or its reply ends: call pc_wait.",
+                self.named(&to)
+            )
+        } else {
+            format!(
+                "Sent: {} reads it with its next tool call.",
+                self.named(&to)
+            )
+        })
+    }
+
+    /// Takes the messages waiting for `conversation`, as text for its agent, and shows each in its
+    /// reply's Work history. None when none waits.
+    pub fn deliver(&self, conversation: &str) -> Option<String> {
+        let (text, sink, shown) = {
+            let mut state = self.lock();
+            if !state.messages.iter().any(|m| m.to == conversation) {
+                return None;
+            }
+            let (mine, rest): (Vec<Message>, Vec<Message>) = std::mem::take(&mut state.messages)
+                .into_iter()
+                .partition(|m| m.to == conversation);
+            state.messages = rest;
+            let now = Instant::now();
+            let mut texts = vec![];
+            let mut shown = vec![];
+            for message in &mine {
+                state.next += 1;
+                let from = message
+                    .from
+                    .as_deref()
+                    .map(|from| self.named(from))
+                    .unwrap_or_else(|| "Agent Studio".into());
+                let ask = message.hand_over.then(|| {
+                    state
+                        .queue
+                        .first_mut()
+                        .filter(|r| Some(r.conversation.as_str()) == message.from.as_deref())
+                });
+                texts.push(match ask.flatten() {
+                    Some(first) => {
+                        if let Some(ask) = first
+                            .asks
+                            .iter_mut()
+                            .find(|a| a.conversation == conversation && a.ended.is_none())
+                        {
+                            ask.read.get_or_insert(now);
+                        }
+                        format!(
+                            "{}, another agent working on this computer (not the user), holds it for a performance measurement ({}) and asks you to hand over what you hold: {}\nUntil you hand over, your commands still run while that measurement waits for you. Finish what you need from what you already run, without starting new heavy work, and stop the background work you no longer need. Then hand over with pc_release (Claude: mcp__agent_studio__pc_release): Agent Studio closes the programs you left running, and your commands wait until the measurement ends. If that takes long, say so with chat_message.",
+                            capitalized(&from),
+                            first.purpose,
+                            message.text
+                        )
+                    }
+                    None if message.from.is_some() => format!(
+                        "A message from {from}, another agent working on this computer (not the user): {}\nAnswer it with chat_message (Claude: mcp__agent_studio__chat_message) when it asks you something.",
+                        message.text
+                    ),
+                    None => format!("Agent Studio: {}", message.text),
+                });
+                shown.push((
+                    format!("studio-message:{conversation}:{}", state.next),
+                    from,
+                    message.text.clone(),
+                    message.hand_over,
+                ));
+            }
+            let sink = state
+                .readers
+                .values()
+                .find(|r| r.conversation == conversation)
+                .and_then(|r| r.sink.clone());
+            (texts.join("\n\n"), sink, shown)
+        };
+        if let Some(sink) = sink {
+            for (id, from, text, hand_over) in shown {
+                sink(ToolActivity::received_message(&id, &from, &text, hand_over));
+            }
+        }
+        // An ask read changes nothing the window shows, and a sender may wait on its reader.
+        self.version.send_modify(|version| *version += 1);
+        Some(text)
+    }
+
+    /// The chat `name` names: its title, its id or the start of its id, among the chats that
+    /// work on this computer now or left something running here.
+    fn resolve(&self, name: &str) -> Result<String, String> {
+        let mut wanted = name.trim();
+        // As pc_status names chats: the chat "Title" (id 1a2b3c4d).
+        if let Some(start) = wanted.find("(id ") {
+            let id = &wanted[start + 4..];
+            wanted = id[..id.find(')').unwrap_or(id.len())].trim();
+        }
+        let wanted = wanted
+            .trim_start_matches("the chat ")
+            .trim_matches(|c| matches!(c, '"' | '\'' | '\u{201C}' | '\u{201D}'))
+            .trim();
+        let mut known: Vec<String> = {
+            let state = self.lock();
+            state
+                .runs
+                .values()
+                .map(|r| r.conversation.clone())
+                .chain(state.readers.values().map(|r| r.conversation.clone()))
+                .chain(state.queue.iter().map(|r| r.conversation.clone()))
+                .collect()
+        };
+        let members = self.jobs.members();
+        known.extend(members.chats.into_values());
+        known.extend(members.roots.into_values());
+        known.extend((self.background)().into_iter().map(|w| w.conversation));
+        known.sort();
+        known.dedup();
+        if known.iter().any(|c| c == wanted) {
+            return Ok(wanted.into());
+        }
+        let by_id: Vec<&String> = known
+            .iter()
+            .filter(|c| wanted.len() >= 4 && c.starts_with(wanted))
+            .collect();
+        if let [one] = by_id.as_slice() {
+            return Ok((*one).clone());
+        }
+        let by_title: Vec<&String> = known
+            .iter()
+            .filter(|c| (self.titles)(c).is_some_and(|t| t.trim().eq_ignore_ascii_case(wanted)))
+            .collect();
+        match by_title.as_slice() {
+            [one] => Ok((*one).clone()),
+            [] => Err(format!(
+                "No chat named \"{wanted}\" works on this computer now: pc_status lists them."
+            )),
+            several => Err(format!(
+                "Several chats are named \"{wanted}\": {}. Name one by its id.",
+                several
+                    .iter()
+                    .map(|c| self.named(c))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )),
+        }
+    }
+
+    /// Ends what `conversation` was asked to hand over: closes the programs it left running, and
+    /// from then on holds its commands like the others'. None when nothing was asked of it.
+    pub async fn hand_over(&self, conversation: &str) -> Option<Result<String, String>> {
+        let (holder, purpose) = {
+            let mut state = self.lock();
+            let first = state.queue.first_mut()?;
+            let (holder, purpose) = (first.conversation.clone(), first.purpose.clone());
+            let ask = first
+                .asks
+                .iter_mut()
+                .find(|a| a.conversation == conversation && a.ended.is_none())?;
+            if ask.closing {
+                return Some(Err(
+                    "Agent Studio is already closing what this chat left running.".into(),
+                ));
+            }
+            ask.closing = true;
+            ask.read.get_or_insert(Instant::now());
+            (holder, purpose)
+        };
+        let left = programs::now(self.jobs.members())
+            .await
+            .remove(conversation)
+            .unwrap_or_default();
+        let closed = programs::stop(left).await;
+        let snapshot = {
+            let mut state = self.lock();
+            let now = Instant::now();
+            if let Some(ask) = state
+                .queue
+                .first_mut()
+                .filter(|r| r.conversation == holder)
+                .and_then(|r| {
+                    r.asks
+                        .iter_mut()
+                        .find(|a| a.conversation == conversation && a.ended.is_none())
+                })
+            {
+                ask.ended = Some((now, HANDED_OVER));
+                ask.closing = false;
+                ask.closed = closed.clone();
+            }
+            self.settled(&mut state, now);
+            self.view(&state)
+        };
+        self.publish(snapshot);
+        let mut text = format!("Handed over to {} ({purpose}). ", self.named(&holder));
+        if closed.is_empty() {
+            text.push_str("This chat left no programs running.");
+        } else {
+            text.push_str(&format!(
+                "What this chat left running: {}.",
+                closed
+                    .iter()
+                    .map(programs::Stopped::text)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        text.push_str(" From now on your commands wait until that measurement ends, except light ones: call pc_wait before running one.");
+        Some(Ok(text))
+    }
+
+    /// Stops programs the chat `name` names left running (`programs`, as pc_status lists them),
+    /// and with `background` the background work its CLI keeps, by releasing that CLI. Only a
+    /// chat that is not replying, or the asking chat's own programs.
+    pub async fn stop(
+        &self,
+        caller: &str,
+        name: &str,
+        pids: &[u32],
+        background: bool,
+    ) -> Result<String, String> {
+        let conversation = self.resolve(name)?;
+        let own = conversation == caller;
+        let replying = self
+            .lock()
+            .runs
+            .values()
+            .any(|r| r.conversation == conversation);
+        if replying && !own {
+            return Err(format!(
+                "{} is replying now: ask it to hand over what it holds with chat_message and hand_over: true.",
+                capitalized(&self.named(&conversation))
+            ));
+        }
+        if background && own {
+            return Err("Stop this chat's own background work with its own tools.".into());
+        }
+        if pids.is_empty() && !background {
+            return Err(
+                "Name the programs to stop as pc_status lists them, background: true, or both."
+                    .into(),
+            );
+        }
+        let left = if pids.is_empty() {
+            vec![]
+        } else {
+            programs::now(self.jobs.members())
+                .await
+                .remove(&conversation)
+                .unwrap_or_default()
+        };
+        let mut chosen = vec![];
+        for pid in pids {
+            match left.iter().find(|p| p.pid == *pid) {
+                Some(program) => chosen.push(program.clone()),
+                None => {
+                    return Err(format!(
+                        "{} left no program {pid} running. {}",
+                        capitalized(&self.named(&conversation)),
+                        if left.is_empty() {
+                            "It left none.".to_string()
+                        } else {
+                            format!(
+                                "Its programs: {}.",
+                                left.iter()
+                                    .map(|p| format!("{} (program {})", p.name, p.pid))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        }
+                    ))
+                }
+            }
+        }
+        let outcomes = programs::stop(chosen).await;
+        let has_background = background
+            && (self.background)()
+                .iter()
+                .any(|w| w.conversation == conversation);
+        let released = match self.release.get() {
+            Some(release) if has_background => release(conversation.clone()).await,
+            _ => false,
+        };
+        // The reservation holding the computer reports it.
+        let snapshot = {
+            let mut state = self.lock();
+            match state.queue.first_mut() {
+                Some(first) => {
+                    first.stopped.push(Stopping {
+                        by: caller.into(),
+                        conversation: conversation.clone(),
+                        outcomes: outcomes.clone(),
+                        background: released,
+                    });
+                    self.settled(&mut state, Instant::now());
+                    Some(self.view(&state))
+                }
+                None => None,
+            }
+        };
+        if let Some(snapshot) = snapshot {
+            self.publish(snapshot);
+        }
+        let mut lines = vec![];
+        if !outcomes.is_empty() {
+            lines.push(format!(
+                "{}.",
+                outcomes
+                    .iter()
+                    .map(programs::Stopped::text)
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        if background {
+            lines.push(if released {
+                "Its background work stopped with its CLI, which starts again with its next reply."
+                    .into()
+            } else {
+                "It runs no background work.".into()
+            });
+        }
+        Ok(lines.join(" "))
     }
 
     /// Settles the first reservation against what runs now, and returns the window's view when
@@ -344,6 +879,8 @@ impl Broker {
                     others: vec![],
                     refused: 0,
                     refused_calls: HashSet::new(),
+                    asks: vec![],
+                    stopped: vec![],
                     measure: machine::Window::default(),
                 });
             }
@@ -438,6 +975,26 @@ impl Broker {
             span.until = Some(now);
         }
         let report = self.report(&reservation, &state.waits, now, by);
+        // What it asked others to hand over ends with it.
+        let holder = reservation.conversation.as_str();
+        state
+            .messages
+            .retain(|m| !(m.hand_over && m.from.as_deref() == Some(holder)));
+        for ask in reservation
+            .asks
+            .iter()
+            .filter(|a| a.ended.is_none() && a.read.is_some() && !a.closing)
+        {
+            state.messages.push(Message {
+                from: None,
+                to: ask.conversation.clone(),
+                text: format!(
+                    "{} no longer needs you to hand over: its measurement ended.",
+                    capitalized(&self.named(holder))
+                ),
+                hand_over: false,
+            });
+        }
         // Waits that ended before every reservation still in line began report nothing more.
         let oldest = state.queue.iter().map(|r| r.asked).min();
         state
@@ -459,7 +1016,12 @@ impl Broker {
         let (reason, snapshot) = {
             let mut state = self.lock();
             let first = state.queue.first_mut()?;
-            if first.conversation == conversation || light::is_light(command) {
+            // A chat asked to hand over finishes what it needs first.
+            let asked = first
+                .asks
+                .iter()
+                .any(|a| a.conversation == conversation && a.ended.is_none() && !a.closing);
+            if first.conversation == conversation || asked || light::is_light(command) {
                 return None;
             }
             first.refused += 1;
@@ -513,68 +1075,128 @@ impl Broker {
             .iter()
             .any(|r| r.conversation == conversation);
         let mut guard = None;
+        enum Step {
+            Opened(String),
+            Done(String),
+            Ended,
+            Wait(bool),
+        }
         loop {
-            let mut registered = false;
-            {
+            // A message ends the wait: the agent reads it, and waits again when it must.
+            if let Some(messages) = self.deliver(conversation) {
+                return Ok(format!("{messages}\n\n{}", self.wait_status(conversation)));
+            }
+            let step = {
                 let mut state = self.lock();
-                if own {
-                    let Some(index) = state
+                let asked = state
+                    .queue
+                    .first()
+                    .filter(|first| first.conversation != conversation)
+                    .filter(|first| {
+                        first.asks.iter().any(|a| {
+                            a.conversation == conversation && a.ended.is_none() && !a.closing
+                        })
+                    })
+                    .map(|first| (first.conversation.clone(), first.purpose.clone()));
+                if let Some((holder, purpose)) = asked {
+                    Step::Done(format!(
+                        "{} asked this chat to hand over what it holds for its measurement ({purpose}). Your commands run again until you do: finish what you need, then call pc_release.",
+                        capitalized(&self.named(&holder))
+                    ))
+                } else if own {
+                    match state
                         .queue
                         .iter()
                         .position(|r| r.conversation == conversation)
-                    else {
-                        return Err(
-                            "This chat's reservation ended before its window opened.".into()
-                        );
-                    };
-                    let reservation = &state.queue[index];
-                    if index == 0 && reservation.opened.is_some() {
-                        return Ok(self.opened_text(reservation, began.elapsed()));
+                    {
+                        None => Step::Ended,
+                        Some(0) if state.queue[0].opened.is_some() => {
+                            Step::Opened(self.opened_text(&state.queue[0], began.elapsed()))
+                        }
+                        Some(_) => Step::Wait(false),
                     }
                 } else {
-                    let holder = state
+                    let held = state
                         .queue
                         .first()
-                        .filter(|r| r.conversation != conversation)
-                        .map(|r| r.conversation.clone());
-                    match holder {
-                        None => {
-                            drop(state);
-                            let waited = guard.take().is_some();
-                            return Ok(if waited {
-                                format!(
-                                    "The computer is free again after {}: run your command now.",
-                                    duration(began.elapsed())
-                                )
-                            } else {
-                                "The computer is not reserved: run your command now.".into()
-                            });
-                        }
-                        Some(_) if guard.is_none() => {
-                            state.next += 1;
-                            let id = state.next;
-                            state.waits.push(Wait {
-                                id,
-                                conversation: conversation.into(),
-                                from: Instant::now(),
-                                until: None,
-                            });
-                            guard = Some(WaitGuard { broker: self, id });
-                            registered = true;
-                        }
-                        Some(_) => {}
+                        .is_some_and(|r| r.conversation != conversation);
+                    if !held {
+                        Step::Done(if guard.is_some() {
+                            format!(
+                                "The computer is free again after {}: run your command now.",
+                                duration(began.elapsed())
+                            )
+                        } else {
+                            "The computer is not reserved: run your command now.".into()
+                        })
+                    } else if guard.is_none() {
+                        state.next += 1;
+                        let id = state.next;
+                        state.waits.push(Wait {
+                            id,
+                            conversation: conversation.into(),
+                            from: Instant::now(),
+                            until: None,
+                        });
+                        guard = Some(WaitGuard { broker: self, id });
+                        Step::Wait(true)
+                    } else {
+                        Step::Wait(false)
                     }
                 }
-            }
-            if registered {
+            };
+            match step {
+                Step::Opened(text) => {
+                    let left = programs::now(self.jobs.members()).await;
+                    return Ok(format!("{text}{}", self.left_text(conversation, &left)));
+                }
+                Step::Done(text) => {
+                    drop(guard.take());
+                    return Ok(text);
+                }
+                Step::Ended => {
+                    return Err("This chat's reservation ended before its window opened.".into())
+                }
                 // The window shows how many chats wait.
-                let snapshot = self.view(&self.lock());
-                (self.emit)(&snapshot);
+                Step::Wait(true) => {
+                    let snapshot = self.view(&self.lock());
+                    (self.emit)(&snapshot);
+                }
+                Step::Wait(false) => {}
             }
             tokio::select! {
                 changed = changes.changed() => if changed.is_err() { return Err("Agent Studio stopped following reservations.".into()) },
                 _ = cancel.cancelled() => return Err("Stopped while waiting for the computer.".into()),
             }
+        }
+    }
+
+    /// Where `conversation` stands after reading its messages in `pc_wait`.
+    fn wait_status(&self, conversation: &str) -> &'static str {
+        let state = self.lock();
+        match state
+            .queue
+            .iter()
+            .position(|r| r.conversation == conversation)
+        {
+            Some(0) if state.queue[0].opened.is_some() => {
+                "Your window is open: measure now, then call pc_release."
+            }
+            Some(_) => "Your window has not opened yet: call pc_wait again to wait for it.",
+            None => match state.queue.first() {
+                None => "The computer is not reserved: run your command now.",
+                Some(first)
+                    if first
+                        .asks
+                        .iter()
+                        .any(|a| a.conversation == conversation && a.ended.is_none()) =>
+                {
+                    "Your commands run again until you hand over with pc_release."
+                }
+                Some(_) => {
+                    "The computer is still reserved: call pc_wait again before running a command."
+                }
+            },
         }
     }
 
@@ -631,6 +1253,7 @@ impl Broker {
                             .map(|s| Blocker {
                                 conversation_id: s.conversation.clone(),
                                 label: s.label.clone(),
+                                hand_over: s.key.starts_with("ask:"),
                             })
                             .collect()
                     } else {
@@ -690,7 +1313,7 @@ impl Broker {
             }
         }
         if !left.is_empty() {
-            text.push_str("\nLeft running by other chats whose replies ended (the window does not wait for these; ask the user before measuring if they matter):");
+            text.push_str("\nLeft running by other chats whose replies ended (the window does not wait for these; pc_stop stops them when they would disturb the measurement):");
             for item in left {
                 text.push_str(&format!(
                     "\n- {}: {}",
@@ -704,59 +1327,170 @@ impl Broker {
 
     /// Where the computer stands for `conversation`, with what runs on it now.
     pub fn status(&self, conversation: &str, now: Option<&machine::Now>) -> String {
-        let state = self.lock();
-        let items = items(&state, &(self.background)());
-        let mut text = match state.queue.first() {
-            None => "The computer is not reserved.".to_string(),
-            Some(first) if first.conversation == conversation => {
-                if first.opened.is_some() {
-                    "This chat holds the computer and its window is open.".into()
-                } else {
-                    "This chat holds the computer; its window opens once the work listed below finishes. Call pc_wait.".into()
-                }
-            }
-            Some(first) => format!(
-                "{} holds the computer ({}); {}. Other chats' commands wait until it ends: call pc_wait before running one.",
-                capitalized(&self.chat(&first.conversation)),
-                first.purpose,
-                if first.opened.is_some() { "its window is open" } else { "it waits for other chats' commands to finish" }
-            ),
-        };
-        if let Some(index) = state
-            .queue
-            .iter()
-            .position(|r| r.conversation == conversation)
-            .filter(|i| *i > 0)
-        {
-            text.push_str(&format!(
-                " This chat's reservation is number {} in line.",
-                index + 1
-            ));
-        }
-        let others: Vec<&Item> = items
-            .iter()
-            .filter(|i| i.conversation != conversation)
-            .collect();
-        if others.is_empty() {
-            text.push_str("\nNo other chat runs a command or background work now.");
-        } else {
-            text.push_str("\nOther chats' work now:");
-            for item in others {
-                text.push_str(&format!(
-                    "\n- {}: {}{}",
-                    self.chat(&item.conversation),
-                    item.label,
-                    match (item.in_progress, item.light) {
-                        (_, true) => " (light)",
-                        (true, false) => "",
-                        (false, false) => " (left running after its reply ended)",
+        let mut text = {
+            let state = self.lock();
+            let items = items(&state, &(self.background)());
+            let mut text = match state.queue.first() {
+                None => "The computer is not reserved.".to_string(),
+                Some(first) if first.conversation == conversation => {
+                    if first.opened.is_some() {
+                        "This chat holds the computer and its window is open.".into()
+                    } else {
+                        "This chat holds the computer; its window opens once the work listed below finishes. Call pc_wait.".into()
                     }
+                }
+                Some(first) => format!(
+                    "{} holds the computer ({}); {}. Other chats' commands wait until it ends: call pc_wait before running one.",
+                    capitalized(&self.named(&first.conversation)),
+                    first.purpose,
+                    if first.opened.is_some() { "its window is open" } else { "it waits for other chats' commands to finish" }
+                ),
+            };
+            if let Some(index) = state
+                .queue
+                .iter()
+                .position(|r| r.conversation == conversation)
+                .filter(|i| *i > 0)
+            {
+                text.push_str(&format!(
+                    " This chat's reservation is number {} in line.",
+                    index + 1
                 ));
             }
-        }
+            if let Some(first) = state.queue.first() {
+                if first
+                    .asks
+                    .iter()
+                    .any(|a| a.conversation == conversation && a.ended.is_none())
+                {
+                    text.push_str(" It asked this chat to hand over what it holds: your commands run until you do, so finish what you need, then call pc_release.");
+                }
+                if first.conversation == conversation {
+                    for ask in first.asks.iter().filter(|a| a.ended.is_none()) {
+                        text.push_str(&format!(
+                            "\nAsked {} to hand over: {}.",
+                            self.named(&ask.conversation),
+                            match (ask.closing, ask.read) {
+                                (true, _) => "it handed over, and Agent Studio is closing what it left running",
+                                (false, Some(_)) => "it read the request and has not handed over yet",
+                                (false, None) => "it has not read the request yet",
+                            }
+                        ));
+                    }
+                }
+            }
+            for message in state
+                .messages
+                .iter()
+                .filter(|m| m.from.as_deref() == Some(conversation))
+            {
+                text.push_str(&format!(
+                    "\nYour message to {} is not read yet.",
+                    self.named(&message.to)
+                ));
+            }
+            let others: Vec<&Item> = items
+                .iter()
+                .filter(|i| i.conversation != conversation)
+                .collect();
+            if others.is_empty() {
+                text.push_str("\nNo other chat runs a command or background work now.");
+            } else {
+                text.push_str("\nOther chats' work now:");
+                for item in others {
+                    text.push_str(&format!(
+                        "\n- {}: {}{}",
+                        self.named(&item.conversation),
+                        item.label,
+                        match (item.in_progress, item.light) {
+                            (_, true) => " (light)",
+                            (true, false) => "",
+                            (false, false) => " (left running after its reply ended)",
+                        }
+                    ));
+                }
+            }
+            text
+        };
         if let Some(now) = now {
+            text.push_str(&self.left_text(conversation, &now.left));
             text.push('\n');
             text.push_str(&now.text(|conversation| self.chat(conversation)));
+        }
+        text
+    }
+
+    /// A chat as tools name it: its title and the start of its id.
+    fn named(&self, conversation: &str) -> String {
+        let id: String = conversation.chars().take(8).collect();
+        match (self.titles)(conversation).filter(|t| !t.trim().is_empty()) {
+            Some(title) => format!("the chat \"{}\" (id {id})", title.trim()),
+            None => format!("another chat (id {id})"),
+        }
+    }
+
+    /// The programs chats left running, as text for `conversation`'s agent: what it may stop
+    /// itself, and what it asks another chat to hand over. Empty when there are none.
+    fn left_text(
+        &self,
+        conversation: &str,
+        left: &HashMap<String, Vec<programs::Program>>,
+    ) -> String {
+        if left.values().all(Vec::is_empty) {
+            return String::new();
+        }
+        let replying: HashSet<String> = self
+            .lock()
+            .runs
+            .values()
+            .map(|r| r.conversation.clone())
+            .collect();
+        let mut chats: Vec<(&String, &Vec<programs::Program>)> =
+            left.iter().filter(|(_, list)| !list.is_empty()).collect();
+        // This chat's first, then the largest.
+        chats.sort_by_key(|(chat, list)| {
+            (
+                *chat != conversation,
+                std::cmp::Reverse(list.iter().map(|p| p.memory).sum::<u64>()),
+            )
+        });
+        let mut text = String::from(
+            "\nPrograms chats left running, outside their CLIs (pc_stop takes each by its program number):",
+        );
+        for (chat, list) in chats {
+            let whose = if chat == conversation {
+                "this chat (stop what you no longer need before measuring)".to_string()
+            } else if replying.contains(chat) {
+                format!(
+                    "{}, replying (to have them closed, ask it to hand over with chat_message and hand_over: true)",
+                    self.named(chat)
+                )
+            } else {
+                format!("{}, not replying (pc_stop stops them)", self.named(chat))
+            };
+            text.push_str(&format!(
+                "\n- {whose}: {}",
+                list.iter()
+                    .map(|p| {
+                        format!(
+                            "{}{} (program {}{}), {}{}",
+                            p.name,
+                            if p.processes.len() > 1 {
+                                format!(" ×{}", p.processes.len())
+                            } else {
+                                String::new()
+                            },
+                            p.pid,
+                            if p.window { ", a window" } else { "" },
+                            machine::bytes(p.memory),
+                            p.cpu
+                                .map(|cpu| format!(", {} CPU", machine::percent(cpu)))
+                                .unwrap_or_default()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
         }
         text
     }
@@ -828,6 +1562,69 @@ impl Broker {
                 lines.push(text);
             }
         }
+        for ask in &r.asks {
+            let after = |at: Instant| duration(at.saturating_duration_since(ask.asked));
+            lines.push(format!(
+                "Asked {} to hand over: {}.",
+                self.chat(&ask.conversation),
+                match (ask.read, ask.ended) {
+                    (_, Some((at, HANDED_OVER))) => format!(
+                        "it handed over {} after the request{}",
+                        after(at),
+                        if ask.closed.is_empty() {
+                            String::new()
+                        } else {
+                            format!(
+                                " ({})",
+                                ask.closed
+                                    .iter()
+                                    .map(programs::Stopped::text)
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            )
+                        }
+                    ),
+                    (Some(read), Some((at, _))) => format!(
+                        "it read the request after {}, and its reply ended {} after it, before it handed over",
+                        after(read),
+                        after(at)
+                    ),
+                    (None, Some((at, _))) => format!(
+                        "its reply ended {} after the request, before it read it",
+                        after(at)
+                    ),
+                    (Some(read), None) => format!(
+                        "it read the request after {} and had not handed over when the reservation ended",
+                        after(read)
+                    ),
+                    (None, None) => "it had not read the request when the reservation ended".into(),
+                }
+            ));
+        }
+        for stop in &r.stopped {
+            let mut done: Vec<String> = stop.outcomes.iter().map(programs::Stopped::text).collect();
+            if stop.background {
+                done.push("its background work stopped with its CLI".into());
+            }
+            lines.push(format!(
+                "{} stopped what {} left running: {}.",
+                if stop.by == r.conversation {
+                    "This chat".to_string()
+                } else {
+                    capitalized(&self.chat(&stop.by))
+                },
+                if stop.conversation == stop.by {
+                    "it".to_string()
+                } else {
+                    self.chat(&stop.conversation)
+                },
+                if done.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    done.join("; ")
+                }
+            ));
+        }
         let held = held(r, waits, now);
         if held.chats > 0 || r.refused > 0 {
             let mut line = format!(
@@ -840,12 +1637,20 @@ impl Broker {
                 .iter()
                 .filter(|(_, _, time)| !time.is_zero())
                 .map(|(conversation, label, time)| {
-                    format!(
-                        "{} while {} ran {}",
-                        duration(*time),
-                        self.chat(conversation),
-                        label
-                    )
+                    if label == HANDING_OVER {
+                        format!(
+                            "{} while {} finished before handing over",
+                            duration(*time),
+                            self.chat(conversation)
+                        )
+                    } else {
+                        format!(
+                            "{} while {} ran {}",
+                            duration(*time),
+                            self.chat(conversation),
+                            label
+                        )
+                    }
                 })
                 .collect();
             if !causes.is_empty() {
@@ -876,6 +1681,19 @@ impl Broker {
                 "refused": r.refused,
                 "causes": held.causes.iter().map(|(conversation, label, time)| json!({"conversationId": conversation, "label": label, "ms": ms(*time)})).collect::<Vec<_>>(),
             },
+            "asks": r.asks.iter().map(|a| json!({
+                "conversationId": a.conversation,
+                "readMs": a.read.map(|t| ms(t.saturating_duration_since(a.asked))),
+                "endedMs": a.ended.map(|(t, _)| ms(t.saturating_duration_since(a.asked))),
+                "ended": a.ended.map(|(_, how)| how),
+                "programs": a.closed.iter().map(|s| json!({"name": s.program.name, "outcome": s.key()})).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+            "stopped": r.stopped.iter().map(|s| json!({
+                "by": s.by,
+                "conversationId": s.conversation,
+                "background": s.background,
+                "programs": s.outcomes.iter().map(|o| json!({"name": o.program.name, "outcome": o.key()})).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
             "machine": r.measure.record(),
         });
         Report {
@@ -934,6 +1752,7 @@ fn items(state: &State, background: &[BackgroundWork]) -> Vec<Item> {
                 label: call.label.clone(),
                 light: call.light,
                 in_progress: true,
+                background: false,
             })
         })
         .collect();
@@ -952,6 +1771,7 @@ fn items(state: &State, background: &[BackgroundWork]) -> Vec<Item> {
             label: format!("background {}", work.label),
             light: false,
             in_progress: running.contains(work.conversation.as_str()),
+            background: true,
         });
     }
     items.sort_by(|a, b| a.conversation.cmp(&b.conversation).then(a.key.cmp(&b.key)));
@@ -969,10 +1789,38 @@ fn settle(state: &mut State, items: &[Item], now: Instant) -> bool {
         first.first = Some(now);
         changed = true;
     }
-    let others: Vec<&Item> = items
+    // A chat that handed over leaves its background work as one whose reply ended does.
+    let handed: HashSet<&str> = first
+        .asks
+        .iter()
+        .filter(|a| a.ended.is_some_and(|(_, how)| how == HANDED_OVER))
+        .map(|a| a.conversation.as_str())
+        .collect();
+    let mut work: Vec<Item> = items
         .iter()
         .filter(|i| i.conversation != first.conversation && !i.light)
+        .map(|i| {
+            let mut item = i.clone();
+            item.in_progress &= !(item.background && handed.contains(item.conversation.as_str()));
+            item
+        })
         .collect();
+    // A chat asked to hand over keeps the window closed until it does, or its reply ends.
+    work.extend(
+        first
+            .asks
+            .iter()
+            .filter(|a| a.ended.is_none())
+            .map(|a| Item {
+                key: format!("ask:{}", a.conversation),
+                conversation: a.conversation.clone(),
+                label: HANDING_OVER.into(),
+                light: false,
+                in_progress: true,
+                background: false,
+            }),
+    );
+    let others: Vec<&Item> = work.iter().collect();
     if first.opened.is_none() {
         let blocking: Vec<&Item> = others.iter().copied().filter(|i| i.in_progress).collect();
         changed |= track(&mut first.blockers, &blocking, now);

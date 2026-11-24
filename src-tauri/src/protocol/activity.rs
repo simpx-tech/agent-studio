@@ -139,6 +139,19 @@ impl ToolActivity {
     pub fn is_monitor(&self) -> bool {
         self.operation.as_deref() == Some("monitor")
     }
+    /// A message another chat, or Agent Studio, sent the reply that read it
+    /// (`reservations::Broker::deliver`). `from` names the sender.
+    pub fn received_message(id: &str, from: &str, text: &str, hand_over: bool) -> Self {
+        let mut tool = fresh(id.into(), "tool", "Message from another chat");
+        tool.status = "complete".into();
+        tool.operation = Some("receivedMessage".into());
+        tool.detail = Some(clean(from));
+        fact(&mut tool, "Message", text);
+        if hand_over {
+            fact(&mut tool, "Asks", "To hand over what this chat holds");
+        }
+        tool
+    }
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ActivityFact {
@@ -228,12 +241,29 @@ fn pc_tool(tool: &mut ToolActivity, name: &str, input: &Value) {
         "pc_status" => "Check the computer",
         "pc_reserve" => "Reserve the computer",
         "pc_wait" => "Wait for the computer",
+        "pc_stop" => "Stop a chat's programs",
+        "chat_message" => "Message a chat",
         _ => "Release the computer",
     }
     .into();
-    tool.operation = Some(if name == "pc_wait" { "pcWait" } else { "pc" }.into());
-    if let Some(purpose) = field(input, "purpose") {
-        tool.detail = Some(purpose);
+    tool.operation = Some(
+        match name {
+            "pc_wait" => "pcWait",
+            "chat_message" => "sendMessage",
+            _ => "pc",
+        }
+        .into(),
+    );
+    if let Some(detail) = field(input, "purpose").or_else(|| field(input, "chat")) {
+        tool.detail = Some(detail);
+    }
+    if name == "chat_message" {
+        if let Some(text) = field(input, "text") {
+            fact(tool, "Message", text);
+        }
+        if input["hand_over"] == true {
+            fact(tool, "Asks", "To hand over what it holds");
+        }
     }
 }
 /// Agent Studio's own tools, whose arguments and results other panels already show.
@@ -1677,6 +1707,55 @@ fn read_path(command: &str, skill_only: bool) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn coordinating_the_computer_reads_as_what_each_call_does() {
+        let mut d = ToolDecoder::default();
+        for (id, name, input) in [
+            (
+                "reserve",
+                "mcp__agent_studio__pc_reserve",
+                json!({"purpose":"Benchmark of chunk meshing"}),
+            ),
+            (
+                "ask",
+                "mcp__agent_studio__chat_message",
+                json!({"chat":"Level art","text":"Close the editor when you can.","hand_over":true}),
+            ),
+            (
+                "stop",
+                "mcp__agent_studio__pc_stop",
+                json!({"chat":"Server","programs":[42]}),
+            ),
+        ] {
+            d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":name,"input":input}]}}));
+        }
+        assert_eq!(d.tools[0].name, "Reserve the computer");
+        assert_eq!(d.tools[0].detail(), Some("Benchmark of chunk meshing"));
+        assert_eq!(d.tools[1].name, "Message a chat");
+        assert_eq!(d.tools[1].operation.as_deref(), Some("sendMessage"));
+        assert_eq!(d.tools[1].detail(), Some("Level art"));
+        assert!(d.tools[1]
+            .facts
+            .iter()
+            .any(|f| f.label == "Message" && f.value == "Close the editor when you can."));
+        assert!(d.tools[1].facts.iter().any(|f| f.label == "Asks"));
+        assert_eq!(d.tools[2].name, "Stop a chat's programs");
+        assert_eq!(d.tools[2].detail(), Some("Server"));
+        // A message the reply read is a record of its own.
+        let read = ToolActivity::received_message(
+            "studio-message:ui:1",
+            "the chat \"Chunk benchmark\" (id 3f2a91c0)",
+            "Close the editor when you can.",
+            true,
+        );
+        assert_eq!(read.status, "complete");
+        assert_eq!(read.operation.as_deref(), Some("receivedMessage"));
+        assert_eq!(read.wait(), None);
+        assert!(read
+            .facts
+            .iter()
+            .any(|f| f.label == "Message" && f.value == "Close the editor when you can."));
+    }
     #[test]
     fn tool_details_keep_targets_patterns_and_results_without_file_bodies() {
         let mut d = ToolDecoder::default();

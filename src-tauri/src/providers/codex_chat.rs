@@ -76,6 +76,8 @@ const HELD_BACK: &[&str] = &[
     "pc_reserve",
     // pc_wait stays loaded: a command the gate refuses names it (reservations/codex_gate.rs).
     "pc_release",
+    "pc_stop",
+    "chat_message",
 ];
 /// The workflow tools held back too, except for an orchestrator, whose work they are. A static
 /// workflow's assistant reads and saves its workflow before every change, so workflow_read and
@@ -88,7 +90,7 @@ const HELD_BACK_WORKFLOW: &[&str] = &[
 ];
 /// The namespace of the tools held back, as Claude Code names Agent Studio's MCP server.
 pub const NAMESPACE: &str = "agent_studio";
-const NAMESPACE_DESCRIPTION: &str = "Agent Studio's tools for comparing images and 3D models side by side, saving and opening screens, calling the MCP servers of this computer's other places, reserving this computer for performance measurements, and building and running workflows.";
+const NAMESPACE_DESCRIPTION: &str = "Agent Studio's tools for comparing images and 3D models side by side, saving and opening screens, calling the MCP servers of this computer's other places, reserving this computer for performance measurements and coordinating with the other chats on it, and building and running workflows.";
 
 /// Whether a dynamic tool call comes from a tool Agent Studio registered: one of its own, or one
 /// in `NAMESPACE`. A chat begun before 2026-11-19 keeps its tools outside the namespace.
@@ -393,6 +395,10 @@ pub async fn run(
     if reused {
         // The thread is already loaded; only this reply's turn is new.
         thread = process.thread.clone();
+        // Its commands take the messages other chats send this one (reservations.rs).
+        if let Some(pc) = &questions.pc {
+            pc.thread(&thread);
+        }
         decoder.reported_model(process.reported_model.as_deref());
         if let Some(session) = &request.native_session {
             session.bind(&thread, false)?;
@@ -582,6 +588,7 @@ pub async fn run(
                             process.reported_model = value["result"]["model"].as_str().map(String::from);
                             thread = value["result"]["thread"]["id"].as_str().ok_or("Codex did not return a thread identity")?.into();
                             process.thread = thread.clone();
+                            if let Some(pc) = &questions.pc { pc.thread(&thread); }
                             // The binding records the CLI-named thread; reuse must match it.
                             process.session_id = thread.clone();
                             if let Some(session) = &request.native_session { session.bind(&thread, false)?; }

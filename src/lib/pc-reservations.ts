@@ -13,7 +13,14 @@ export const pcReservationSchema = z.object({
   askedAt: z.number(),
   openedAt: z.number().optional(),
   minutes: z.number().optional(),
-  waitingFor: z.array(z.object({ conversationId: z.string(), label: z.string() })),
+  // `handOver`: a chat asked to hand over what it holds, which the window waits for.
+  waitingFor: z.array(
+    z.object({
+      conversationId: z.string(),
+      label: z.string(),
+      handOver: z.boolean().optional(),
+    }),
+  ),
   held: z.number(),
 });
 export type PcReservation = z.infer<typeof pcReservationSchema>;
@@ -29,10 +36,15 @@ export function pcReservationTitle(
   if (!first) return '';
   const parts = [`Computer reserved: ${first.purpose}`, title(first.conversationId)];
   if (first.phase === 'open') parts.push('Measuring');
-  else if (first.waitingFor.length)
-    parts.push(
-      `Waiting for ${first.waitingFor.length} ${first.waitingFor.length === 1 ? 'command' : 'commands'}`,
-    );
+  else if (first.waitingFor.length) {
+    const handing = first.waitingFor.filter((blocker) => blocker.handOver).length;
+    const commands = first.waitingFor.length - handing;
+    const waits = [
+      commands && `${commands} ${commands === 1 ? 'command' : 'commands'}`,
+      handing && `${handing} ${handing === 1 ? 'chat' : 'chats'} to hand over`,
+    ].filter(Boolean);
+    parts.push(`Waiting for ${waits.join(' and ')}`);
+  }
   if (first.held) parts.push(`${first.held} ${first.held === 1 ? 'chat waits' : 'chats wait'}`);
   if (queued.length) parts.push(`${queued.length} more in line`);
   return parts.join(' · ');

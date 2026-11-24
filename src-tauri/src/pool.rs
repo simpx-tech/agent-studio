@@ -314,10 +314,15 @@ impl Pool {
         }
     }
     /// Release a conversation's process when its chat is closed (moved to History or
-    /// deleted) or changes under it (a rewind or a file Undo).
-    pub async fn release(&self, conversation: &str) {
-        if let Some(process) = self.take(conversation) {
-            process.finish().await;
+    /// deleted), changes under it (a rewind or a file Undo), or has its background work stopped
+    /// for a measurement (`reservations`). Returns whether one was parked.
+    pub async fn release(&self, conversation: &str) -> bool {
+        match self.take(conversation) {
+            Some(process) => {
+                process.finish().await;
+                true
+            }
+            None => false,
         }
     }
     /// Drop processes that exited on their own, recording the background work that ended

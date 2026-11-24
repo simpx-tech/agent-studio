@@ -404,8 +404,8 @@ async fn pc_state(app: tauri::AppHandle) -> Result<reservations::Snapshot, Strin
 /// Reservations of this computer, which name chats by the titles of the workspace this app last
 /// saved and follow the background work chats' CLIs keep.
 fn reservations_broker(app: &tauri::AppHandle) -> std::sync::Arc<reservations::Broker> {
-    let (emitter, titles, background) = (app.clone(), app.clone(), app.clone());
-    reservations::Broker::new(
+    let (emitter, titles, background, pool) = (app.clone(), app.clone(), app.clone(), app.clone());
+    let broker = reservations::Broker::new(
         Box::new(move |snapshot| {
             use tauri::Emitter;
             let _ = emitter.emit(reservations::EVENT, snapshot);
@@ -447,7 +447,13 @@ fn reservations_broker(app: &tauri::AppHandle) -> std::sync::Arc<reservations::B
             .app_local_data_dir()
             .ok()
             .map(|data| data.join("reservations").join("history.jsonl")),
-    )
+    );
+    // pc_stop ends a chat's background work by releasing its CLI, as History does.
+    broker.set_release(Box::new(move |conversation| {
+        let app = pool.clone();
+        Box::pin(async move { app.state::<pool::Pool>().release(&conversation).await })
+    }));
+    broker
 }
 
 #[tauri::command]
