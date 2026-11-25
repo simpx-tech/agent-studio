@@ -26,15 +26,17 @@
 >
 
 <style>
-  /* A chat whose account is gone keeps the print in the same place, without a frame. */
+  /* A chat whose account is gone keeps the print in the same place, without a frame. The frame
+     is four thirds of a pixel, two whole pixels where the display scales by 150%. */
   .chat-uses {
+    --frame: calc(4px / 3);
     display: grid;
     flex: none;
     place-items: center;
     box-sizing: border-box;
     width: 20px;
     height: 20px;
-    padding: 3px;
+    padding: calc(var(--frame) + 1px);
     border-radius: 6px;
     font-style: normal;
     line-height: 1;
@@ -51,7 +53,8 @@
     width: 100%;
     height: 100%;
     overflow: hidden;
-    border-radius: 3px;
+    /* Its outline's corner follows the frame's. */
+    border-radius: calc(5px - var(--frame));
     background: color-mix(in srgb, var(--provider-color) 12%, transparent);
     color: color-mix(in srgb, var(--provider-color) var(--provider-ink-mix), var(--text));
   }

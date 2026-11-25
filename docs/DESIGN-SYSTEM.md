@@ -91,11 +91,13 @@ agent with one account on a computer keeps its tinted provider mark and the bot 
 account shows the palette as 22px swatches in one radio group, the chosen one ringed in its own
 color.
 
-A chat's row in the sidebar ends with both identities in one 20px mark (`ChatUses.svelte`): the
-model's 14px print, or the provider glyph on its tint, framed in the account's color, with a 1px
-line of `--bg-sidebar` between frame and print so a frame keeps its hue beside a print of the
-same color. Every account is framed there, and a chat whose account is gone keeps its print
-unframed in the same place, so the marks form one column at the rows' end.
+A chat's row in the sidebar starts with both identities in one 20px mark (`ChatUses.svelte`), in
+its gutter: the model's print, or the provider glyph on its tint, framed in the account's color
+4/3px wide (two whole pixels where the display scales by 150%), with a 1px line of
+`--bg-sidebar` between frame and print so a frame keeps its hue beside a print of the same color.
+Every account is framed there, and a chat whose account is gone keeps its print unframed in the
+same place, so the marks form one column under the folders' icons. The green dot of a reply that
+finished out of sight ends the row.
 
 ## Themes
 

@@ -46,6 +46,12 @@ async function limitedReply(page: Page, limit = line) {
 
 // Claude Code's line for a session limit that resets this many minutes from now on the page's
 // clock, written as Claude Code writes it, in the zone it names.
+/** Midday today on this computer's clock, so that a reset minutes away falls on the same day. */
+const midday = () => {
+  const time = new Date();
+  time.setHours(12, 0, 0, 0);
+  return time;
+};
 const resettingIn = (page: Page, minutes: number) =>
   page.evaluate((minutes) => {
     const time = new Date(Date.now() + minutes * 60_000)
@@ -179,7 +185,7 @@ test('the usage limit card fits a phone', async ({ page }) => {
 });
 
 test('a chat a usage limit stopped goes on by itself once the limit resets', async ({ page }) => {
-  await page.clock.install();
+  await page.clock.install({ time: midday() });
   await mockDesktop(page, 'capabilities');
   await page.goto('/');
   await chooseTestFolder(page);
@@ -228,7 +234,7 @@ test('a chat a usage limit stopped goes on by itself once the limit resets', asy
 });
 
 test('Cancel keeps a chat a usage limit stopped waiting for you', async ({ page }) => {
-  await page.clock.install();
+  await page.clock.install({ time: midday() });
   await mockDesktop(page, 'capabilities');
   await page.goto('/');
   await chooseTestFolder(page);
@@ -249,7 +255,7 @@ test('Cancel keeps a chat a usage limit stopped waiting for you', async ({ page 
 test('a message of your own uses the plan up, so a rewind back to the limit waits for you', async ({
   page,
 }) => {
-  await page.clock.install();
+  await page.clock.install({ time: midday() });
   await mockDesktop(page, 'capabilities');
   await page.goto('/');
   await chooseTestFolder(page);
@@ -286,7 +292,7 @@ test('a message of your own uses the plan up, so a rewind back to the limit wait
 test('a chat waiting to go on after a usage limit still does once the app starts again', async ({
   page,
 }) => {
-  await page.clock.install();
+  await page.clock.install({ time: midday() });
   await mockDesktop(page, 'capabilities');
   await page.goto('/');
   await chooseTestFolder(page);
