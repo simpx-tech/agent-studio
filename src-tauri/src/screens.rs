@@ -1056,6 +1056,22 @@ pub enum Request {
         #[serde(default)]
         keep: bool,
     },
+    /// Starts a workflow's command (docs/WORKFLOWS.md: a Command step's, a Watch trigger's) as a
+    /// job kept under `id`, the run or workflow it belongs to, in a folder of this computer or of
+    /// a WSL distribution it manages, and answers with the job at once. Its output goes once read.
+    Command {
+        id: String,
+        #[serde(rename = "environmentId")]
+        environment_id: String,
+        #[serde(default)]
+        folder: String,
+        shell: Shell,
+        script: String,
+        #[serde(default)]
+        params: Map<String, Value>,
+        #[serde(default)]
+        timeout: Option<u64>,
+    },
     Jobs {
         id: String,
     },
@@ -1278,6 +1294,66 @@ impl Screens {
         })
         .await
     }
+    /// Where a workflow's command runs: this computer itself, or a WSL distribution it manages,
+    /// in the folder its step names as that place reaches it, or in its home folder when it
+    /// names none. A workflow's steps choose their folders, as its Agent steps do.
+    async fn workflow_site(
+        &self,
+        data: &Path,
+        environment: &str,
+        folder: &str,
+    ) -> Result<Site, String> {
+        if folder.contains('\0') || folder.chars().any(char::is_control) {
+            return Err("The folder must be one line.".into());
+        }
+        let folder = folder.trim();
+        for again in [false, true] {
+            let computer = self.computer(data, again).await;
+            if computer.local == environment {
+                let path = if folder.is_empty() {
+                    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                        .map(PathBuf::from)
+                        .ok_or("This computer has no home folder to run the command in.")?
+                } else {
+                    PathBuf::from(folder)
+                };
+                let checked = path.clone();
+                let usable =
+                    blocking(move || Ok(checked.is_absolute() && checked.is_dir())).await?;
+                if !usable {
+                    return Err(format!(
+                        "The folder {} is not a folder of this computer.",
+                        path.display()
+                    ));
+                }
+                return Ok(Site {
+                    environment_id: environment.into(),
+                    distribution: None,
+                    folder: path.to_string_lossy().into_owned(),
+                    project: String::new(),
+                });
+            }
+            if let Some((_, name)) = computer
+                .distributions
+                .iter()
+                .find(|(id, _)| id == environment)
+            {
+                // A Linux path inside the distribution; none is its home folder.
+                if !folder.is_empty() && !folder.starts_with('/') {
+                    return Err(format!(
+                        "The folder {folder} is not a folder of the WSL distribution {name}: give its Linux path."
+                    ));
+                }
+                return Ok(Site {
+                    environment_id: environment.into(),
+                    distribution: Some(name.clone()),
+                    folder: folder.into(),
+                    project: String::new(),
+                });
+            }
+        }
+        Err("This computer runs no commands for that environment.".into())
+    }
     /// Where a screen's command runs or tool is called: the screen's own place, or the one named.
     pub(crate) async fn place(
         &self,
@@ -1462,6 +1538,36 @@ impl Screens {
                 };
                 encode(&self.jobs.start(&root, &namespace, &screen.id, spec).await?)
             }
+            Request::Command {
+                id,
+                environment_id,
+                folder,
+                shell,
+                script: text,
+                params,
+                timeout,
+            } => {
+                checked_id(&id)?;
+                let text = script(Some(&Value::String(text)))?;
+                if timeout == Some(0) {
+                    return Err("timeout must be a whole number of seconds, at least 1.".into());
+                }
+                let site = self.workflow_site(&data, &environment_id, &folder).await?;
+                let spec = jobs::Spec {
+                    action: None,
+                    label: label(&text),
+                    variables: passed(&params)?,
+                    params,
+                    place: None,
+                    site,
+                    name: "command".into(),
+                    shell,
+                    script: text,
+                    timeout,
+                    keep: false,
+                };
+                encode(&self.jobs.start(&root, &namespace, &id, spec).await?)
+            }
             Request::Jobs { id } => Ok(json!({ "jobs": self.jobs.list(&root, &id).await? })),
             Request::Output {
                 id,
@@ -1632,7 +1738,11 @@ pub async fn manage_screen(
     // call the window sends (calls.rs).
     if matches!(
         request,
-        Request::Run { .. } | Request::Start { .. } | Request::Mcp { .. } | Request::Ask { .. }
+        Request::Run { .. }
+            | Request::Start { .. }
+            | Request::Command { .. }
+            | Request::Mcp { .. }
+            | Request::Ask { .. }
     ) {
         return call
             .once(screens.handle(root, namespace, &launch, request))
@@ -2361,6 +2471,138 @@ mod tests {
         );
         assert!(!data_file(&root, &screen.id).exists());
         assert!(!root.join("jobs").join(&screen.id).exists());
+    }
+
+    #[tokio::test]
+    async fn a_workflow_runs_commands_in_folders_of_this_computer_and_its_distributions() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("screens");
+        let local = uuid::Uuid::new_v4().to_string();
+        let distribution = uuid::Uuid::new_v4().to_string();
+        std::fs::write(
+            directory.path().join("installation.json"),
+            serde_json::to_vec(&json!({
+                "id": local,
+                "computerId": uuid::Uuid::new_v4().to_string(),
+                "name": "Desk",
+                "platform": "windows",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            directory.path().join("workspace.json"),
+            serde_json::to_vec(&json!({"fleet": {"environments": [{
+                "id": distribution, "platform": "wsl", "distribution": "Ubuntu", "discoveredOn": local
+            }]}}))
+            .unwrap(),
+        )
+        .unwrap();
+        let folder = directory.path().join("repo");
+        std::fs::create_dir_all(&folder).unwrap();
+        let screens = Screens::default();
+        // The run the command belongs to keeps its job; no screen does.
+        let run = uuid::Uuid::new_v4().to_string();
+        let ask = |request: Value| {
+            let root = root.clone();
+            let screens = &screens;
+            async move {
+                screens
+                    .handle(
+                        root,
+                        "agent-studio-test".into(),
+                        &NoCli,
+                        serde_json::from_value(request).unwrap(),
+                    )
+                    .await
+            }
+        };
+        let script = if cfg!(windows) {
+            "Write-Output \"$env:PARAM_REPO in $((Get-Location).Path)\""
+        } else {
+            "echo \"$PARAM_REPO in $PWD\""
+        };
+        let job = ask(json!({
+            "op": "command", "id": run, "environmentId": local,
+            "folder": folder.to_string_lossy(), "shell": shell(), "script": script,
+            "params": {"repo": "me/app"}
+        }))
+        .await
+        .unwrap();
+        assert_eq!(job["state"], "running");
+        assert_eq!(job["label"], script);
+        // A step follows it without reading its output, then reads it whole once it ended.
+        loop {
+            let peek = ask(json!({"op": "output", "id": run, "job": job["id"], "after": 9_007_199_254_740_991u64, "peek": true}))
+                .await
+                .unwrap();
+            assert!(peek["chunks"].as_array().unwrap().is_empty());
+            if peek["job"]["state"] != "running" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let whole = ask(json!({"op": "output", "id": run, "job": job["id"], "after": 0}))
+            .await
+            .unwrap();
+        assert_eq!(whole["job"]["exitCode"], 0, "{whole}");
+        let text: String = whole["chunks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|chunk| chunk["text"].as_str().unwrap().to_string())
+            .collect();
+        assert!(text.trim().starts_with("me/app in "), "{text}");
+        assert!(text.trim().ends_with("repo"), "{text}");
+        // Its end, once read, goes with its output.
+        let gone = ask(json!({"op": "output", "id": run, "job": job["id"], "after": 0}))
+            .await
+            .unwrap_err();
+        assert_eq!(gone, "This job is no longer kept on this computer.");
+        // Folders are this computer's own, environments its own or its distributions'.
+        let missing = ask(json!({
+            "op": "command", "id": run, "environmentId": local,
+            "folder": directory.path().join("nowhere").to_string_lossy(), "shell": shell(), "script": "exit 0"
+        }))
+        .await
+        .unwrap_err();
+        assert!(
+            missing.contains("is not a folder of this computer"),
+            "{missing}"
+        );
+        let foreign = ask(json!({
+            "op": "command", "id": run, "environmentId": uuid::Uuid::new_v4().to_string(),
+            "folder": "", "shell": shell(), "script": "exit 0"
+        }))
+        .await
+        .unwrap_err();
+        assert!(
+            foreign.contains("runs no commands for that environment"),
+            "{foreign}"
+        );
+        let owner = ask(json!({
+            "op": "command", "id": "../runs", "environmentId": local, "shell": shell(), "script": "exit 0"
+        }))
+        .await
+        .unwrap_err();
+        assert_eq!(owner, "Invalid screen id");
+        // Without a folder it runs in the home folder; a distribution's folders are Linux paths.
+        let home = screens
+            .workflow_site(directory.path(), &local, "")
+            .await
+            .unwrap();
+        assert!(Path::new(&home.folder).is_dir());
+        let inside = screens
+            .workflow_site(directory.path(), &distribution, "/home/me/repo")
+            .await
+            .unwrap();
+        assert_eq!(inside.distribution.as_deref(), Some("Ubuntu"));
+        assert_eq!(inside.folder, "/home/me/repo");
+        let windows = screens
+            .workflow_site(directory.path(), &distribution, r"C:\repo")
+            .await
+            .unwrap_err();
+        assert!(windows.contains("Linux path"), "{windows}");
     }
 
     #[tokio::test]

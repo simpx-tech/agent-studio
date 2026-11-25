@@ -154,6 +154,18 @@ export function stepSummary(
           return `${config.computer.environmentId ? (names.computer?.(config.computer.environmentId) ?? 'A computer') : 'A computer'} goes ${config.computer.event}`;
         case 'usage':
           return 'A usage limit resets';
+        case 'watch': {
+          const watch = config.watch;
+          const where = watch.location
+            ? (names.computer?.(watch.location.environmentId) ?? 'A computer')
+            : '';
+          return [
+            `Every ${watch.every === 1 ? watch.unit.slice(0, -1) : `${watch.every} ${watch.unit}`}`,
+            where,
+          ]
+            .filter(Boolean)
+            .join(' · ');
+        }
         default:
           return config.inputs.length
             ? `Run by hand · ${config.inputs.length} input${config.inputs.length === 1 ? '' : 's'}`
@@ -203,6 +215,14 @@ export function stepSummary(
           .values.map((v) => v.name)
           .join(', ') || 'No values'
       );
+    case 'command': {
+      const config = nodeConfig(node, 'command');
+      const line = config.script.split('\n').find((l) => l.trim())?.trim() ?? '';
+      const where = config.location
+        ? (names.computer?.(config.location.environmentId) ?? '')
+        : '';
+      return [line || 'No command', where].filter(Boolean).join(' · ');
+    }
     case 'screenAction':
       return nodeConfig(node, 'screenAction').action || 'An action';
     case 'screenData': {

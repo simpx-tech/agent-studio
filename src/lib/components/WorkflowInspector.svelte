@@ -6,6 +6,8 @@
   import {
     chatEvents,
     conditionOps,
+    overlapLabels,
+    overlaps,
     runEndings,
     scheduleSchema,
     isNodeType,
@@ -35,6 +37,7 @@
     graph,
     pickers,
     webhookUrl,
+    watchStatus,
     change,
     remove,
     close,
@@ -44,6 +47,10 @@
     pickers: WorkflowPickers;
     /** A webhook trigger's address, when the relay runs webhooks. */
     webhookUrl?: (nodeId: string, secret: string) => string | undefined;
+    /** A Watch trigger's last look on this computer. */
+    watchStatus?: (nodeId: string) =>
+      | { looking: boolean; checkedAt?: string; items?: number; error?: string }
+      | undefined;
     change: (node: WorkflowNode) => void;
     remove: () => void;
     close: () => void;
@@ -73,12 +80,14 @@
     ),
     'trigger.output',
     'trigger.json',
+    ...(triggersOf('watch') ? ['trigger.id', 'trigger.previous'] : []),
+    ...(triggersOf('webhook') ? ['trigger.headers'] : []),
     'previous.output',
     ...graph.nodes
       .filter((n) => n.id !== node.id && n.type !== 'start' && n.type !== 'end')
       .flatMap((n) => [
         `${n.key}.output`,
-        ...(['agent', 'set', 'workflow'].includes(n.type) ? [`${n.key}.json`] : []),
+        ...(['agent', 'set', 'workflow', 'command'].includes(n.type) ? [`${n.key}.json`] : []),
         ...(n.type === 'workflow' ? [`${n.key}.run`] : []),
       ]),
     'item',
@@ -86,6 +95,10 @@
     'run.title',
     'now',
   ]);
+  // Whether a trigger of a kind starts this workflow, for what its runs can name.
+  function triggersOf(kind: TriggerKind) {
+    return graph.nodes.some((n) => n.type === 'start' && triggerOf(n) === kind);
+  }
   // Whether a step has a key, for the values a text names.
   const hasKey = (key: string) => graph.nodes.some((n) => n.key === key);
   // What each value to insert names, for its colour.
@@ -156,6 +169,22 @@
     const target = location ?? pickers.location(pickers.here);
     if (target) set('location', { ...target, path });
   }
+  type Place = {
+    computerId: string;
+    environmentId: string;
+    executionEnvironmentId?: string;
+    path: string;
+  };
+  // A Message or Read step's chat named by a value, a template, rather than chosen.
+  const FROM_VALUE = 'from-value';
+  const chatFromValue = $derived(String(config.conversationId ?? '').includes('{{'));
+  /** Sets a setting, or takes it away when `value` is undefined. */
+  function setOrDrop(field: string, value: unknown) {
+    const { [field]: _, ...rest } = config;
+    change({ ...node, config: value === undefined ? rest : { ...rest, [field]: value } });
+  }
+  // What a Watch trigger's last look on this computer found.
+  const lastLook = $derived(type === 'start' ? watchStatus?.(node.id) : undefined);
   const schedules = $derived((config.schedules as Schedule[] | undefined) ?? []);
   const trigger = $derived(type === 'start' ? triggerOf(node) : 'manual');
   const startConfig = $derived(type === 'start' ? nodeConfig(node, 'start') : undefined);
@@ -181,7 +210,7 @@
   }
   /** Changes one setting of the kind this trigger is. */
   const setPart = (
-    part: 'chat' | 'workflow' | 'computer' | 'usage' | 'webhook',
+    part: 'chat' | 'workflow' | 'computer' | 'usage' | 'webhook' | 'watch',
     patch: Record<string, unknown>,
   ) => set(part, { ...(startConfig?.[part] as Record<string, unknown>), ...patch });
   const toggleIn = <T extends string>(list: T[], item: T, on: boolean) =>
@@ -370,11 +399,15 @@
         <ChoicePicker
           field
           label="Which chat"
-          options={pickers.chats()}
+          options={[{ id: FROM_VALUE, name: 'From a value' }, ...pickers.chats()]}
           placeholder="Choose a chat"
           fallbackToFirst={false}
-          value={(config.conversationId as string) ?? ''}
-          onchange={(value) => set('conversationId', value)}
+          value={chatFromValue ? FROM_VALUE : ((config.conversationId as string) ?? '')}
+          onchange={(value) =>
+            set(
+              'conversationId',
+              value === FROM_VALUE ? '{{trigger.json.conversationId}}' : value,
+            )}
         />
       </div>
     {:else}
@@ -392,6 +425,14 @@
       </div>
     {/if}
   </div>
+{/snippet}
+{#snippet chatValue()}
+  {#if config.target === 'chat' && chatFromValue}{@render text(
+      'Chat id',
+      'conversationId',
+      0,
+      '{{trigger.json.conversationId}}',
+    )}{/if}
 {/snippet}
 {#snippet screenFields(withAction: boolean)}
   <div class="field">
@@ -421,6 +462,73 @@
     />
   </div>
   {#if withAction}{@render text('Action', 'action', 0, 'action_name')}{/if}
+{/snippet}
+{#snippet placeFields(place: Place | undefined, apply: (place: Place | undefined) => void)}
+  <div class="field">
+    <span>Computer</span>
+    <ChoicePicker
+      field
+      label="Computer"
+      options={[{ id: '', name: 'The computer that runs it' }, ...pickers.computers]}
+      value={place?.environmentId ?? ''}
+      onchange={(id) => {
+        const target = id ? pickers.location(id) : undefined;
+        apply(target ? { ...target, path: place?.path ?? '' } : undefined);
+      }}
+    />
+  </div>
+  <label class="field"
+    ><span>Folder</span><input
+      list={`command-folders-${node.id}`}
+      placeholder="Home folder"
+      value={place?.path ?? ''}
+      oninput={(event) => {
+        const target = place ?? pickers.location(pickers.here);
+        if (target) apply({ ...target, path: event.currentTarget.value });
+      }}
+    /><datalist id={`command-folders-${node.id}`}
+      >{#each pickers.folders(place?.environmentId ?? pickers.here) as folder}<option
+          value={folder}
+        ></option>{/each}</datalist
+    ></label
+  >
+{/snippet}
+{#snippet commandFields(
+  command: { shell: string; script: string; timeout: number },
+  apply: (patch: Record<string, unknown>) => void,
+)}
+  <div class="field">
+    <span>Shell</span>
+    <ChoicePicker
+      field
+      label="Shell"
+      options={[
+        { id: 'bash', name: 'Bash' },
+        { id: 'powershell', name: 'PowerShell' },
+      ]}
+      value={command.shell}
+      onchange={(value) => apply({ shell: value })}
+    />
+  </div>
+  <label class="field"
+    ><span>Command</span><textarea
+      class="mono"
+      rows="7"
+      spellcheck="false"
+      value={command.script}
+      oninput={(event) => apply({ script: event.currentTarget.value })}
+    ></textarea></label
+  >
+  <label class="field"
+    ><span>Time limit in seconds</span><input
+      type="number"
+      min="0"
+      placeholder="None"
+      value={command.timeout || ''}
+      oninput={(event) =>
+        apply({ timeout: Math.max(0, Math.floor(Number(event.currentTarget.value) || 0)) })}
+    /></label
+  >
 {/snippet}
 {#snippet pairsEditor(label: string, field: string, keyLabel: string)}
   <fieldset class="list">
@@ -647,6 +755,16 @@
             <p class="inspector-note">A POST starts a run with its body as {'{{trigger.json}}'}.</p>
           {:else}<p class="inspector-note">Webhooks need the relay to be updated.</p>{/if}
         </div>
+        <label class="field"
+          ><span>Signing secret</span><input
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="None"
+            value={startConfig.webhook.signing}
+            oninput={(event) => setPart('webhook', { signing: event.currentTarget.value })}
+          /></label
+        >
       {:else if trigger === 'computer' && startConfig}
         {@const watched = startConfig.computer}
         <div class="field-row">
@@ -695,6 +813,80 @@
             ]}
             value={watched.connectionId}
             onchange={(value) => setPart('usage', { connectionId: value })}
+          />
+        </div>
+      {:else if trigger === 'watch' && startConfig}
+        {@const watch = startConfig.watch}
+        {@render placeFields(watch.location, (place) => setPart('watch', { location: place }))}
+        {@render commandFields(watch, (patch) => setPart('watch', patch))}
+        <div class="field-row">
+          <label class="field"
+            ><span>Every</span><input
+              type="number"
+              min="1"
+              value={watch.every}
+              oninput={(event) =>
+                setPart('watch', {
+                  every: Math.max(1, Math.floor(Number(event.currentTarget.value) || 1)),
+                })}
+            /></label
+          >
+          <div class="field">
+            <span>Unit</span>
+            <ChoicePicker
+              field
+              label="Unit"
+              options={[
+                { id: 'minutes', name: 'Minutes' },
+                { id: 'hours', name: 'Hours' },
+              ]}
+              value={watch.unit}
+              onchange={(value) => setPart('watch', { unit: value })}
+            />
+          </div>
+        </div>
+        <div class="field-row">
+          <label class="field"
+            ><span>Item id</span><input
+              class="mono"
+              placeholder="id"
+              value={watch.id}
+              oninput={(event) => setPart('watch', { id: event.currentTarget.value.trim() })}
+            /></label
+          >
+          <label class="field"
+            ><span>Changes with</span><input
+              class="mono"
+              placeholder="The whole item"
+              value={watch.version}
+              oninput={(event) => setPart('watch', { version: event.currentTarget.value.trim() })}
+            /></label
+          >
+        </div>
+        <label class="checkbox"
+          ><input
+            type="checkbox"
+            checked={watch.initial}
+            onchange={(event) => setPart('watch', { initial: event.currentTarget.checked })}
+          />Start runs for items already listed</label
+        >
+        {#if lastLook}<p class="inspector-note" class:watch-error={!!lastLook.error}>
+            {lastLook.looking
+              ? 'Looking…'
+              : lastLook.error
+                ? lastLook.error
+                : `Looked at ${lastLook.checkedAt ? new Date(lastLook.checkedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''} · ${lastLook.items ?? 0} ${lastLook.items === 1 ? 'item' : 'items'}`}
+          </p>{/if}
+      {/if}
+      {#if trigger !== 'manual' && startConfig}
+        <div class="field">
+          <span>While a run goes on</span>
+          <ChoicePicker
+            field
+            label="While a run goes on"
+            options={overlaps.map((overlap) => ({ id: overlap, name: overlapLabels[overlap] }))}
+            value={startConfig.overlap}
+            onchange={(value) => set('overlap', value)}
           />
         </div>
       {/if}
@@ -837,19 +1029,21 @@
       {@render agentFields()}
       {@render text('Prompt', 'prompt', 6, 'What the agent should do')}
       {@render text('Chat title', 'title')}
-      <div class="field">
-        <span>When it runs again</span>
-        <ChoicePicker
-          field
-          label="When it runs again"
-          options={[
-            { id: 'continue', name: 'Continue its chat' },
-            { id: 'new', name: 'Start a new chat' },
-          ]}
-          value={(config.chat as string) ?? 'continue'}
-          onchange={(value) => set('chat', value)}
-        />
-      </div>
+      {@render text('One chat per', 'chatKey', 0, '{{trigger.id}}')}
+      {#if !String(config.chatKey ?? '').trim()}<div class="field">
+          <span>When it runs again</span>
+          <ChoicePicker
+            field
+            label="When it runs again"
+            options={[
+              { id: 'continue', name: 'Continue its chat' },
+              { id: 'new', name: 'Start a new chat' },
+            ]}
+            value={(config.chat as string) ?? 'continue'}
+            onchange={(value) => set('chat', value)}
+          />
+        </div>{/if}
+      {@render toggle('Show in your chats', 'yours')}
       {@render toggle('Reply with JSON', 'json')}
       {#if config.json}{@render text('JSON Schema', 'schema', 4, '{"type": "object", …}', true)}{/if}
       {@render text('Chat instructions', 'instructions', 3)}
@@ -860,6 +1054,7 @@
       {@render text('Screen to update', 'screenId', 0, 'A screen id, or empty for a new one')}
     {:else if type === 'message'}
       {@render target()}
+      {@render chatValue()}
       {@render text('Message', 'text', 5)}
       {@render pick('Send as', 'mode', [
         { id: 'next', name: 'Its next message' },
@@ -868,6 +1063,7 @@
       {@render toggle('Wait for its reply', 'wait')}
     {:else if type === 'read'}
       {@render target()}
+      {@render chatValue()}
       {@render pick('Read', 'what', [
         { id: 'reply', name: 'Latest reply' },
         { id: 'messages', name: 'Last messages' },
@@ -1020,6 +1216,19 @@
             ])}><Plus size={14} />Add value</button
         >
       </fieldset>
+    {:else if type === 'command'}
+      {@render placeFields(config.location as Place | undefined, (place) =>
+        setOrDrop('location', place),
+      )}
+      {@render commandFields(
+        {
+          shell: String(config.shell ?? 'bash'),
+          script: String(config.script ?? ''),
+          timeout: Number(config.timeout ?? 0),
+        },
+        (patch) => change({ ...node, config: { ...config, ...patch } }),
+      )}
+      {@render pairsEditor('Values as PARAM_<NAME>', 'params', 'name')}
     {:else if type === 'screenAction'}
       {@render screenFields(true)}
       {@render pairsEditor('Parameters', 'params', 'Name')}
@@ -1287,6 +1496,9 @@
     gap: 6px;
     font-size: var(--text-sm);
     color: var(--text-secondary);
+  }
+  .inspector-note.watch-error {
+    color: var(--danger);
   }
   .inspector-note {
     margin: 0;

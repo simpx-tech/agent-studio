@@ -578,7 +578,7 @@ test('the graph has right-click menus, and step settings colour the values they 
   await graph.locator('.workflow-card').filter({ hasText: 'Manual' }).click();
   await inspector.getByRole('combobox', { name: 'Trigger' }).click();
   const options = page.getByRole('option');
-  await expect(options).toHaveCount(7);
+  await expect(options).toHaveCount(8);
   expect(
     await options.evaluateAll((all) => all.every((o) => o.querySelector('.option-icon svg'))),
   ).toBe(true);

@@ -47,9 +47,9 @@ pub fn known(name: &str) -> bool {
 pub const GUIDANCE: &str = "To automate a sequence of steps across chats, agents and computers, build a workflow with workflow_save (Claude: mcp__agent_studio__workflow_save) and run it with workflow_run; workflow_list and workflow_read find and open saved ones, and workflow_status follows a run. For a goal an agent should pursue by itself over many steps, sessions or days, start a dynamic workflow with dynamic_start: an orchestrator agent then plans it, starts agents on the computers and accounts it chooses and drives it to completion. Both kinds appear on the Workflows page of Agent Studio, static and dynamic.";
 
 const STEPS: &str = "Steps (type: settings in config; outputs):
-- start (a trigger; a workflow may have several, each starting its own runs): trigger manual|schedule|chat|workflow|webhook|computer|usage. manual: inputs [{name, label, default, multiline}] (Run and workflow_run). schedule: schedules [{id, every: minutes|hours|days|weeks, interval, at: HH:MM, days: [0-6], timezone}]. chat: chat {events: [completed|failed|stopped|question], environmentId, path (folder prefix), provider, title (contains), workflowChats} for a reply ending or asking in a matching chat (empty filters match any). workflow: workflow {workflowId ('' for any other workflow, static or dynamic), statuses: [completed|failed|stopped]}. webhook: webhook {secret} (leave it empty; the editor makes one), started by a POST to its URL. computer: computer {environmentId ('' for any), event: online|offline}. usage: usage {connectionId or provider ('' for any)} when an account's 5-hour or weekly limit reset after it was reached. Its output is what fired it (a chat's reply, a run's output, the webhook's body); out.
-- agent: prompt, location {computerId, environmentId, path} (omit for the driving computer, empty path for a Standalone folder), provider claude|codex|gemini, connectionId (an account's connection id; empty for the least used account; workflow for the account of the workflow's own chat: the orchestrator of a dynamic workflow that started the run, else its assistant), model (empty for the CLI default), reasoning, json (ask for a JSON reply), schema (a JSON Schema as text), chat continue|new (a repeated run for the same loop item continues its chat or starts a new one), title, instructions; out, error. Its chat belongs to the run: the user reads it from the workflow but never writes in it.
-- message: target step|chat, step (the key of an earlier step whose chat it uses) or conversationId, text, mode next|steer, wait; out, error.
+- start (a trigger; a workflow may have several, each starting its own runs): trigger manual|schedule|chat|workflow|webhook|computer|usage|watch. manual: inputs [{name, label, default, multiline}] (Run and workflow_run). schedule: schedules [{id, every: minutes|hours|days|weeks, interval, at: HH:MM, days: [0-6], timezone}]. chat: chat {events: [completed|failed|stopped|question], environmentId, path (folder prefix), provider, title (contains), workflowChats} for a reply ending or asking in a matching chat (empty filters match any). workflow: workflow {workflowId ('' for any other workflow, static or dynamic), statuses: [completed|failed|stopped]}. webhook: webhook {secret (leave it empty; the editor makes one), signing (an optional secret the request's body must be signed with as X-Hub-Signature-256)}, started by a POST to its URL; a delivery sent again (X-GitHub-Delivery) starts no second run. computer: computer {environmentId ('' for any), event: online|offline}. usage: usage {connectionId or provider ('' for any)} when an account's 5-hour or weekly limit reset after it was reached. watch: watch {location {computerId, environmentId, path} (omit for the computer that runs the workflow, empty path for its home folder), shell bash|powershell, script, timeout (seconds, 0 for none), every, unit minutes|hours, id (the path of each item's id, default id), version (the path of what changes, '' for the whole item), initial (also start runs for the items listed when watching begins)}: runs the script every so often, reads the JSON list (or one JSON object a line) it prints and starts a run for each item that is new or changed since the last look. Every trigger but manual may set overlap parallel|skip|queue: while a run it started (for watch, one for the same item) still goes on, start another, start none (a watched item is looked at again), or start it once that run ended. Its output is what fired it (a chat's reply, a run's output, the webhook's body, the watched item); out.
+- agent: prompt, location {computerId, environmentId, path} (omit for the driving computer, empty path for a Standalone folder), provider claude|codex|gemini, connectionId (an account's connection id; empty for the least used account; workflow for the account of the workflow's own chat: the orchestrator of a dynamic workflow that started the run, else its assistant), model (empty for the CLI default), reasoning, json (ask for a JSON reply), schema (a JSON Schema as text), chat continue|new (a repeated run for the same loop item continues its chat or starts a new one), chatKey (a template such as {{trigger.id}}: the step continues the chat it had for the same value in any run of the workflow), yours (the chat is listed with the user's chats and takes their messages), title, instructions; out, error. Unless yours, its chat belongs to the run: the user reads it from the workflow but never writes in it.
+- message: target step|chat, step (the key of an earlier step whose chat it uses) or conversationId (a chat's id, or a template naming one, such as {{trigger.json.conversationId}}), text, mode next|steer, wait; out, error.
 - read: target, step or conversationId, what reply|messages|chat, count; out, error.
 - condition: left, op contains|notContains|equals|notEquals|matches|greater|less|empty|notEmpty|true, right, ignoreCase; true, false.
 - loop: items (a JSON list or lines, usually a template), parallel; each (runs once per item; the item ends when its steps end), done.
@@ -59,12 +59,13 @@ const STEPS: &str = "Steps (type: settings in config; outputs):
 - confirm: header, question, approve, reject (button labels); approved, rejected.
 - notify: title, text; out.
 - set: values [{name, value, json}]; out (an object of the values).
+- command: location (as a watch trigger's), shell bash|powershell, script (as written, never a template), params {name: value} (lowercase names; templates whose values the script reads as PARAM_<NAME> environment variables, never written into its text), timeout (seconds, 0 for none); out (stdout, and its JSON when it parses), error (a nonzero exit code, with stderr).
 - screen: like agent without prompt, plus screenTitle, spec (what the screen shows and does), screenId (to update one); out, error.
 - screenAction: environmentId, screenId, action, params {name: value}; out (stdout), error.
 - screenData: environmentId, screenId, op load|save, key, value, json; out.
 - workflow (runs another workflow and continues with its result): kind static|dynamic; static: workflowId, inputs {name: value} for its manual trigger; dynamic: goal (a template: what the child dynamic workflow pursues), plus the orchestrator's provider, connectionId, model, reasoning and location like an agent step; wait (default true); out (the child's result: an End step's output or the dynamic workflow's summary, also as JSON when it parses), error.
 - end: output, status completed|failed.
-Text settings are templates: {{input.NAME}} a manual trigger's input, {{trigger.output}} and {{trigger.json.PATH}} what fired the run, {{KEY.output}} a step's output text, {{KEY.json.PATH}} part of its JSON, {{KEY.chat}} its chat id, {{KEY.run}} the run a Run workflow step started, {{item}} and {{index}} the loop item, {{previous.output}} what the step before handed over, {{run.title}}, {{now}}. Every step may set onError stop|continue, retries and retryDelay (seconds); a connected error port takes its failures.";
+Text settings are templates: {{input.NAME}} a manual trigger's input, {{trigger.output}} and {{trigger.json.PATH}} what fired the run, {{trigger.id}} and {{trigger.previous}} a watched item's id and the version it had before (empty for a new item), {{trigger.headers.NAME}} a webhook request's header (lowercase), {{KEY.output}} a step's output text, {{KEY.json.PATH}} part of its JSON, {{KEY.chat}} its chat id, {{KEY.run}} the run a Run workflow step started, {{item}} and {{index}} the loop item, {{previous.output}} what the step before handed over, {{run.title}}, {{now}}. Every step may set onError stop|continue, retries and retryDelay (seconds); a connected error port takes its failures.";
 
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({"name":name,"description":description,"inputSchema":{
@@ -573,10 +574,23 @@ mod tests {
             names(tools(true, true)).len(),
             GENERAL.len() + DYNAMIC.len()
         );
-        assert!(tools(true, false)[2]["description"]
+        let save = tools(true, false)[2]["description"]
             .as_str()
             .unwrap()
-            .contains("screenAction"));
+            .to_string();
+        // It documents every step and trigger, those that follow things up over runs included.
+        for part in [
+            "screenAction",
+            "- command:",
+            "watch: watch {",
+            "overlap parallel|skip|queue",
+            "chatKey",
+            "yours",
+            "{{trigger.previous}}",
+            "X-Hub-Signature-256",
+        ] {
+            assert!(save.contains(part), "{part}");
+        }
         for tool in codex_tools(true, true) {
             assert_eq!(tool["type"], "function");
         }

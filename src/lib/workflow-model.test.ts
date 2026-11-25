@@ -2,9 +2,12 @@ import { describe, expect, it } from 'vitest';
 import {
   answerText,
   definitionSchema,
+  deliveryRunId,
+  derivedId,
   freshKey,
   graphIssues,
   keyFrom,
+  keyedChatId,
   mayContinue,
   newDefinition,
   newNode,
@@ -156,7 +159,10 @@ describe('workflow model', () => {
     expect(issues).toContain('Confirm: write what to confirm.');
     expect(issues).toContain('Manual takes no input.');
     expect(nodeConfig(chat, 'start').chat).toMatchObject({ events: ['completed'], path: '', provider: '' });
-    expect(nodeConfig(definition.graph.nodes[0], 'start').webhook).toEqual({ secret: '' });
+    expect(nodeConfig(definition.graph.nodes[0], 'start').webhook).toEqual({
+      secret: '',
+      signing: '',
+    });
     const summary = summarize({
       id: crypto.randomUUID(),
       kind: 'definition',
@@ -180,6 +186,45 @@ describe('workflow model', () => {
     expect(mayContinue({ elsewhere: false }, 'x')).toBe(false);
     expect(mayContinue({ elsewhere: true, continueOn: ['y'] }, 'x')).toBe(false);
     expect(mayContinue({ elsewhere: true, continueOn: ['x'] }, 'x')).toBe(true);
+  });
+
+  it('lists Watch triggers for the computers that watch, and checks commands', () => {
+    const definition = newDefinition('Reviews', user);
+    const taken = () => definition.graph.nodes.map((n) => n.key);
+    const watch = newNode('start', { x: 0, y: 200 }, taken());
+    watch.config = { trigger: 'watch', watch: { script: '' }, overlap: 'skip' };
+    definition.graph.nodes.push(watch);
+    const command = newNode('command', { x: 0, y: 400 }, taken());
+    command.config = { ...command.config, params: { 'Bad Name': 'x', good: '{{trigger.id}}' } };
+    definition.graph.nodes.push(command);
+    definition.graph.edges.push({ id: 'a', source: watch.id, sourcePort: 'out', target: command.id });
+    const issues = graphIssues(definition.graph).map((i) => i.message);
+    expect(issues).toContain(`${watch.title}: write its command.`);
+    expect(issues).toContain(`${command.title}: write its command.`);
+    expect(issues).toContain(
+      `${command.title}: name the value Bad Name with lowercase letters, digits and _.`,
+    );
+    expect(nodeConfig(watch, 'start')).toMatchObject({
+      overlap: 'skip',
+      watch: { shell: 'bash', every: 5, unit: 'minutes', id: 'id', version: '', initial: false },
+    });
+    expect(nodeConfig(command, 'command')).toMatchObject({ shell: 'bash', timeout: 0 });
+    const summary = summarize({
+      id: crypto.randomUUID(),
+      kind: 'definition',
+      revision: 1,
+      updatedAt: 'now',
+      body: definition,
+    });
+    expect(summary.triggers).toEqual([{ nodeId: watch.id, kind: 'watch', config: { script: '' } }]);
+  });
+
+  it('derives the same ids from the same parts on every computer', async () => {
+    const id = await keyedChatId('w', 'n', 'https://github.com/o/r/pull/1');
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(await keyedChatId('w', 'n', 'https://github.com/o/r/pull/1')).toBe(id);
+    expect(await keyedChatId('w', 'n', 'https://github.com/o/r/pull/2')).not.toBe(id);
+    expect(await deliveryRunId('w', 'n', 'd1')).not.toBe(await derivedId('w:n:d1'));
   });
 
   it('reads runs with defaults for parts older writers left out', () => {

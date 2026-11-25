@@ -1,7 +1,13 @@
 import type { Conversation, Message } from './domain';
 import type { Fleet } from './fleet';
 import type { UsageSnapshot } from './usage';
-import { RunDriver, type ChatSpec, type WorkflowHost } from './workflow-engine';
+import {
+  RunDriver,
+  type ChatSpec,
+  type CommandOutcome,
+  type CommandSpec,
+  type WorkflowHost,
+} from './workflow-engine';
 import { readRun, type WorkflowDefinition, type WorkflowRun } from './workflow-model';
 import { memoryFiles, workflowStore } from './workflow-store';
 
@@ -21,6 +27,9 @@ export function testHost(options: { environmentId?: string } = {}) {
   const steered: { conversationId: string; text: string }[] = [];
   const released: string[] = [];
   const switched: { conversationId: string; connectionId: string }[] = [];
+  // Commands started, each with how it ended once a test ends it.
+  const commands = new Map<string, { spec: CommandSpec; outcome?: CommandOutcome }>();
+  const stoppedCommands: string[] = [];
   const connections = [
     'aaaaaaaa-0000-4000-8000-000000000001',
     'aaaaaaaa-0000-4000-8000-000000000002',
@@ -122,6 +131,34 @@ export function testHost(options: { environmentId?: string } = {}) {
       load: async () => ({ progress: 3 }),
       save: async () => {},
     },
+    commands: {
+      async start(spec) {
+        const id = crypto.randomUUID();
+        commands.set(id, { spec });
+        return id;
+      },
+      async poll(_environmentId, _owner, job) {
+        const known = commands.get(job);
+        if (!known) throw new Error('This job is no longer kept on this computer.');
+        if (!known.outcome) return undefined;
+        // Its end is read once.
+        commands.delete(job);
+        return known.outcome;
+      },
+      async stop(_environmentId, _owner, job) {
+        stoppedCommands.push(job);
+        const known = commands.get(job);
+        if (known && !known.outcome)
+          known.outcome = {
+            exitCode: null,
+            stdout: '',
+            stderr: '',
+            timedOut: false,
+            stopped: true,
+            interrupted: false,
+          };
+      },
+    },
     createRun: async (id, run) => void runs.set(id, run),
     knownRun: (id) => runs.get(id),
     definition: async (id) => definitions.get(id),
@@ -173,6 +210,22 @@ export function testHost(options: { environmentId?: string } = {}) {
     steered,
     released,
     switched,
+    commands,
+    stoppedCommands,
+    /** Ends a running command as the test says, by default with exit code 0. */
+    endCommand(job: string, outcome: Partial<CommandOutcome> = {}) {
+      const known = commands.get(job);
+      if (!known || known.outcome) throw new Error('No such command runs.');
+      known.outcome = {
+        exitCode: 0,
+        stdout: '',
+        stderr: '',
+        timedOut: false,
+        stopped: false,
+        interrupted: false,
+        ...outcome,
+      };
+    },
     connections,
     environmentId,
     computerId,

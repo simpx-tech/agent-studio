@@ -1,7 +1,12 @@
 import type { Conversation } from './domain';
 import { requestsAttention } from './notifications';
 import { replyText, type WorkflowHost } from './workflow-engine';
-import { triggerConfigShape, type TriggerKind, type WorkflowSummary } from './workflow-model';
+import {
+  derivedId,
+  triggerConfigShape,
+  type TriggerKind,
+  type WorkflowSummary,
+} from './workflow-model';
 import { exhaustedUntil } from './workflow-usage';
 
 /**
@@ -224,15 +229,5 @@ export class TriggerWatch {
 }
 
 /** The id of the run an event starts: the same on every computer that sees it. */
-export async function eventRunId(...parts: string[]) {
-  const bytes = new Uint8Array(
-    await crypto.subtle.digest(
-      'SHA-256',
-      new TextEncoder().encode(`agent-studio-workflow-event:${parts.join(':')}`),
-    ),
-  ).slice(0, 16);
-  bytes[6] = (bytes[6] & 0x0f) | 0x80;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}
+export const eventRunId = (...parts: string[]) =>
+  derivedId(`agent-studio-workflow-event:${parts.join(':')}`);

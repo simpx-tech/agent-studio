@@ -90,6 +90,7 @@
     Paperclip,
     FileText,
     GitFork,
+    GitPullRequest,
     Rewind,
     PenLine,
     RotateCcwClock,
@@ -225,6 +226,7 @@
     STATIC_FROM_CHAT,
     assistantInstructions,
   } from '$lib/workflow-prompts';
+  import { presetDefinition, presets, type PresetId } from '$lib/workflow-presets';
   import {
     highestReasoning,
     rememberWorkflowAgent,
@@ -237,6 +239,9 @@
     notifyWorkflow,
     runScreenAction,
     saveScreenData,
+    startWorkflowCommand,
+    stopScreenJob,
+    workflowCommandOutcome,
     setQuietChats,
     setShownTogether,
     createComparisonWorktrees,
@@ -2915,6 +2920,23 @@
       ...(id ? { id } : {}),
     });
   }
+  /**
+   * Saves a ready-made workflow and opens its graph in place of the new workflow's chat, which,
+   * left empty, goes.
+   */
+  async function startPreset(id: PresetId) {
+    const workflowId = crypto.randomUUID();
+    const actor = { kind: 'user' as const, ...(installation ? { environmentId: installation.id } : {}) };
+    try {
+      const result = await workflows.saveDefinition(workflowId, null, presetDefinition(id, actor));
+      if (!result.ok) throw new Error('The workflow could not be saved.');
+      rememberWorkflowMode('workflow');
+      await workflows.refresh();
+      openWorkflow(workflowId);
+    } catch (error) {
+      notice = String(error).replace(/^Error: /, '');
+    }
+  }
   /** The arrow keys move between Workflow and Mission on a new workflow chat's welcome. */
   function workflowKindKey(event: KeyboardEvent, mode: 'workflow' | 'mission') {
     if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
@@ -3011,7 +3033,8 @@
       return sendWorkflowMessage(spec.id, spec.text);
     const now = new Date().toISOString();
     const location = spec.location ? insideDistribution(workspace.fleet, spec.location) : undefined;
-    workflows.own(spec.id);
+    // A chat kept yours is listed with your chats from the start.
+    if (!spec.yours) workflows.own(spec.id);
     workspace.conversations.unshift({
       id: spec.id,
       settings: { ...spec.settings },
@@ -3138,6 +3161,12 @@
       void refreshUsage({ provider, model: '', connectionId }, true),
     leastUsed: workflowLeastUsed,
     screens: { run: runScreenAction, load: loadScreenData, save: saveScreenData },
+    commands: {
+      start: async ({ environmentId, owner, ...command }) =>
+        (await startWorkflowCommand(environmentId, owner, command)).id,
+      poll: workflowCommandOutcome,
+      stop: async (environmentId, owner, job) => void (await stopScreenJob(environmentId, owner, job)),
+    },
     createRun: (id, run) => workflows.createRun(id, run),
     knownRun: (id) => workflows.knownRun(id),
     definition: (id) => workflows.definition(id),
@@ -9141,7 +9170,17 @@
                         onclick={() => setWorkflowMode('mission')}
                         ><Target size={15} aria-hidden="true" />Dynamic</button
                       >
-                    </div>{/if}
+                    </div>{#if mode === 'workflow'}<div
+                        class="workflow-presets"
+                        role="group"
+                        aria-label="Start from"
+                      >
+                        {#each presets as preset (preset.id)}<button
+                            type="button"
+                            onclick={() => void startPreset(preset.id)}
+                            ><GitPullRequest size={14} aria-hidden="true" />{preset.name}</button
+                          >{/each}
+                      </div>{/if}{/if}
                 </div>{/if}
             </div>
             <div class="chat-virtual-space" aria-hidden="true" bind:this={chatSpace}></div>

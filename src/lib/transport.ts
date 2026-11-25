@@ -4168,7 +4168,7 @@ async function screenRequest(environmentId: string, request: ScreenRequest): Pro
     // payload.
     if (e instanceof RelayResponseError && e.status === 400)
       throw new Error(
-        `The relay does not route ${/Group|moveScreen/.test(request.op) ? 'screen groups' : 'screens'} yet. It does once it runs the Agent Studio release that brings them.`,
+        `The relay does not route ${/Group|moveScreen/.test(request.op) ? 'screen groups' : request.op === 'command' ? 'workflow commands' : 'screens'} yet. It does once it runs the Agent Studio release that brings them.`,
       );
     throw e;
   }
@@ -4225,6 +4225,75 @@ export async function runScreenAction(
   return screenOutcomeSchema.parse(
     await screenRequest(environmentId, { op: 'run', id, action, params }),
   );
+}
+/**
+ * Starts a workflow's command (a Command step's, a Watch trigger's) as a job on the computer of
+ * `environmentId`, in `folder` as that environment reaches it, or its home folder. The job is
+ * kept under `owner`, its run or workflow, until its end is read.
+ */
+export async function startWorkflowCommand(
+  environmentId: string,
+  owner: string,
+  command: {
+    folder: string;
+    shell: 'bash' | 'powershell';
+    script: string;
+    params: Record<string, string>;
+    timeout?: number;
+  },
+): Promise<ScreenJob> {
+  return screenJobSchema.parse(
+    await screenRequest(environmentId, {
+      op: 'command',
+      id: owner,
+      environmentId,
+      folder: command.folder,
+      shell: command.shell,
+      script: command.script,
+      ...(Object.keys(command.params).length ? { params: command.params } : {}),
+      ...(command.timeout ? { timeout: command.timeout } : {}),
+    }),
+  );
+}
+/**
+ * How a workflow's command ended, or undefined while it runs. Reading its end takes its output
+ * from its computer, which keeps it no longer.
+ */
+export async function workflowCommandOutcome(
+  environmentId: string,
+  owner: string,
+  job: string,
+): Promise<
+  | {
+      exitCode: number | null;
+      stdout: string;
+      stderr: string;
+      timedOut: boolean;
+      stopped: boolean;
+      interrupted: boolean;
+    }
+  | undefined
+> {
+  const state = await screenJobOutput(environmentId, owner, job, Number.MAX_SAFE_INTEGER, {
+    peek: true,
+  });
+  if (state.job.state === 'running') return undefined;
+  const whole = await screenJobOutput(environmentId, owner, job, 0);
+  let stdout = '';
+  let stderr = '';
+  for (const chunk of whole.chunks)
+    if (chunk.stream === 'stderr') stderr += chunk.text;
+    else stdout += chunk.text;
+  const record = whole.job;
+  return {
+    exitCode: record.state === 'failed' ? null : (record.exitCode ?? null),
+    stdout,
+    // A command that never ran says why.
+    stderr: record.state === 'failed' ? (record.error ?? 'Its command could not run.') : stderr,
+    timedOut: !!record.timedOut,
+    stopped: record.state === 'stopped',
+    interrupted: record.state === 'interrupted',
+  };
 }
 /**
  * Starts one of a screen's actions, or a command its page passes, as a job on its computer. It

@@ -873,6 +873,30 @@ pre {
 .workflow-kind [aria-checked='true'] svg {
   color: var(--accent-text);
 }
+/* Ready-made workflows a new static workflow may start from. */
+.workflow-presets {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+.workflow-presets button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 3px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: none;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+.workflow-presets button:hover {
+  background: var(--hover);
+  color: var(--text);
+}
 /* Above a chat a workflow started: which run it belongs to. */
 .workflow-banner {
   display: flex;

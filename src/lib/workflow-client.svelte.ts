@@ -18,7 +18,7 @@ import {
   workflowRelay,
   type WorkflowCall,
 } from './transport';
-import { RunDriver, staticRun, type WorkflowHost } from './workflow-engine';
+import { RunDriver, iso, staticRun, type CommandOutcome, type WorkflowHost } from './workflow-engine';
 import {
   missionCall,
   missionTools,
@@ -29,10 +29,12 @@ import {
 import { generalCall, generalTools, type GeneralTool, type StoreAccess } from './workflow-tools';
 import {
   mayContinue,
+  nodeConfig,
   readDefinition,
   readRun,
   runActive,
   triggerLabels,
+  triggerOf,
   type Actor,
   type EventInput,
   type Lease,
@@ -50,6 +52,16 @@ import {
 import { latestSlot, slotRunId } from './workflow-schedule';
 import { mergeDefinition } from './workflow-merge';
 import { TriggerWatch, eventRunId } from './workflow-triggers';
+import {
+  TriggerMemory,
+  overlapVerdict,
+  stillGoing,
+  trackOf,
+  watchChanges,
+  watchItems,
+  watchSignature,
+  type QueuedEvent,
+} from './workflow-watch';
 import type { Schedule } from './workflow-model';
 import type { QuestionAnswer } from './questions';
 
@@ -148,6 +160,15 @@ export class WorkflowClient {
   private firstPass: Promise<void>;
   private settleFirst = () => {};
   private fired = new Map<string, number>();
+  /** What this computer keeps of its triggers: what Watch triggers saw, runs, waiting events. */
+  private memory: TriggerMemory | undefined;
+  /** The Watch triggers looking now, by `<workflow>:<trigger step>`. */
+  private looking = new Map<string, Promise<void>>();
+  private definitions = new Map<string, { body: WorkflowDefinition; revision: number }>();
+  /** Each Watch trigger's last look on this computer, by `<workflow>:<trigger step>`. */
+  watches = $state<
+    Record<string, { looking: boolean; checkedAt?: string; items?: number; error?: string }>
+  >({});
 
   constructor(private options: WorkflowOptions) {
     this.firstPass = new Promise((resolve) => (this.settleFirst = resolve));
@@ -231,6 +252,7 @@ export class WorkflowClient {
         : []),
     );
     if (this.options.drives && desktop()) {
+      this.memory ??= new TriggerMemory(workflowFiles);
       void watchWorkflowCalls((call) => void this.answer(call)).then((stop) =>
         this.stops.push(stop),
       );
@@ -730,6 +752,8 @@ export class WorkflowClient {
         }
         if (own) continue;
         if (!this.eligible(summary, now)) continue;
+        // A webhook's run whose trigger lets an earlier run end first waits for it.
+        if (summary.pending && !(await this.pendingMayStart(summary.id, backend))) continue;
         let lease: LeaseResult;
         try {
           lease = await backend.lease(summary.id, me, LEASE_MS);
@@ -767,6 +791,8 @@ export class WorkflowClient {
       }
       await this.fireSchedules(host, backend);
       await this.fireTriggers(host, backend);
+      await this.fireWatches(host, backend);
+      await this.fireQueue(backend);
     } finally {
       this.supervising = false;
       this.settleFirst();
@@ -881,12 +907,21 @@ export class WorkflowClient {
   /** The run a trigger starts, from the workflow as saved now. */
   private async triggered(
     summary: WorkflowSummary,
-    trigger: { nodeId: string; kind: TriggerKind; text?: string; payload?: unknown },
+    trigger: {
+      nodeId: string;
+      kind: TriggerKind;
+      text?: string;
+      payload?: unknown;
+      key?: string;
+      previous?: string;
+      headers?: Record<string, string>;
+    },
     actor: Actor,
     now: number,
   ) {
     const definition = await this.definition(summary.id).catch(() => undefined);
     if (!definition) return undefined;
+    this.definitions.set(summary.id, definition);
     const me = this.self();
     return staticRun(
       summary.id,
@@ -902,6 +937,78 @@ export class WorkflowClient {
       now,
       trigger,
     );
+  }
+  /** A saved workflow, read again only once it changed. */
+  private async cachedDefinition(summary: WorkflowSummary) {
+    const known = this.definitions.get(summary.id);
+    if (known && known.revision >= summary.revision) return known;
+    const read = await this.definition(summary.id).catch(() => undefined);
+    if (read) this.definitions.set(summary.id, read);
+    return read ?? known;
+  }
+  /** What a trigger does while a run it started still goes on, as its workflow is saved. */
+  private async overlapOf(summary: WorkflowSummary, nodeId: string) {
+    const definition = await this.cachedDefinition(summary);
+    const node = definition?.body.graph.nodes.find((n) => n.id === nodeId);
+    return node ? nodeConfig(node, 'start').overlap : 'parallel';
+  }
+  /**
+   * Starts the run an event calls for, under `id`, the same on every computer that sees the
+   * event, unless its trigger lets an earlier run it started (for a Watch trigger, one for the
+   * same item) end first: `skip` starts none, `queue` keeps the event here until that run ended.
+   */
+  private async startTriggered(
+    summary: WorkflowSummary,
+    nodeId: string,
+    id: string,
+    trigger: QueuedEvent['trigger'],
+    actor: Actor,
+    events: EventInput[],
+    backend: Backend,
+    extra: { item?: string; slot?: { scheduleId: string; at: string } } = {},
+  ): Promise<'start' | 'queue' | 'skip' | 'none'> {
+    const memory = this.memory;
+    const overlap = await this.overlapOf(summary, nodeId);
+    const track = trackOf(summary.id, nodeId, extra.item);
+    const now = this.now;
+    if (memory && overlap !== 'parallel') {
+      await memory.load();
+      const verdict = overlapVerdict(
+        overlap,
+        stillGoing(memory.state.runs[track], (runId) => this.summaries.get(runId), now),
+        memory.state.queue.some((queued) => queued.track === track),
+      );
+      if (verdict === 'skip') return 'skip';
+      if (verdict === 'queue') {
+        memory.state.queue.push({
+          track,
+          definitionId: summary.id,
+          nodeId,
+          runId: id,
+          trigger,
+          actor: actor as Record<string, unknown>,
+          ...(extra.slot ? { slot: extra.slot } : {}),
+          at: iso(now),
+        });
+        void memory.save();
+        return 'queue';
+      }
+    }
+    const run = await this.triggered(
+      summary,
+      { nodeId, ...trigger, kind: trigger.kind as TriggerKind },
+      actor,
+      now,
+    );
+    if (!run) return 'none';
+    if (extra.slot) run.slot = extra.slot;
+    // Another computer that saw the same event already holds its run.
+    await backend.put({ id, kind: 'run', expected: null, body: run, events }).catch(() => {});
+    if (memory && overlap !== 'parallel') {
+      memory.state.runs[track] = { runId: id, at: iso(now) };
+      void memory.save();
+    }
+    return 'start';
   }
   /** Starts the runs schedules call for, once per slot across computers. */
   private async fireSchedules(host: WorkflowHost, backend: Backend) {
@@ -924,25 +1031,16 @@ export class WorkflowClient {
             (n) => n.type === 'start',
           )?.id;
         if (!nodeId) continue;
-        const run = await this.triggered(
+        await this.startTriggered(
           summary,
-          { nodeId, kind: 'schedule', text: at, payload: { scheduledFor: at } },
+          nodeId,
+          await slotRunId(summary.id, schedule.id, slot),
+          { kind: 'schedule', text: at, payload: { scheduledFor: at } },
           { kind: 'schedule', scheduleId: schedule.id },
-          now,
+          [{ kind: 'started', text: 'Started by its schedule' }],
+          backend,
+          { slot: { scheduleId: schedule.id, at } },
         );
-        if (!run) continue;
-        run.slot = { scheduleId: schedule.id, at };
-        const id = await slotRunId(summary.id, schedule.id, slot);
-        // Another computer that started this slot already holds its run.
-        await backend
-          .put({
-            id,
-            kind: 'run',
-            expected: null,
-            body: run,
-            events: [{ kind: 'started', text: 'Started by its schedule' }],
-          })
-          .catch(() => {});
       }
     }
     void this.refresh();
@@ -963,28 +1061,254 @@ export class WorkflowClient {
     for (const fire of fires) {
       const summary = this.summaries.get(fire.definitionId);
       if (!summary) continue;
-      const now = this.now;
+      await this.startTriggered(
+        summary,
+        fire.nodeId,
+        await eventRunId(fire.definitionId, fire.nodeId, fire.key),
+        { kind: fire.kind, text: fire.text, payload: fire.payload },
+        { kind: 'trigger', nodeId: fire.nodeId, trigger: fire.kind },
+        [
+          {
+            kind: 'started',
+            text: `Started by its ${triggerLabels[fire.kind].toLowerCase()} trigger`,
+          },
+        ],
+        backend,
+      );
+    }
+    if (fires.length) void this.refresh();
+  }
+  /**
+   * Starts the looks of Watch triggers that are due on this computer: each runs its command and
+   * starts a run for every item that is new or changed since its last look. A look goes on while
+   * the page ticks on, and the next starts once its interval passed since the last ended.
+   */
+  private async fireWatches(host: WorkflowHost, backend: Backend) {
+    const memory = this.memory;
+    if (!memory) return;
+    await memory.load();
+    // What the last looks found before the page loaded, for the triggers' settings.
+    for (const [key, state] of Object.entries(memory.state.watches))
+      if (!this.watches[key] && state.checkedAt)
+        this.watches[key] = {
+          looking: false,
+          checkedAt: state.checkedAt,
+          ...(state.items !== undefined ? { items: state.items } : {}),
+          ...(state.error ? { error: state.error } : {}),
+        };
+    const now = this.now;
+    for (const summary of this.summaries.values()) {
+      if (summary.kind !== 'definition' || !this.triggersHere(summary, host)) continue;
+      const definition = await this.cachedDefinition(summary);
+      if (!definition) continue;
+      for (const node of definition.body.graph.nodes) {
+        if (node.type !== 'start' || triggerOf(node) !== 'watch') continue;
+        const watch = nodeConfig(node, 'start').watch;
+        const key = `${summary.id}:${node.id}`;
+        if (!watch.script.trim() || this.looking.has(key)) continue;
+        const state = memory.state.watches[key];
+        const signature = watchSignature(watch);
+        const every = watch.every * (watch.unit === 'hours' ? 3_600_000 : 60_000);
+        // Changed settings look at once; otherwise a look waits its interval after the last.
+        const last = Date.parse(state?.checkedAt ?? '');
+        if (state?.lookedWith === signature && now - last < every) continue;
+        this.looking.set(
+          key,
+          this.look(summary, node.id, watch, signature, host, backend).finally(() =>
+            this.looking.delete(key),
+          ),
+        );
+      }
+    }
+    // What watches of workflows deleted since saw goes with them.
+    if (this.revision > 0)
+      for (const key of Object.keys(memory.state.watches)) {
+        const definitionId = key.split(':')[0];
+        if (!this.summaries.has(definitionId)) {
+          delete memory.state.watches[key];
+          void memory.save();
+        }
+      }
+  }
+  /** One look of a Watch trigger: its command's items, compared with what it saw before. */
+  private async look(
+    summary: WorkflowSummary,
+    nodeId: string,
+    watch: ReturnType<typeof nodeConfig<'start'>>['watch'],
+    signature: string,
+    host: WorkflowHost,
+    backend: Backend,
+  ) {
+    const memory = this.memory!;
+    const key = `${summary.id}:${nodeId}`;
+    const before = memory.state.watches[key];
+    this.watches[key] = { ...this.watches[key], looking: true };
+    // A look that failed keeps what was seen, and the next one waits its interval.
+    const failed = (error: string) => {
+      const checkedAt = iso(this.now);
+      memory.state.watches[key] = {
+        seen: before?.seen ?? {},
+        signature: before?.signature ?? '',
+        ...(before?.items !== undefined ? { items: before.items } : {}),
+        checkedAt,
+        lookedWith: signature,
+        error,
+      };
+      this.watches[key] = { looking: false, checkedAt, error };
+      void memory.save();
+    };
+    const environmentId = watch.location?.environmentId ?? host.self().environmentId;
+    let outcome: CommandOutcome | undefined;
+    try {
+      if (host.online(environmentId) === false)
+        throw new Error(
+          `${host.computers().find((c) => c.environmentId === environmentId)?.name ?? 'Its computer'} is offline.`,
+        );
+      const job = await host.commands.start({
+        owner: summary.id,
+        environmentId,
+        folder: watch.location?.path ?? '',
+        shell: watch.shell,
+        script: watch.script,
+        params: {},
+        ...(watch.timeout ? { timeout: watch.timeout } : {}),
+      });
+      while (!(outcome = await host.commands.poll(environmentId, summary.id, job)))
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+    } catch (error) {
+      return failed(String(error).replace(/^Error: /, ''));
+    }
+    if (outcome.interrupted || outcome.stopped) return failed('Its command was stopped.');
+    if (outcome.timedOut) return failed(`Its command ran past its ${watch.timeout} seconds.`);
+    if (outcome.exitCode !== 0)
+      return failed(outcome.stderr.trim() || `Its command ended with code ${outcome.exitCode}.`);
+    const { items, problem } = watchItems(outcome.stdout, watch.id, watch.version);
+    if (problem && !items.length) return failed(problem);
+    // A command changed since its last look watches anew.
+    const seen = before?.signature === signature ? before.seen : undefined;
+    const changes = watchChanges(seen, items, watch.initial);
+    const changing = new Set(changes.map((change) => change.id));
+    // Items listed now are kept, those gone are forgotten: one listed again is new.
+    const next: Record<string, string> = {};
+    for (const item of items)
+      if (!changing.has(item.id)) next[item.id] = item.version;
+      else if (seen?.[item.id] !== undefined) next[item.id] = seen[item.id];
+    for (const change of changes) {
+      const done = await this.startTriggered(
+        summary,
+        nodeId,
+        await eventRunId(summary.id, nodeId, `watch:${change.id}:${change.previous}>${change.version}`),
+        {
+          kind: 'watch',
+          text: JSON.stringify(change.item, null, 2),
+          payload: change.item,
+          key: change.id,
+          previous: change.previous,
+        },
+        { kind: 'trigger', nodeId, trigger: 'watch' },
+        [{ kind: 'started', text: 'Started by its watch trigger' }],
+        backend,
+        { item: change.id },
+      );
+      // A change whose run waits starts it later; a skipped one is looked at again.
+      if (done === 'start' || done === 'queue') next[change.id] = change.version;
+    }
+    const checkedAt = iso(this.now);
+    memory.state.watches[key] = {
+      seen: next,
+      signature,
+      checkedAt,
+      lookedWith: signature,
+      items: items.length,
+      ...(problem ? { error: problem } : {}),
+    };
+    this.watches[key] = {
+      looking: false,
+      checkedAt,
+      items: items.length,
+      ...(problem ? { error: problem } : {}),
+    };
+    void memory.save();
+    if (changes.length) void this.refresh();
+  }
+  /** Starts the waiting events whose earlier run ended, one at a time for each trigger and item. */
+  private async fireQueue(backend: Backend) {
+    const memory = this.memory;
+    if (!memory) return;
+    await memory.load();
+    if (this.revision === 0) return;
+    const now = this.now;
+    const tracks = new Set<string>();
+    let changed = false;
+    // A run that ended, with nothing waiting for it, needs remembering no longer.
+    for (const [track, started] of Object.entries(memory.state.runs))
+      if (
+        !stillGoing(started, (id) => this.summaries.get(id), now) &&
+        !memory.state.queue.some((queued) => queued.track === track)
+      ) {
+        delete memory.state.runs[track];
+        changed = true;
+      }
+    for (const event of [...memory.state.queue]) {
+      if (tracks.has(event.track)) continue;
+      tracks.add(event.track);
+      const summary = this.summaries.get(event.definitionId);
+      const going = stillGoing(memory.state.runs[event.track], (id) => this.summaries.get(id), now);
+      if (summary && going) continue;
+      memory.state.queue = memory.state.queue.filter((queued) => queued !== event);
+      changed = true;
+      // An event of a workflow deleted since starts nothing.
+      if (!summary) continue;
       const run = await this.triggered(
         summary,
-        { nodeId: fire.nodeId, kind: fire.kind, text: fire.text, payload: fire.payload },
-        { kind: 'trigger', nodeId: fire.nodeId, trigger: fire.kind },
+        { nodeId: event.nodeId, ...event.trigger, kind: event.trigger.kind as TriggerKind },
+        event.actor as Actor,
         now,
       );
       if (!run) continue;
-      const id = await eventRunId(fire.definitionId, fire.nodeId, fire.key);
+      if (event.slot) run.slot = event.slot;
       await backend
         .put({
-          id,
+          id: event.runId,
           kind: 'run',
           expected: null,
           body: run,
-          events: [
-            { kind: 'started', text: `Started by its ${triggerLabels[fire.kind].toLowerCase()} trigger` },
-          ],
+          events: [{ kind: 'started', text: 'Started once the run before it ended' }],
         })
         .catch(() => {});
+      memory.state.runs[event.track] = { runId: event.runId, at: iso(now) };
     }
-    if (fires.length) void this.refresh();
+    if (changed) {
+      void memory.save();
+      void this.refresh();
+    }
+  }
+  /**
+   * Whether a run a webhook started may be built now: while an earlier run of its trigger goes
+   * on, one whose trigger waits stays pending, and one whose trigger skips is removed.
+   */
+  private async pendingMayStart(id: string, backend: Backend): Promise<boolean> {
+    const memory = this.memory;
+    if (!memory) return true;
+    const read = await backend.read([id]).catch(() => undefined);
+    const doc = read?.docs[0];
+    const run = doc ? readRun(doc.body) : undefined;
+    const summary = run?.definition ? this.summaries.get(run.definition.id) : undefined;
+    if (!doc || !run?.pending || !run.trigger || !summary) return true;
+    const overlap = await this.overlapOf(summary, run.trigger.nodeId);
+    if (overlap === 'parallel') return true;
+    await memory.load();
+    const track = trackOf(summary.id, run.trigger.nodeId);
+    if (!stillGoing(memory.state.runs[track], (runId) => this.summaries.get(runId), this.now)) {
+      memory.state.runs[track] = { runId: id, at: iso(this.now) };
+      void memory.save();
+      return true;
+    }
+    if (overlap === 'skip') {
+      await backend.remove(id, doc.revision).catch(() => {});
+      void this.refresh();
+    }
+    return false;
   }
   /**
    * Builds a run a webhook started through the relay, which knows only its workflow, trigger and
@@ -1004,6 +1328,7 @@ export class WorkflowClient {
               kind: 'webhook',
               text: trigger.text,
               payload: trigger.payload,
+              ...(trigger.headers ? { headers: trigger.headers } : {}),
             },
             pending.createdBy,
             Date.parse(pending.createdAt) || this.now,

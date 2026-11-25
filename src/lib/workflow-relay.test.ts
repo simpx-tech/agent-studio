@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createECDH, randomBytes } from 'node:crypto';
+import { createECDH, createHmac, randomBytes } from 'node:crypto';
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -40,10 +40,10 @@ async function relay() {
     rmSync(directory, { recursive: true, force: true });
   });
   // A request as a webhook's caller sends it: no pairing key, no device.
-  const hook = (path: string, body: string, method = 'POST') =>
+  const hook = (path: string, body: string, method = 'POST', headers: Record<string, string> = {}) =>
     fetch(`http://127.0.0.1:${port}${path}`, {
       method,
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...headers },
       body: method === 'GET' ? undefined : body,
     }).then(async (response) => ({
       status: response.status,
@@ -89,6 +89,77 @@ describe('relay webhooks', () => {
     for (let i = 0; i < 8; i++)
       await r.hook(`/v1/hooks/${crypto.randomUUID()}/${node}/${secret}`, '{}');
     expect((await r.hook(`/v1/hooks/${id}/${node}/${secret}`, '{}')).status).toBe(429);
+  });
+
+  it('hand their runs the request headers that name its event, never its secrets', async () => {
+    const r = await relay();
+    const id = crypto.randomUUID();
+    const secret = webhookSecret();
+    const definition = newDefinition('Reviews', { kind: 'user' });
+    definition.graph.nodes[0].config = { trigger: 'webhook', webhook: { secret } };
+    const node = definition.graph.nodes[0].id;
+    definition.runsOn = r.desktop;
+    await r.call('PUT', `workflows/${id}`, { kind: 'definition', expected: null, body: definition });
+    const started = await r.hook(`/v1/hooks/${id}/${node}/${secret}`, '{"action":"opened"}', 'POST', {
+      'X-GitHub-Event': 'pull_request',
+      'X-GitHub-Hook-ID': '42',
+      'X-Hub-Signature-256': 'sha256=abc',
+      'X-Forwarded-For': '203.0.113.9',
+      Authorization: 'Bearer nope',
+      'User-Agent': 'GitHub-Hookshot/1',
+    });
+    expect(started.status).toBe(202);
+    const read = await r.call('POST', 'workflows/read', { ids: [started.body.runId] });
+    const headers = read.body.docs[0].body.trigger.headers;
+    expect(headers).toMatchObject({
+      'x-github-event': 'pull_request',
+      'x-github-hook-id': '42',
+      'user-agent': 'GitHub-Hookshot/1',
+      'content-type': 'application/json',
+    });
+    for (const secretHeader of ['x-hub-signature-256', 'x-forwarded-for', 'authorization'])
+      expect(headers[secretHeader]).toBeUndefined();
+    // A form's payload field is the JSON GitHub sends as a form.
+    const form = await r.hook(
+      `/v1/hooks/${id}/${node}/${secret}`,
+      `payload=${encodeURIComponent('{"action":"closed"}')}`,
+      'POST',
+      { 'content-type': 'application/x-www-form-urlencoded' },
+    );
+    const second = await r.call('POST', 'workflows/read', { ids: [form.body.runId] });
+    expect(second.body.docs[0].body.trigger.payload).toEqual({ action: 'closed' });
+  });
+
+  it('take only bodies signed with their signing secret, and one run per delivery', async () => {
+    const r = await relay();
+    const id = crypto.randomUUID();
+    const secret = webhookSecret();
+    const signing = 'shared with GitHub';
+    const definition = newDefinition('Reviews', { kind: 'user' });
+    definition.graph.nodes[0].config = { trigger: 'webhook', webhook: { secret, signing } };
+    const node = definition.graph.nodes[0].id;
+    definition.runsOn = r.desktop;
+    await r.call('PUT', `workflows/${id}`, { kind: 'definition', expected: null, body: definition });
+    const path = `/v1/hooks/${id}/${node}/${secret}`;
+    const body = '{"action":"synchronize"}';
+    const signature = `sha256=${createHmac('sha256', signing).update(body).digest('hex')}`;
+    expect((await r.hook(path, body)).status).toBe(401);
+    expect(
+      (await r.hook(path, body, 'POST', { 'X-Hub-Signature-256': 'sha256=' + '0'.repeat(64) }))
+        .status,
+    ).toBe(401);
+    const delivery = { 'X-Hub-Signature-256': signature, 'X-GitHub-Delivery': 'd-1' };
+    const first = await r.hook(path, body, 'POST', delivery);
+    expect(first.status).toBe(202);
+    expect(first.body.duplicate).toBeUndefined();
+    // GitHub's Redeliver sends the same delivery again: it starts no second run.
+    const again = await r.hook(path, body, 'POST', delivery);
+    expect(again.status).toBe(202);
+    expect(again.body).toEqual({ runId: first.body.runId, duplicate: true });
+    const listed = await r.call('POST', 'workflows/list', {});
+    expect(listed.body.docs.filter((d: { kind: string }) => d.kind === 'run')).toHaveLength(1);
+    const other = await r.hook(path, body, 'POST', { ...delivery, 'X-GitHub-Delivery': 'd-2' });
+    expect(other.body.runId).not.toBe(first.body.runId);
   });
 
   it('refuses a workflow without a computer to run on', async () => {

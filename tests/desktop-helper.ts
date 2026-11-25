@@ -901,8 +901,65 @@ export async function mockDesktop(page: Page, mode = 'success') {
                 ...(made ? { group: made } : {}),
               };
             }
+            // A workflow's command (docs/WORKFLOWS.md): a job of the run or workflow its id names,
+            // printing what `workflowCommandResult` says, by default nothing. Its jobs answer as
+            // a screen's do.
+            if (request.op === 'command') {
+              (w.workflowCommands ??= []).push(request);
+              const id = crypto.randomUUID();
+              const job: any = {
+                screen: request.id,
+                chunks: [] as { stream: string; text: string; end: number }[],
+                length: 0,
+                waiters: [] as (() => void)[],
+                record: {
+                  id,
+                  label: String(request.script).split('\n')[0],
+                  params: request.params ?? {},
+                  keep: false,
+                  state: 'running',
+                  startedAt: new Date().toISOString(),
+                },
+              };
+              const wake = () => job.waiters.splice(0).forEach((resolve: () => void) => resolve());
+              const print = (stream: string, text: string) => {
+                if (!text) return;
+                job.length += text.length;
+                job.chunks.push({ stream, text, end: job.length });
+                wake();
+              };
+              job.stop = () => {
+                if (job.record.state !== 'running') return;
+                Object.assign(job.record, { state: 'stopped', exitCode: null });
+                wake();
+              };
+              jobs[id] = job;
+              void (async () => {
+                if (w.holdWorkflowCommands)
+                  await new Promise<void>((resolve) => (w.heldWorkflowCommands ??= []).push(resolve));
+                if (job.record.state !== 'running') return;
+                const result =
+                  (typeof w.workflowCommandResult === 'function'
+                    ? w.workflowCommandResult(request)
+                    : w.workflowCommandResult) ?? {};
+                print('stdout', result.stdout ?? '');
+                print('stderr', result.stderr ?? '');
+                Object.assign(job.record, {
+                  state: 'done',
+                  exitCode: result.exitCode ?? 0,
+                  timedOut: false,
+                  endedAt: new Date().toISOString(),
+                  durationMs: 7,
+                });
+                wake();
+              })();
+              return job.record;
+            }
             const screen = screens.find((s) => s.id === request.id);
-            if (!screen) throw 'This screen is no longer on this computer.';
+            const owned =
+              ['output', 'stop', 'forget'].includes(request.op) &&
+              (!jobs[request.job] || jobs[request.job].screen === request.id);
+            if (!screen && !owned) throw 'This screen is no longer on this computer.';
             if (request.op === 'read' || request.op === 'approve' || request.op === 'revoke')
               return detail(screen);
             if (request.op === 'delete') {

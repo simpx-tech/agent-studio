@@ -29,6 +29,7 @@ export const nodeTypeIds = [
   'confirm',
   'notify',
   'set',
+  'command',
   'screen',
   'screenAction',
   'screenData',
@@ -61,8 +62,29 @@ const target = {
   target: z.enum(['step', 'chat']).default('step'),
   // The key of the earlier step whose chat this one uses.
   step: z.string().default(''),
-  conversationId: z.union([uuid, z.literal('')]).default(''),
+  // A chat's id, or a template naming one, such as {{trigger.json.conversationId}}.
+  conversationId: z.string().default(''),
 };
+/**
+ * What a Command step or a Watch trigger runs (docs/WORKFLOWS.md): a script as written, never a
+ * template, so nothing a run reads becomes shell code; a Command step's values reach it only as
+ * environment variables, `PARAM_<NAME>`.
+ */
+export const shells = ['bash', 'powershell'] as const;
+const commandShape = {
+  // The computer and folder it runs in: without one the computer that runs it, in its home
+  // folder; an empty path is that computer's home folder too.
+  location: locationSchema.optional(),
+  shell: z.enum(shells).default('bash'),
+  script: z.string().default(''),
+  // Seconds it may run; 0 lets it run until it ends.
+  timeout: z.number().int().nonnegative().default(0),
+};
+/** A command's values, as its script reads them: lowercase names, `PARAM_<NAME>`. */
+export const paramNameSchema = z.string().regex(/^[a-z][a-z0-9_]*$/);
+/** What a trigger does while a run it started, or one for the same item, still goes on. */
+export const overlaps = ['parallel', 'skip', 'queue'] as const;
+export type Overlap = (typeof overlaps)[number];
 export const conditionOps = [
   'contains',
   'notContains',
@@ -96,8 +118,8 @@ export type Schedule = z.infer<typeof scheduleSchema>;
 /**
  * What starts a run at a Trigger step. A workflow may have several, each starting its own runs:
  * you (Run, or an agent's workflow_run), a schedule, a chat's reply ending or asking, another
- * workflow's run ending, a request to its webhook, a computer coming online or going offline, or
- * an account whose usage limit reset.
+ * workflow's run ending, a request to its webhook, a computer coming online or going offline, an
+ * account whose usage limit reset, or an item of a command's list that is new or changed.
  */
 export const triggerKinds = [
   'manual',
@@ -107,6 +129,7 @@ export const triggerKinds = [
   'webhook',
   'computer',
   'usage',
+  'watch',
 ] as const;
 export type TriggerKind = (typeof triggerKinds)[number];
 export const chatEvents = ['completed', 'failed', 'stopped', 'question'] as const;
@@ -144,8 +167,30 @@ export const triggerConfigShape = {
       statuses: z.array(z.enum(runEndings)).default(['completed']),
     })
     .prefault({}),
-  // The relay starts a run when its URL receives a POST; the secret is in the URL.
-  webhook: z.object({ secret: z.string().default('') }).prefault({}),
+  // The relay starts a run when its URL receives a POST; the secret is in the URL. With a
+  // signing secret, the request must carry its body's HMAC-SHA256 as X-Hub-Signature-256, as
+  // GitHub and Gitea sign theirs.
+  webhook: z
+    .object({ secret: z.string().default(''), signing: z.string().default('') })
+    .prefault({}),
+  // Runs a command every so often on the computer that runs the workflow's triggered runs, reads
+  // the list of items it prints (JSON) and starts a run for each item that is new or changed
+  // since the last look.
+  watch: z
+    .object({
+      ...commandShape,
+      every: z.number().int().positive().default(5),
+      unit: z.enum(['minutes', 'hours']).default('minutes'),
+      // Where in each item its id is, and what tells that it changed ('' for the whole item).
+      id: z.string().default('id'),
+      version: z.string().default(''),
+      // Whether the items listed when watching begins start runs too.
+      initial: z.boolean().default(false),
+    })
+    .prefault({}),
+  // While a run this trigger started is still going (for a Watch trigger, one for the same
+  // item): start another, start none, or start it once the earlier one ends.
+  overlap: z.enum(overlaps).default('parallel'),
   computer: z
     .object({
       environmentId: anyId,
@@ -173,6 +218,11 @@ export const configSchemas = {
     schema: z.string().default(''),
     // A repeated run of the step for the same loop item continues its chat, or starts a new one.
     chat: z.enum(['continue', 'new']).default('continue'),
+    // A template naming what the chat is for, such as {{trigger.id}}: the step continues the
+    // chat it had for the same value in any run of the workflow, and starts it the first time.
+    chatKey: z.string().default(''),
+    // Its chat is listed with yours and takes your messages, instead of belonging to the run.
+    yours: z.boolean().default(false),
     title: z.string().default(''),
     instructions: z.string().default(''),
   }),
@@ -232,6 +282,11 @@ export const configSchemas = {
         }),
       )
       .default([]),
+  }),
+  // Runs a script on a computer, with values from templates as `PARAM_<NAME>` variables.
+  command: z.object({
+    ...commandShape,
+    params: z.record(z.string(), z.string()).default({}),
   }),
   screen: z.object({
     ...agentChoiceShape,
@@ -431,6 +486,8 @@ export const activationSchema = z.object({
   conversationId: uuid.optional(),
   // The reply the step waits for.
   replyId: uuid.optional(),
+  // A Command step's job, on the computer of its environment.
+  job: z.object({ environmentId: uuid, id: uuid }).optional(),
   waitUntil: time.optional(),
   // What the step waits for now, in one line, and for what kind of thing.
   wait: z.string().optional(),
@@ -609,13 +666,17 @@ export const runSchema = z.object({
   createdBy: actorSchema,
   driver: driverSchema,
   definition: z.object({ id: uuid, revision: count, name: z.string() }).optional(),
-  // The trigger that started it and what it handed over.
+  // The trigger that started it and what it handed over: a Watch trigger's item with its id and
+  // the version it had before (none for a new item), a webhook's request headers.
   trigger: z
     .object({
       nodeId: nodeIdSchema,
       kind: z.string().min(1),
       text: z.string().default(''),
       payload: z.unknown().optional(),
+      key: z.string().optional(),
+      previous: z.string().optional(),
+      headers: z.record(z.string(), z.string()).optional(),
     })
     .optional(),
   // Started by a webhook through the relay: its driver builds the run from its workflow first.
@@ -723,8 +784,8 @@ export const summarySchema = z.object({
       }),
     )
     .default([]),
-  // Triggers the computers running a workflow watch for: chat, workflow, computer and usage ones,
-  // with their settings. A webhook's secret never leaves its workflow.
+  // Triggers the computers running a workflow watch for: chat, workflow, computer, usage and
+  // watch ones, with their settings. A webhook's secrets never leave its workflow.
   triggers: z
     .array(
       z.object({
@@ -811,7 +872,13 @@ export function summarize(doc: WorkflowDoc): WorkflowSummary {
             ...(since ? { since } : {}),
           });
         }
-      else if (kind === 'chat' || kind === 'workflow' || kind === 'computer' || kind === 'usage') {
+      else if (
+        kind === 'chat' ||
+        kind === 'workflow' ||
+        kind === 'computer' ||
+        kind === 'usage' ||
+        kind === 'watch'
+      ) {
         const config = node.config?.[kind];
         triggers.push({
           nodeId: node.id,
@@ -944,6 +1011,12 @@ export const nodeCatalog: Record<
   },
   notify: { label: 'Notify', ports: ['out'], input: true, description: 'Send a notification.' },
   set: { label: 'Set', ports: ['out'], input: true, description: 'Compute values.' },
+  command: {
+    label: 'Command',
+    ports: ['out', 'error'],
+    input: true,
+    description: 'Run a command.',
+  },
   screen: {
     label: 'Screen',
     ports: ['out', 'error'],
@@ -989,7 +1062,33 @@ export const triggerLabels: Record<TriggerKind, string> = {
   webhook: 'Webhook',
   computer: 'Computer',
   usage: 'Usage reset',
+  watch: 'Watch',
 };
+/** What a trigger does while an earlier run of it goes on, in pickers. */
+export const overlapLabels: Record<Overlap, string> = {
+  parallel: 'Start another',
+  skip: 'Skip',
+  queue: 'Wait for it',
+};
+/**
+ * An id the same on every computer that derives it from the same parts, as a UUID: the run an
+ * event starts, the chat a step keeps for a key.
+ */
+export async function derivedId(seed: string): Promise<string> {
+  const bytes = new Uint8Array(
+    await crypto.subtle.digest('SHA-256', new TextEncoder().encode(seed)),
+  ).slice(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x80;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+/** The chat an Agent step keeps for one value of its chat key, in every run of its workflow. */
+export const keyedChatId = (workflowId: string, nodeId: string, key: string) =>
+  derivedId(`agent-studio-workflow-chat:${workflowId}:${nodeId}:${key}`);
+/** A webhook's run for one delivery, so a delivery sent again starts none. */
+export const deliveryRunId = (workflowId: string, nodeId: string, delivery: string) =>
+  derivedId(`agent-studio-workflow-delivery:${workflowId}:${nodeId}:${delivery}`);
 /** A webhook's secret: 32 random bytes as base64url. */
 export function webhookSecret(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
@@ -1156,6 +1255,15 @@ export function graphIssues(graph: WorkflowGraph): GraphIssue[] {
         if (c.trigger === 'chat' && !c.chat.events.length) missing('choose what in a chat starts it.');
         if (c.trigger === 'workflow' && !c.workflow.statuses.length)
           missing('choose which endings start it.');
+        if (c.trigger === 'watch' && !c.watch.script.trim()) missing('write its command.');
+        break;
+      }
+      case 'command': {
+        const c = config as NodeConfig<'command'>;
+        if (!c.script.trim()) missing('write its command.');
+        for (const name of Object.keys(c.params))
+          if (!paramNameSchema.safeParse(name).success)
+            missing(`name the value ${name} with lowercase letters, digits and _.`);
         break;
       }
       case 'agent':

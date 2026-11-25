@@ -15,10 +15,15 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { workflowStore, type StoreFiles, type WorkflowStore } from '../src/lib/workflow-store.ts';
-import { nodeConfig, readDefinition, triggerOf } from '../src/lib/workflow-model.ts';
+import {
+  deliveryRunId,
+  nodeConfig,
+  readDefinition,
+  triggerOf,
+} from '../src/lib/workflow-model.ts';
 
 export function directoryFiles(root: string): StoreFiles {
   const path = (name: string) => {
@@ -195,10 +200,50 @@ export const hookPath =
   /^\/v1\/hooks\/([0-9a-f-]{36})\/([A-Za-z0-9_-]{1,64})\/([A-Za-z0-9_-]{16,128})$/;
 
 /**
+ * The request headers a webhook's run receives as {{trigger.headers}}: what names the request's
+ * event and delivery and what sent it, never a signature, a token, a cookie or the sender's
+ * address.
+ */
+export function hookHeaders(
+  headers: Record<string, string | string[] | undefined>,
+): Record<string, string> {
+  const kept: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    const key = name.toLowerCase();
+    if (value === undefined) continue;
+    const told =
+      key === 'content-type' || key === 'user-agent' || key.startsWith('x-') || /event|delivery/.test(key);
+    if (!told || /signature|token|secret|password|auth|cookie|api-?key|forwarded|real-ip/.test(key))
+      continue;
+    kept[key] = Array.isArray(value) ? value.join(', ') : value;
+  }
+  return kept;
+}
+/** Headers senders name a delivery by, which a delivery they send again repeats. */
+const deliveryHeaders = [
+  'x-github-delivery',
+  'x-gitea-delivery',
+  'x-gogs-delivery',
+  'x-gitlab-event-uuid',
+  'linear-delivery',
+];
+/** Whether a body carries the HMAC-SHA256 its sender signed it with, as GitHub and Gitea sign. */
+function signedWith(secret: string, body: Buffer, header: string | undefined) {
+  if (!header?.startsWith('sha256=')) return false;
+  const expected = Buffer.from(
+    `sha256=${createHmac('sha256', secret).update(body).digest('hex')}`,
+  );
+  const given = Buffer.from(header.trim());
+  return expected.length === given.length && timingSafeEqual(expected, given);
+}
+
+/**
  * Starts a run of the workflow whose webhook trigger a request names (docs/WORKFLOWS.md): the
  * stores of the workspaces are searched for it, the secret must match, and the run is recorded as
  * pending, for a computer that runs the workflow to build from the workflow and drive. `read`
- * reads the request's body only once it is known to be the webhook's.
+ * reads the request's body only once it is known to be the webhook's. A trigger with a signing
+ * secret takes only bodies signed with it, and a delivery its sender names (`X-GitHub-Delivery`)
+ * starts one run however often it is sent.
  */
 export async function startFromHook({
   stores,
@@ -206,15 +251,20 @@ export async function startFromHook({
   nodeId,
   secret,
   read,
+  headers = {},
   now,
 }: {
   stores: WorkflowStore[];
   workflowId: string;
   nodeId: string;
   secret: string;
-  read: () => Promise<string>;
+  read: () => Promise<string | Buffer>;
+  headers?: Record<string, string | string[] | undefined>;
   now: () => number;
-}): Promise<{ ok: true; runId: string } | { ok: false; code: number; error: string }> {
+}): Promise<
+  | { ok: true; runId: string; duplicate?: boolean }
+  | { ok: false; code: number; error: string }
+> {
   const missing = { ok: false as const, code: 404, error: 'No webhook has this address.' };
   for (const store of stores) {
     const doc = (await store.read([workflowId])).docs[0];
@@ -223,19 +273,36 @@ export async function startFromHook({
     const node = definition?.graph.nodes.find(
       (n) => n.id === nodeId && n.type === 'start' && triggerOf(n) === 'webhook',
     );
-    const expected = node ? nodeConfig(node, 'start').webhook.secret : '';
-    if (!definition || !node || !sameSecret(expected, secret)) return missing;
+    const config = node ? nodeConfig(node, 'start').webhook : undefined;
+    if (!definition || !node || !config || !sameSecret(config.secret, secret)) return missing;
     if (!definition.runsOn)
       return { ok: false, code: 409, error: 'This workflow has no computer to run on.' };
-    const text = await read();
+    const raw = await read();
+    const bytes = typeof raw === 'string' ? Buffer.from(raw) : raw;
+    const header = (name: string) => {
+      const value = headers[name];
+      return Array.isArray(value) ? value[0] : value;
+    };
+    if (config.signing && !signedWith(config.signing, bytes, header('x-hub-signature-256')))
+      return { ok: false, code: 401, error: 'The request is not signed with its secret.' };
+    const text = bytes.toString('utf8');
     let payload: unknown = { body: text };
     try {
       if (text.trim()) payload = JSON.parse(text);
     } catch {
-      /* A body that is not JSON goes on as text. */
+      // A form's payload field holds the JSON GitHub sends as a form; other text goes on as is.
+      const form = /x-www-form-urlencoded/i.test(header('content-type') ?? '')
+        ? new URLSearchParams(text).get('payload')
+        : null;
+      try {
+        if (form) payload = JSON.parse(form);
+      } catch {
+        /* Text that is not JSON goes on as text. */
+      }
     }
+    const delivery = deliveryHeaders.map(header).find((value) => !!value?.trim())?.trim();
     const at = new Date(now()).toISOString();
-    const runId = randomUUID();
+    const runId = delivery ? await deliveryRunId(workflowId, nodeId, delivery) : randomUUID();
     const result = await store.put({
       id: runId,
       kind: 'run',
@@ -254,11 +321,13 @@ export async function startFromHook({
           ...(definition.continueOn ? { continueOn: definition.continueOn } : {}),
         },
         definition: { id: workflowId, revision: doc.revision, name: definition.name },
-        trigger: { nodeId, kind: 'webhook', text, payload },
+        trigger: { nodeId, kind: 'webhook', text, payload, headers: hookHeaders(headers) },
         pending: true,
       },
       events: [{ kind: 'started', text: 'Started by its webhook' }],
     });
+    // A delivery sent again has its run already, or had one since deleted.
+    if (!result.ok && delivery) return { ok: true, runId, duplicate: true };
     if (!result.ok) return { ok: false, code: 409, error: 'The run could not be recorded.' };
     return { ok: true, runId };
   }

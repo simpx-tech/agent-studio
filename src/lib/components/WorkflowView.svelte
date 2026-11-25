@@ -873,6 +873,7 @@
             graph={draft.graph}
             {pickers}
             webhookUrl={webhookUrl ? (nodeId, secret) => webhookUrl(id, nodeId, secret) : undefined}
+            watchStatus={(nodeId) => client.watches[`${id}:${nodeId}`]}
             change={(node) =>
               edit((d) => {
                 d.graph.nodes = d.graph.nodes.map((n) => (n.id === node.id ? node : n));

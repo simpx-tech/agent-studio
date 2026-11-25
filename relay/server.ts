@@ -1138,11 +1138,13 @@ export function createRelay({
           workflowId: hook[1],
           nodeId: hook[2],
           secret: hook[3],
+          // The body as sent, which a signature covers byte for byte.
           read: async () => {
             const chunks: Buffer[] = [];
             for await (const chunk of req) chunks.push(chunk as Buffer);
-            return Buffer.concat(chunks).toString('utf8');
+            return Buffer.concat(chunks);
           },
+          headers: req.headers,
           now,
         });
         if (!result.ok) {
@@ -1155,7 +1157,9 @@ export function createRelay({
           return;
         }
         res.writeHead(202, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-        res.end(JSON.stringify({ runId: result.runId }));
+        res.end(
+          JSON.stringify({ runId: result.runId, ...(result.duplicate ? { duplicate: true } : {}) }),
+        );
         return;
       }
       if (serveDownloads(req, res, downloadsDirectory) || servePublic(req, res, files)) return;

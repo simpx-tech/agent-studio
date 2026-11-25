@@ -76,6 +76,21 @@ export const screenRequestSchema = z.discriminatedUnion('op', [
       (request) =>
         !!request.action !== !!request.command && json(request.params ?? {}) !== undefined,
     ),
+  // A workflow's command (docs/WORKFLOWS.md), kept as a job of the run or workflow `id` names, in
+  // a folder of the computer the request reaches, or its home folder.
+  z
+    .object({
+      op: z.literal('command'),
+      id: screenIdSchema,
+      environmentId: z.string().uuid(),
+      folder: z.string().refine((folder) => !controls.test(folder)),
+      shell: shellSchema,
+      script: z.string().refine((script) => !!script.trim() && !script.includes('\u0000')),
+      params: paramsSchema.optional(),
+      timeout: z.number().int().positive().optional(),
+    })
+    .strict()
+    .refine((request) => json(request.params ?? {}) !== undefined),
   z.object({ op: z.literal('jobs'), id: screenIdSchema }).strict(),
   z
     .object({

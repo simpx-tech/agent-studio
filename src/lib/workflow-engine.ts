@@ -16,6 +16,7 @@ import {
   KEPT_ALERTS,
   WORKFLOW_ACCOUNT,
   answerText,
+  keyedChatId,
   nodeConfig,
   readRun,
   triggerOf,
@@ -60,8 +61,32 @@ export type ChatSpec = {
   settings: ChatSettings;
   text: string;
   mission?: { runId: string; role: 'orchestrator' };
+  /** Listed with your chats and taking your messages, instead of belonging to the run. */
+  yours?: boolean;
 };
 export type ScreenOutcome = { exitCode: number | null; stdout: string; stderr: string };
+/** A command a Command step or a Watch trigger runs, as a job on its computer. */
+export type CommandSpec = {
+  /** The run or workflow the job belongs to; its output goes once read. */
+  owner: string;
+  environmentId: string;
+  /** The folder as that environment reaches it; empty for its home folder. */
+  folder: string;
+  shell: 'bash' | 'powershell';
+  script: string;
+  params: Record<string, string>;
+  /** Seconds it may run; none lets it run until it ends. */
+  timeout?: number;
+};
+export type CommandOutcome = {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  stopped: boolean;
+  /** It was running when its computer's app ended without stopping it. */
+  interrupted: boolean;
+};
 export interface WorkflowHost {
   self(): { environmentId: string; computerId: string; server: boolean; name: string };
   now(): number;
@@ -99,6 +124,13 @@ export interface WorkflowHost {
     ): Promise<ScreenOutcome>;
     load(environmentId: string, id: string): Promise<Record<string, unknown>>;
     save(environmentId: string, id: string, key: string, value: unknown): Promise<void>;
+  };
+  commands: {
+    /** Starts a command as a job on the computer of its environment, returning the job's id. */
+    start(spec: CommandSpec): Promise<string>;
+    /** How a job ended, or undefined while it runs. Its output goes once it is read. */
+    poll(environmentId: string, owner: string, job: string): Promise<CommandOutcome | undefined>;
+    stop(environmentId: string, owner: string, job: string): Promise<void>;
   };
   /** Creates another run, for Run workflow steps and dynamic workflows. */
   createRun(id: string, run: WorkflowRun): Promise<void>;
@@ -345,8 +377,14 @@ export class RunDriver {
     run.endedAt = iso(this.now);
     run.detail = status === 'failed' ? text : '';
     for (const activation of run.activations)
-      if (['queued', 'running', 'waiting'].includes(activation.status))
+      if (['queued', 'running', 'waiting'].includes(activation.status)) {
+        // A command still running ends with everything it started.
+        if (activation.status === 'running' && activation.job)
+          await this.host.commands
+            .stop(activation.job.environmentId, this.id, activation.job.id)
+            .catch(() => {});
         this.update(activation, { status: 'stopped', endedAt: iso(this.now) });
+      }
     for (const agent of run.agents) {
       if (agent.status === 'running' || agent.status === 'waiting') {
         const conversation = this.host.conversation(agent.conversationId);
@@ -398,7 +436,8 @@ export class RunDriver {
         const key = `ask:${reply!.id}:${ask.key}`;
         if (this.run.handled.includes(key)) continue;
         this.run.handled = [...this.run.handled, key];
-        this.alert('question', `${agent.title}: ${ask.text}`);
+        // A chat of yours alerts for itself.
+        if (!agent.external) this.alert('question', `${agent.title}: ${ask.text}`);
         const step = agent.activationId
           ? this.run.activations.find((a) => a.id === agent.activationId)
           : undefined;
@@ -459,7 +498,8 @@ export class RunDriver {
     const run = this.run;
     for (const activation of run.activations) {
       if (run.status !== 'running') return;
-      if (activation.status === 'running' && activation.replyId) this.reconcileReply(activation);
+      if (activation.status === 'running' && activation.job) await this.reconcileCommand(activation);
+      else if (activation.status === 'running' && activation.replyId) this.reconcileReply(activation);
       else if (activation.status === 'waiting') this.reconcileWait(activation);
     }
     // Steps that end at once hand over to more, and ended loop items and merges to the steps
@@ -731,6 +771,8 @@ export class RunDriver {
         this.event('notify', text, { nodeId: node.id });
         return this.finish(activation, activation.input ?? {});
       }
+      case 'command':
+        return this.startCommand(activation, node);
       case 'set': {
         const config = nodeConfig(node, 'set');
         const values: Record<string, unknown> = {};
@@ -1089,9 +1131,15 @@ export class RunDriver {
       environmentId: self.environmentId,
       path: '',
     };
-    // The chat of this step for the same loop item, which a repeated run continues.
+    // The chat it keeps for the value of its key in every run of the workflow, else the chat of
+    // this step for the same loop item, which a repeated run continues.
+    const key = render(config.chatKey).trim();
+    const keyed =
+      key && !activation.conversationId
+        ? await keyedChatId(this.run.definition?.id ?? this.id, node.id, key)
+        : undefined;
     const previous =
-      config.chat === 'continue'
+      !keyed && config.chat === 'continue'
         ? [...this.run.activations]
             .reverse()
             .find(
@@ -1102,8 +1150,10 @@ export class RunDriver {
                 a.conversationId,
             )
         : undefined;
-    const conversationId = activation.conversationId ?? previous?.conversationId;
+    const conversationId = activation.conversationId ?? keyed ?? previous?.conversationId;
     const existing = conversationId ? this.host.conversation(conversationId) : undefined;
+    // A chat kept yours is listed with your chats, as a chat of yours a run writes to is.
+    const yours: { external?: true } = config.yours && !screen ? { external: true } : {};
     let connectionId = existing?.settings.connectionId ?? config.connectionId;
     // An account the step names; following the workflow chat's, the one it finds where the step
     // runs; otherwise the least used, which gives way to another with room.
@@ -1163,6 +1213,22 @@ export class RunDriver {
     if (existing) {
       if (replying(existing))
         return this.wait(activation, 'chat', 'Waiting for its chat', this.now + 5_000);
+      // A chat an earlier run kept for this key joins this run too.
+      if (!this.run.agents.some((a) => a.conversationId === existing.id))
+        this.trackAgent({
+          conversationId: existing.id,
+          role: 'step',
+          title: node.title || node.key,
+          activationId: activation.id,
+          environmentId:
+            existing.location?.executionEnvironmentId ??
+            existing.location?.environmentId ??
+            self.environmentId,
+          connectionId: existing.settings.connectionId,
+          provider: existing.settings.provider,
+          model: existing.settings.model,
+          ...yours,
+        });
       const { replyId } = await this.host.sendToChat(existing.id, text);
       this.update(activation, { conversationId: existing.id, replyId, resume: undefined });
       this.settleStep(existing.id, 'running');
@@ -1180,6 +1246,7 @@ export class RunDriver {
       connectionId: settings.connectionId,
       provider: settings.provider,
       model: settings.model,
+      ...yours,
     });
     // The chat's id is saved before the chat exists, so a driver that stops in between reuses it.
     await this.flush();
@@ -1189,6 +1256,7 @@ export class RunDriver {
       location: location.path ? location : { ...location, path: '' },
       settings,
       text,
+      ...(yours.external ? { yours: true } : {}),
     });
     this.update(activation, { replyId });
   }
@@ -1235,6 +1303,66 @@ export class RunDriver {
     const { replyId } = await this.host.sendToChat(conversation.id, text);
     if (!config.wait) return this.finish(activation, { text: '' });
     this.update(activation, { conversationId: conversation.id, replyId });
+  }
+
+  /**
+   * Starts a Command step's script as a job on its computer: in the folder it names, or that
+   * computer's home folder, with its values as `PARAM_<NAME>` variables. The step goes on while
+   * the job runs, and follows it from any driver that reads the run.
+   */
+  private async startCommand(activation: Activation, node: WorkflowNode) {
+    const config = nodeConfig(node, 'command');
+    if (!config.script.trim()) return this.fail(activation, 'Its command is empty.');
+    const environmentId = config.location?.environmentId ?? this.host.self().environmentId;
+    if (this.host.online(environmentId) === false)
+      return this.wait(
+        activation,
+        'ready',
+        `Waiting for ${this.host.computers().find((c) => c.environmentId === environmentId)?.name ?? 'its computer'}`,
+        this.now + 30_000,
+      );
+    const params: Record<string, string> = {};
+    for (const [name, value] of Object.entries(config.params))
+      params[name] = this.render(value, activation);
+    const job = await this.host.commands.start({
+      owner: this.id,
+      environmentId,
+      folder: config.location?.path ?? '',
+      shell: config.shell,
+      script: config.script,
+      params,
+      ...(config.timeout ? { timeout: config.timeout } : {}),
+    });
+    this.update(activation, { job: { environmentId, id: job }, resume: undefined });
+  }
+
+  /** Follows a Command step's job until it ends. */
+  private async reconcileCommand(activation: Activation) {
+    const job = activation.job!;
+    let outcome: CommandOutcome | undefined;
+    try {
+      outcome = await this.host.commands.poll(job.environmentId, this.id, job.id);
+    } catch (error) {
+      // A job its computer no longer keeps runs again; anything else is asked again.
+      if (/no longer kept/i.test(String(error)))
+        this.update(activation, { status: 'queued', job: undefined, resume: true });
+      return;
+    }
+    if (!outcome) return;
+    // A command its computer's app ended under it runs again, as an interrupted reply does.
+    if (outcome.interrupted)
+      return this.update(activation, { status: 'queued', job: undefined, resume: true });
+    const node = this.node(activation.nodeId);
+    const timeout = node ? nodeConfig(node, 'command').timeout : 0;
+    if (outcome.timedOut)
+      return this.fail(activation, `Its command ran past its ${timeout} seconds.`);
+    if (outcome.stopped) return this.fail(activation, 'Its command was stopped.');
+    if (outcome.exitCode !== 0)
+      return this.fail(
+        activation,
+        outcome.stderr.trim() || `Its command ended with code ${outcome.exitCode}.`,
+      );
+    this.finish(activation, { text: outcome.stdout, json: parseJson(outcome.stdout.trim()) });
   }
 
   /**
@@ -1380,8 +1508,11 @@ export class RunDriver {
     config: { target: 'step' | 'chat'; step: string; conversationId: string },
     activation: Activation,
   ): Conversation | undefined {
-    if (config.target === 'chat')
-      return config.conversationId ? this.host.conversation(config.conversationId) : undefined;
+    if (config.target === 'chat') {
+      // A chat chosen, or one a template names.
+      const id = this.render(config.conversationId, activation).trim();
+      return id ? this.host.conversation(id) : undefined;
+    }
     const node = this.run.graph.nodes.find((n) => n.key === config.step);
     const source = node
       ? this.latest(node.id, activation.scope, (a) => !!a.conversationId)
@@ -1468,6 +1599,10 @@ export class RunDriver {
         const trigger = this.run.trigger;
         if (!trigger) return undefined;
         if (rest[0] === 'kind') return trigger.kind;
+        // A Watch trigger's item and the version it had before; a webhook's headers.
+        if (rest[0] === 'id') return trigger.key ?? '';
+        if (rest[0] === 'previous') return trigger.previous ?? '';
+        if (rest[0] === 'headers') return valueAt(trigger.headers ?? {}, rest.slice(1));
         const fired = this.run.activations.find((a) => a.nodeId === trigger.nodeId && !a.scope);
         return this.field(fired?.output, rest);
       }
@@ -1663,7 +1798,15 @@ export function staticRun(
   actor: WorkflowRun['createdBy'],
   now: number,
   // The trigger that fired and what it hands over; a manual run starts at the first manual one.
-  trigger?: { nodeId: string; kind?: string; text?: string; payload?: unknown },
+  trigger?: {
+    nodeId: string;
+    kind?: string;
+    text?: string;
+    payload?: unknown;
+    key?: string;
+    previous?: string;
+    headers?: Record<string, string>;
+  },
 ): WorkflowRun {
   const starts = definition.graph.nodes.filter((n) => n.type === 'start');
   const start =
@@ -1695,6 +1838,9 @@ export function staticRun(
             kind: trigger?.kind ?? triggerOf(start),
             text: trigger?.text ?? '',
             ...(trigger?.payload !== undefined ? { payload: trigger.payload } : {}),
+            ...(trigger?.key !== undefined ? { key: trigger.key } : {}),
+            ...(trigger?.previous !== undefined ? { previous: trigger.previous } : {}),
+            ...(trigger?.headers ? { headers: trigger.headers } : {}),
           },
         }
       : {}),
