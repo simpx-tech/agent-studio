@@ -161,6 +161,16 @@ while ($null -ne ($line = [Console]::ReadLine())) {
                 [Console]::WriteLine('{"type":"control_request","request_id":"parked-gate","request":{"subtype":"hook_callback","callback_id":"' + $id + '","input":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cargo build"},"tool_use_id":"call-2"},"tool_use_id":"call-2"}}')
                 Add-Content -LiteralPath $settingsLog -Value ([Console]::ReadLine())
             }
+            # And what only a reply could give: one of Agent Studio's tools, a permission and a
+            # form.
+            foreach ($asked in @(
+                '{"type":"control_request","request_id":"parked-tool","request":{"subtype":"mcp_message","server_name":"agent_studio","message":{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"send_files","arguments":{}}}}}',
+                '{"type":"control_request","request_id":"parked-permission","request":{"subtype":"can_use_tool","tool_name":"AskUserQuestion","tool_use_id":"call-3","input":{}}}',
+                '{"type":"control_request","request_id":"parked-form","request":{"subtype":"elicitation","mcp_server_name":"linear","message":"Pick a team"}}'
+            )) {
+                [Console]::WriteLine($asked)
+                Add-Content -LiteralPath $settingsLog -Value ([Console]::ReadLine())
+            }
             [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"Built after the tests.","origin":{"kind":"task-notification"}}')
             continue
         }
@@ -493,7 +503,7 @@ async fn the_gate_refuses_commands_while_another_chat_measures_and_pc_wait_answe
 }
 
 #[tokio::test]
-async fn a_turn_a_parked_process_starts_by_itself_gets_its_gate_answered() {
+async fn a_turn_a_parked_process_starts_by_itself_is_answered_as_a_reply_would() {
     let root = tempfile::tempdir().unwrap();
     let conversation = uuid::Uuid::new_v4().to_string();
     let first = request(
@@ -536,32 +546,48 @@ async fn a_turn_a_parked_process_starts_by_itself_gets_its_gate_answered() {
     drop((questions, channel));
     // Parked, the CLI starts a turn of its own, whose command asks the gate. No reply runs, so
     // the process's output reader answers with no opinion and the command goes ahead, where
-    // Claude Code would refuse it once the hook's timeout passed.
+    // Claude Code would refuse it once the hook's timeout passed. What only a reply could give,
+    // the turn hears refused, rather than waiting for good.
     process.turns += 1;
     process.park();
     std::fs::write(root.path().join("parked"), "").unwrap();
-    let answered = || {
+    let answered = |id: &str| {
         std::fs::read_to_string(root.path().join("settings.jsonl"))
             .unwrap_or_default()
             .lines()
             .filter_map(|line| {
                 serde_json::from_str::<serde_json::Value>(line.trim_start_matches('\u{feff}')).ok()
             })
-            .find(|line| line["response"]["request_id"] == "parked-gate")
+            .find(|line| line["response"]["request_id"] == id)
     };
-    let answer = tokio::time::timeout(Duration::from_secs(20), async {
+    let form = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
-            if let Some(answer) = answered() {
+            if let Some(answer) = answered("parked-form") {
                 break answer;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     })
     .await
-    .expect("The gate asked while the process was parked was never answered");
-    assert_eq!(answer["type"], "control_response");
-    assert_eq!(answer["response"]["subtype"], "success");
-    assert_eq!(answer["response"]["response"], serde_json::json!({}));
+    .expect("What the process asked while it was parked was never answered");
+    let gate = answered("parked-gate").unwrap();
+    assert_eq!(gate["type"], "control_response");
+    assert_eq!(gate["response"]["subtype"], "success");
+    assert_eq!(gate["response"]["response"], serde_json::json!({}));
+    let tool = answered("parked-tool").unwrap();
+    let result = &tool["response"]["response"]["mcp_response"];
+    assert_eq!(result["id"], 9);
+    assert_eq!(result["result"]["isError"], true);
+    assert!(result["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("send_files did nothing"));
+    let permission = answered("parked-permission").unwrap();
+    assert_eq!(permission["response"]["response"]["behavior"], "deny");
+    assert_eq!(
+        form["response"]["response"],
+        serde_json::json!({"action":"cancel"})
+    );
     // The next reply takes the input back and goes on in the same CLI.
     let pid = process.child.id();
     drop(first);

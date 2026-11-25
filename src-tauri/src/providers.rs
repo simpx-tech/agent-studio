@@ -17,6 +17,7 @@ pub mod elicitation;
 mod elicitation_schema;
 #[cfg(windows)]
 mod login_console;
+pub mod parked;
 pub mod published_artifacts;
 pub mod questions;
 pub mod sent_files;

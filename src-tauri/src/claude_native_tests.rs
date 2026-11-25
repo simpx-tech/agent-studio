@@ -500,7 +500,7 @@ async fn installed_claude_runs_the_commands_of_a_turn_it_starts_between_replies(
         root.path().join("noticed.txt"),
     );
     let (token_path, marker_path) = (slashed(&token), slashed(&marker));
-    let text = format!("This is an Agent Studio integration test in a disposable folder. With your Bash tool, start this command in the background (run_in_background) and end this reply right after, saying only that it started: sleep 45 && echo noticed > '{token_path}' . Do not wait for it in this reply: do not call await_background_tasks, sleep, poll or read its output. Later, once you are told that the job finished, run exactly this command with your Bash tool: cp '{token_path}' '{marker_path}'");
+    let text = format!("This is an Agent Studio integration test in a disposable folder. With your Bash tool, start this command in the background (run_in_background) and end this reply right after, saying only that it started: sleep 45 && echo noticed > '{token_path}' . Do not wait for it in this reply: do not call await_background_tasks, sleep, poll or read its output. Later, once you are told that the job finished, first call the mcp__agent_studio__pc_status tool once, whatever it answers, then run exactly this command with your Bash tool: cp '{token_path}' '{marker_path}'");
     let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"claude","model":"sonnet","instructions":""},"messages":[{"role":"user","text":text}]})).unwrap();
     let conversation = uuid::Uuid::new_v4().to_string();
     request.conversation_id = Some(conversation.clone());
@@ -613,6 +613,18 @@ async fn installed_claude_runs_the_commands_of_a_turn_it_starts_between_replies(
     assert!(
         !seen.iter().any(|line| line.contains("did not respond")),
         "{seen:#?}"
+    );
+    // One of Agent Studio's own tools, which only a reply runs: the turn hears why it did nothing
+    // and goes on, rather than waiting for an answer that cannot come.
+    assert!(
+        seen.iter()
+            .any(|line| line.contains("\"mcp_message\"") && line.contains("pc_status")),
+        "The turn called no Agent Studio tool: {seen:#?}"
+    );
+    assert!(
+        seen.iter()
+            .any(|line| line.contains("No reply is running in Agent Studio now")),
+        "The tool's refusal never reached the model: {seen:#?}"
     );
     assert_eq!(
         std::fs::read_to_string(&marker)

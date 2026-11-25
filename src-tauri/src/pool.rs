@@ -70,9 +70,10 @@ impl AsyncWrite for Input {
 /// another session, and Claude Code refuses a call whose `PreToolUse` callback does not answer
 /// in time ("PreToolUse hook did not respond before its timeout"), which kept such a turn from
 /// running any command once chats had the reservation gate (`reservations::tools`). So the
-/// reader answers every hook callback asked while no reply listens with no opinion
-/// (`parked_answer`), and the reply that claims the process takes the input back once an
-/// answer being written is complete.
+/// reader answers what such a turn asks while no reply listens (`providers::parked`): its hooks
+/// with no opinion, and Agent Studio's tools, permission prompts and forms as a reply would
+/// refuse them. The reply that claims the process takes the input back once an answer being
+/// written is complete.
 #[derive(Default)]
 struct Lent {
     state: Mutex<Lending>,
@@ -133,25 +134,6 @@ impl Lent {
         self.returned.notify_one();
         true
     }
-}
-
-/// The answer to a hook callback Claude Code asks while no reply listens: no opinion, so the call
-/// runs as it would without the hook, a command during a measurement included.
-fn parked_answer(line: &str) -> Option<String> {
-    if !line.contains("\"hook_callback\"") {
-        return None;
-    }
-    let value: serde_json::Value = serde_json::from_str(line).ok()?;
-    (value["type"] == "control_request" && value["request"]["subtype"] == "hook_callback").then(
-        || {
-            format!(
-                "{}\n",
-                serde_json::json!({"type":"control_response","response":{
-                    "subtype":"success","request_id":value["request_id"],"response":{}
-                }})
-            )
-        },
-    )
 }
 
 pub struct Process {
@@ -224,8 +206,8 @@ impl Process {
         let idle = Arc::new(AtomicBool::new(false));
         let lent = Arc::new(Lent::default());
         // Readers live as long as the process. While parked, output is dropped so an idle
-        // CLI can never fill its pipe or accumulate unbounded memory, and a hook callback is
-        // answered here, since no reply is there to answer it (`Lent`).
+        // CLI can never fill its pipe or accumulate unbounded memory, and what a turn of its own
+        // asks is answered here, since no reply is there to answer it (`Lent`).
         let (out_tx, out_idle, out_lent) = (tx.clone(), idle.clone(), lent.clone());
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
@@ -234,7 +216,7 @@ impl Process {
                     observer(&line);
                 }
                 if out_idle.load(Ordering::Relaxed) {
-                    match parked_answer(&line) {
+                    match crate::providers::parked::answer(&line) {
                         Some(answer) if out_lent.write(&answer).await => continue,
                         // A reply claimed the process meanwhile: it answers.
                         Some(_) if !out_idle.load(Ordering::Relaxed) => {}
@@ -618,9 +600,6 @@ mod tests {
         while let Ok(seen) = rx.try_recv() {
             assert!(!seen.contains("control_response"), "{seen}");
         }
-        // Lines that are not hooks are dropped while parked, as before.
-        assert_eq!(parked_answer("{\"type\":\"assistant\"}"), None);
-        assert_eq!(parked_answer("not json \"hook_callback\""), None);
         process.kill().await;
     }
 

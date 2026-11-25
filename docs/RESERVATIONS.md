@@ -116,7 +116,12 @@ or its reply ends.
   (`pool::Lent`, which lends it the CLI's input until the next reply claims the process), so its
   commands run as they would without the gate, and the hold below lets what they start run too,
   as what that chat's CLI started itself. From 1.4.0 until this was found (2026-11-25), every
-  command of such a turn was refused at the timeout. Claude Code names an SDK callback
+  command of such a turn was refused at the timeout. What else such a turn asks is refused as a
+  reply would refuse it (`providers::parked`), so the turn never waits for an answer that cannot
+  come: Agent Studio's own tools answer with an error saying no reply runs, permission prompts are
+  denied (a removal the safety check stopped as a reply refuses it), and an MCP server's form is
+  cancelled; only the list of its tools and their start, which belong to the reply that launched
+  the process, are left. Claude Code names an SDK callback
   `PreToolUse:Callback`, which Work history leaves out. It also reports a call as started before
   it asks the gate, so a call the gate refused counts for nothing: it never keeps a window closed
   nor shows in a report as work that ran.
