@@ -134,6 +134,12 @@ const RENEWAL_WAIT: Duration = Duration::from_secs(30);
 /// A renewal lock nobody touched for this long belongs to a CLI that died holding it, since its
 /// holder touches it every five seconds.
 const RENEWAL_STALE: Duration = Duration::from_secs(15);
+/// The longest timeout a Claude chat may give a foreground command, 30 minutes, in Claude Code's
+/// `BASH_MAX_TIMEOUT_MS` (10 minutes by default): a command that reaches its timeout goes on in
+/// the background, where Claude Code stops it after 30 more minutes, and a build or a game run of
+/// a large project takes longer (181 commands reached the 10 minutes between 2026-09-21 and
+/// 2026-11-24, artifacts/time-backfill/agent-time-follow-up.md).
+const COMMAND_TIME_LIMIT_MS: &str = "1800000";
 /// The output of a CLI that is ending, read to its end so the CLI never blocks on a full pipe
 /// or fails on a closed one while it finishes.
 pub type Output = Box<dyn tokio::io::AsyncRead + Send + Unpin>;
@@ -1446,7 +1452,10 @@ pub async fn chat_command(
                 }
                 let mut settings = serde_json::json!({
                     "cleanupPeriodDays": crate::retention::DAYS,
-                    "env": {"CLAUDE_CODE_ENABLE_TODO_TOOLS": "1"},
+                    "env": {
+                        "CLAUDE_CODE_ENABLE_TODO_TOOLS": "1",
+                        "BASH_MAX_TIMEOUT_MS": COMMAND_TIME_LIMIT_MS
+                    },
                     "permissions": {"ask": ["EnterPlanMode", "ExitPlanMode"]}
                 });
                 // Claude Code's own Artifact tools, which publish to claude.ai.
@@ -1801,6 +1810,8 @@ mod tests {
                     .unwrap();
             assert_eq!(settings.get("fastMode").and_then(|v| v.as_bool()), fast);
             assert_eq!(settings["env"]["CLAUDE_CODE_ENABLE_TODO_TOOLS"], "1");
+            // A foreground command may run 30 minutes before Claude Code moves it to the background.
+            assert_eq!(settings["env"]["BASH_MAX_TIMEOUT_MS"], "1800000");
             assert_eq!(
                 settings["permissions"]["ask"],
                 serde_json::json!(["EnterPlanMode", "ExitPlanMode"])
@@ -2283,7 +2294,7 @@ mod tests {
                     // Claude Code's own Artifact tools, without automatic comment replies.
                     assert_eq!(
                         settings,
-                        serde_json::json!({"cleanupPeriodDays":3650,"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1","CLAUDE_CODE_ARTIFACT":"1","CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT":"0"},"permissions":{"ask":["EnterPlanMode","ExitPlanMode"]}})
+                        serde_json::json!({"cleanupPeriodDays":3650,"env":{"CLAUDE_CODE_ENABLE_TODO_TOOLS":"1","BASH_MAX_TIMEOUT_MS":"1800000","CLAUDE_CODE_ARTIFACT":"1","CLAUDE_CODE_ARTIFACT_COMMENTS_AUTOREACT":"0"},"permissions":{"ask":["EnterPlanMode","ExitPlanMode"]}})
                     );
                     assert!(args.iter().any(|a| a == "--dangerously-skip-permissions"));
                     assert!(!args.iter().any(|a| matches!(

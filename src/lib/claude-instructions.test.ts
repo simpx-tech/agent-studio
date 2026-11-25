@@ -13,6 +13,11 @@ describe('Claude chat instructions', () => {
     const workspace = initialWorkspace();
     expect(claudeInstructions(workspace)).toBe(defaultClaudeInstructions);
     expect(defaultClaudeInstructions).toContain('run_in_background');
+    // Long work goes to the background beside other work and is waited for; the launch raises
+    // the command time limit, so the text names none.
+    expect(defaultClaudeInstructions).toContain('await_background_tasks');
+    expect(defaultClaudeInstructions).toContain('Never poll with sleep loops');
+    expect(defaultClaudeInstructions).not.toContain('10 minutes');
     workspace.claudeInstructions = '';
     expect(claudeInstructions(workspace)).toBe('');
     expect(storedClaudeInstructions(defaultClaudeInstructions)).toBeUndefined();
