@@ -1231,8 +1231,8 @@ pre {
    until you open it. */
 .conversation-item .conversation-finished {
   flex: none;
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
   margin-inline: 3px;
   border-radius: 50%;
   background: var(--success);
