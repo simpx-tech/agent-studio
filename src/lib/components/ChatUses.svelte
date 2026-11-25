@@ -27,17 +27,20 @@
 
 <style>
   /* A chat whose account is gone keeps the print in the same place, without a frame. The frame
-     is four thirds of a pixel, two whole pixels where the display scales by 150%. */
+     is four thirds of a pixel, two whole pixels where the display scales by 150%, and the corners
+     follow the mark's size. */
   .chat-uses {
     --frame: calc(4px / 3);
+    --uses-size: 18px;
+    --uses-corner: calc(var(--uses-size) * 0.3);
     display: grid;
     flex: none;
     place-items: center;
     box-sizing: border-box;
-    width: 20px;
-    height: 20px;
+    width: var(--uses-size);
+    height: var(--uses-size);
     padding: calc(var(--frame) + 1px);
-    border-radius: 6px;
+    border-radius: var(--uses-corner);
     font-style: normal;
     line-height: 1;
   }
@@ -54,7 +57,7 @@
     height: 100%;
     overflow: hidden;
     /* Its outline's corner follows the frame's. */
-    border-radius: calc(5px - var(--frame));
+    border-radius: calc(var(--uses-corner) - var(--frame) - 1px);
     background: color-mix(in srgb, var(--provider-color) 12%, transparent);
     color: color-mix(in srgb, var(--provider-color) var(--provider-ink-mix), var(--text));
   }
@@ -64,7 +67,7 @@
   .art[data-glyph]::before {
     content: attr(data-glyph);
     font-family: system-ui, sans-serif;
-    font-size: 11px;
+    font-size: 10px;
   }
   /* Its edge lies over the print, so a pale print keeps its shape on a light surface. */
   .art::after {

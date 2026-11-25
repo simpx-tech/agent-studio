@@ -207,7 +207,7 @@ test('each chat’s row shows its model’s print framed in its account’s colo
     );
   expect(boxes).toHaveLength(chats.length);
   expect(new Set(boxes.map((box) => `${box.width}x${box.height}:${box.gap}`)).size).toBe(1);
-  expect(boxes[0].width).toBe(20);
+  expect(boxes[0].width).toBe(18);
   expect(boxes.every((box) => box.before)).toBe(true);
   // Frames of the two Claude accounts differ.
   expect(color('Claude CLI login')).not.toBe(color('Second Claude'));

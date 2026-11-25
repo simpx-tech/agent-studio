@@ -1212,12 +1212,12 @@ pre {
   background: var(--accent-strong);
 }
 /* Each chat's row starts with what it uses, its model's print framed in its account's color,
-   in the gutter where other rows keep their icon, centred under its folder's icon. */
+   in the gutter where other rows keep their icon, centred under its folder's icon, 15px in. */
 .conversation-item > .chat-uses {
   position: absolute;
-  left: 5px;
+  left: calc(15px - var(--uses-size) / 2);
   top: 50%;
-  margin-top: -10px;
+  margin-top: calc(var(--uses-size) / -2);
 }
 /* A pinned chat names its folder by its icon, and a comparison says it is one, after the mark. */
 .conversation-item > .chat-uses + svg {
