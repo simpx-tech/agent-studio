@@ -79,8 +79,8 @@ test('a pinned chat leads the tab it is in, Active or History', async ({ page })
   await expect(pinnedRows(page, 'active')).toHaveText(['First chat']);
   await expect(folderRows(page, 'active')).toHaveText(['Third chat', 'Second chat']);
   await expect(panel(page, 'active').locator(':scope > :first-child')).toHaveClass(/pinned-chats/);
-  // Its row keeps its folder's icon in the gutter and counts in the Active tab as before.
-  await expect(pinnedRows(page, 'active').locator(':scope > svg:first-child')).toHaveCount(1);
+  // Its row keeps its folder's icon, after its mark, and counts in the Active tab as before.
+  await expect(pinnedRows(page, 'active').locator(':scope > .chat-uses + svg')).toHaveCount(1);
   await expect(tab(page, 'Active')).toContainText('3');
   const first = await chatId(page, 'First chat');
   await expect.poll(() => pins(page)).toEqual([{ conversationId: first, at: expect.any(String) }]);

@@ -383,7 +383,7 @@ test('a chat whose reply ended stays marked in the sidebar while its monitors ru
     elapsedMs: 1000,
   });
   const row = page.locator('.conversation-item').first();
-  const title = (await row.locator('span').first().textContent())!;
+  const title = (await row.locator(':scope > span').first().textContent())!;
   const mark = row.locator('.conversation-monitoring');
 
   // A running reply shows its time even while its monitor runs.

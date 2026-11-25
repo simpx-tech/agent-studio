@@ -188,19 +188,27 @@ test('each chat’s row shows its model’s print framed in its account’s colo
     }
   }
   await expect(mark(page, 'Default chat').locator('.art')).toHaveAttribute('data-glyph', '✳︎');
-  // Every mark is the same size at the end of its row, whatever the title's length.
+  // Every mark is the same size at the start of its row, before its title, whatever the title.
   const boxes = await panel(page)
     .locator('.chat-uses')
     .evaluateAll((marks) =>
       marks.map((element) => {
         const box = element.getBoundingClientRect();
-        const row = element.closest('.conversation-item')!.getBoundingClientRect();
-        return { width: box.width, height: box.height, gap: Math.round(row.right - box.right) };
+        const item = element.closest('.conversation-item')!;
+        const row = item.getBoundingClientRect();
+        const title = item.querySelector(':scope > span')!.getBoundingClientRect();
+        return {
+          width: box.width,
+          height: box.height,
+          gap: Math.round(box.left - row.left),
+          before: box.right <= title.left,
+        };
       }),
     );
   expect(boxes).toHaveLength(chats.length);
   expect(new Set(boxes.map((box) => `${box.width}x${box.height}:${box.gap}`)).size).toBe(1);
   expect(boxes[0].width).toBe(20);
+  expect(boxes.every((box) => box.before)).toBe(true);
   // Frames of the two Claude accounts differ.
   expect(color('Claude CLI login')).not.toBe(color('Second Claude'));
   await panel(page).screenshot({ path: `${output}/rows.png` });

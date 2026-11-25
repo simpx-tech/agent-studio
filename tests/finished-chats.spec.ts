@@ -39,24 +39,31 @@ test('a chat that finishes out of sight keeps a green dot until it is opened', a
 
   await finish(page, first.runId);
   await expect(dot(page, 'First task')).toBeVisible();
-  // A small green circle in the row's gutter, drawn in the theme's own success color.
+  // A small green circle at the end of its row, after its title, drawn in the theme's own
+  // success color.
   const mark = await page.evaluate(() => {
     const probe = document.createElement('span');
     probe.style.color = 'var(--success)';
     document.body.append(probe);
     const success = getComputedStyle(probe).color;
     probe.remove();
-    const style = getComputedStyle(document.querySelector('.conversation-finished')!);
+    const dot = document.querySelector('.conversation-finished')!;
+    const style = getComputedStyle(dot);
+    const title = dot.closest('.conversation-item')!.querySelector(':scope > span')!;
     return {
       width: parseFloat(style.width),
       height: parseFloat(style.height),
       background: style.backgroundColor,
       success,
+      after: dot.getBoundingClientRect().left >= title.getBoundingClientRect().right,
+      last: !dot.nextElementSibling,
     };
   });
   expect(mark.width).toBe(mark.height);
   expect(mark.width).toBeLessThan(10);
   expect(mark.background).toBe(mark.success);
+  expect(mark.after).toBe(true);
+  expect(mark.last).toBe(true);
 
   // The chat being read is never marked, however its own reply ends.
   await finish(page, second.runId, 'cancelled');

@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { ModelMark } from '$lib/model-marks';
   import ModelIcon from './ModelIcon.svelte';
-  // What a chat uses, at a glance at the end of its row in the sidebar: its model's print (or its
+  // What a chat uses, at a glance at the start of its row in the sidebar: its model's print (or its
   // provider's glyph for a model of no known line) framed in its account's color. The row's
   // description names both (`label`, read through `id`), and so does hovering the mark. It adds
   // no text to the row, whose text stays its title: the glyph is drawn by CSS.

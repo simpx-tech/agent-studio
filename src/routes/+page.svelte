@@ -7904,8 +7904,12 @@
             ...notes.map((note) => note.toLowerCase()),
           ].join(', ')
         : undefined}
-      >{#if finished}<i class="conversation-finished" aria-hidden="true"
-        ></i>{:else if compared}<Columns3
+      ><ChatUses
+        id={`uses-${c.id}`}
+        mark={uses.mark}
+        color={uses.color}
+        label={uses.label}
+      />{#if compared}<Columns3
           size={13}
           class="conversation-compare"
           aria-hidden="true"
@@ -7935,12 +7939,7 @@
           size={14}
           class="conversation-snoozed"
           aria-hidden="true"
-        />{/if}<ChatUses
-        id={`uses-${c.id}`}
-        mark={uses.mark}
-        color={uses.color}
-        label={uses.label}
-      /></button
+        />{/if}{#if finished}<i class="conversation-finished" aria-hidden="true"></i>{/if}</button
     >{#if !c.archived && !conversationRunning(c)}<button
         class="conversation-archive"
         title="Move to history"

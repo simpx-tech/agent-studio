@@ -12,17 +12,21 @@ const hex = () => crypto.randomUUID().replaceAll('-', '');
 async function connections(page: Page) {
   let found: Record<'claude' | 'codex', string> | undefined;
   await expect
-    .poll(async () => {
-      const fleet = (await saved(page))?.fleet;
-      const id = (provider: string) =>
-        fleet?.connections.find(
-          (c) => fleet.accounts.find((a) => a.id === c.accountId)?.provider === provider,
-        )?.id;
-      const claude = id('claude');
-      const codex = id('codex');
-      found = claude && codex ? { claude, codex } : undefined;
-      return !!found;
-    })
+    .poll(
+      async () => {
+        const fleet = (await saved(page))?.fleet;
+        const id = (provider: string) =>
+          fleet?.connections.find(
+            (c) => fleet.accounts.find((a) => a.id === c.accountId)?.provider === provider,
+          )?.id;
+        const claude = id('claude');
+        const codex = id('codex');
+        found = claude && codex ? { claude, codex } : undefined;
+        return !!found;
+      },
+      // The app saves what it detected once its start settles, which a busy computer slows.
+      { timeout: 15_000 },
+    )
     .toBe(true);
   return found!;
 }
