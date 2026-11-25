@@ -4,38 +4,68 @@ Chats run side by side on a computer, and that stays the default: builds, tests,
 editors of several chats run together. A performance measurement is the exception. A benchmark,
 a profiling run or a timing test is worthless when another chat starts an Unreal build or a game
 in the middle of it, which used to make chats throw their results away (requested 2026-11-24).
-So a chat that measures reserves the computer first, and the reservation is a real place in line:
-from the moment a chat asks, no other chat starts a command, so the wait never depends on the
-computer getting quiet by itself, which never happens while several chats work.
+So a chat that measures reserves the computer first, and the reservation is a real place in line.
+First in line it waits a few minutes for a lull, the first moment no other chat runs heavy work,
+while other chats work on; when none comes in that time, no other chat starts a command from
+then on, so the wait never depends on the computer getting quiet by itself, which never happens
+while several chats work (tuned 2026-11-25 from the history of every chat: holding everyone at
+once would have held other chats' commands for at least 14.4 hours, and 61% of the measurement
+windows ran beside another chat's build, test or game run).
+
+The same broker hands out **build slots**, so that chats' builds take turns when memory runs short,
+and **named reservations**, things one chat at a time holds across its calls, such as a
+repository's landing turn (requested 2026-11-24, artifacts/time-backfill/agent-time-follow-up.md
+§8).
 
 The native broker is `src-tauri/src/reservations.rs`, with `reservations/tools.rs` (the agents'
 tools and the gate), `reservations/light.rs` (light commands), `reservations/machine.rs`
 (measuring the computer), `reservations/jobs.rs` (which chat a process belongs to),
 `reservations/programs.rs` (programs chats left running, and stopping them, with
-`wsl-programs.sh` and `wsl-stop.sh` inside WSL) and `reservations/hold.rs` (processes that wait
-for a window to end). Every Windows chat and the WSL distributions this computer manages share
+`wsl-programs.sh` and `wsl-stop.sh` inside WSL), `reservations/hold.rs` (processes that wait
+for a window to end), `reservations/builds.rs` (build slots) and `reservations/named.rs` (named
+reservations and landing turns). Every Windows chat and the WSL distributions this computer manages share
 one broker, since they share the computer.
 
 ## How a measurement goes
 
-1. **Prepare.** The agent builds, cooks and finishes its own background work first, and calls
+1. **Prepare.** Reserve late: the agent builds, cooks, stages and finishes its own background
+   work first, and calls
    `pc_status`, which lists what other chats run, the programs chats left running, the busiest
    and largest programs and whose they are: a chat's, Agent Studio's, the system's, or the user's
    own. Programs the user started are the only thing an agent asks the user about, with
    `studio_ask_user` (close them, or measure anyway), and it asks before reserving, so no other
    chat waits on the answer. What chats left running it handles itself (below).
-2. **Reserve.** `pc_reserve` with a purpose and, optionally, the minutes the measurement takes.
-   From that moment other chats' new commands and MCP tool calls wait, except light ones. The
-   answer lists what still runs.
+2. **Reserve** once for the whole series of measured runs (five on/off pairs are one
+   reservation, so the wait for other chats' work is paid once): `pc_reserve` with a purpose and,
+   optionally, the minutes the measurement takes. The answer lists what still runs. A reply that
+   reserves again within ten minutes of releasing hears that one reservation covers a series.
+   First in line, the reservation waits for a lull (below); once its wait runs out, or its window
+   opens, other chats' new commands and MCP tool calls wait, except light ones.
 3. **Wait for the window.** `pc_wait` returns once no other chat runs a command or an MCP tool
    call, nor background work that a reply of its own still runs and waits on, nor holds what it
    was asked to hand over.
    Background work and programs a chat left running after its reply ended (a dev server, an
    editor) do not keep the window closed; they are listed, with the programs other chats left
    running, so that the agent can stop them first, and they show in the report.
-4. **Measure** at once: warm up, run several times.
-5. **Release** with `pc_release` right after capturing, and analyze afterwards. The answer is the
-   report. A reservation also ends by itself when the reply that made it ends.
+4. **Measure** at once: warm up, run the whole series.
+5. **Release early:** `pc_release` right after the last measured run, before reading logs or
+   writing up. The answer is the report, whose Measurement line says whether the measurement ran
+   beside other heavy work (below). A reservation also ends by itself when the reply that made it
+   ends.
+
+### Waiting for a lull
+
+The first reservation in line does not hold anyone at first. Its window opens at the first moment
+no other chat runs a command, an MCP tool call or background work a running reply of its own waits
+on, and other chats work on until then: their commands go through the gate, and a `pc_wait` of
+theirs returns at once. Only when no such moment comes within the wait set in Settings →
+Reservations (`Settings::lull_minutes`, three minutes unless changed, kept on this computer in app
+data `reservations/settings.json`, never synced) does it hold their new work, from then on, and
+the work already running is the last its window waits for. A window that opens holds their new
+work from then on, a hand-over that closes it again included. Zero holds at once, as before
+2026-11-25. The Reservations window and the gauge show the phase as Waiting for a lull, Holding or
+Measuring, and the report says whether the window opened at a lull or how long it waited for one
+before holding the others (`lullMs` in the history).
 
 Reservations take turns, first come first served: the first holds the computer, the others wait
 in line, and their own chats' commands wait for the first like everyone else's. A chat that
@@ -126,6 +156,57 @@ or its reply ends.
 tools, goes back to the CLI through the run's own channel (`Session::rx`), so a long wait never
 holds up the reply's loop, and Stop ends it.
 
+## Build slots
+
+Several heavy builds at once compete for memory before they compete for the cores: with three or
+four chats building, free commit fell to 3.5 GB on 2026-11-24 and a shell could not start a
+thread. A cap inside one project's build script sees none of the others, so the broker counts every
+build on the computer and holds a chat's build at its gate while another would not fit
+(`reservations/builds.rs`):
+
+- **A build** is recognized from the command a chat asks to run (`builds::is_build`): Unreal's
+  `Build.bat`, `RunUAT` and UnrealBuildTool, a project's own build script (a `.ps1`, `.bat`,
+  `.cmd` or `.sh` script whose name starts with "build"), `cargo build`, `test`, `check` and
+  `clippy`, `dotnet build` and `test`, `cmake --build`, MSBuild, Ninja, make and Tauri's
+  release build, through a shell (`pwsh -File`, `bash -lc`) too. The same gate as reservations
+  asks, Claude's `PreToolUse` callback and Codex's `--pc-gate` hook.
+- **What builds now** is every chat call that builds while it runs (`Call::build`) and, from the
+  compilers and linkers on the computer (`cl`, `clang`, `rustc`, `link` and the like), every
+  other build, one for each driver they run under (UnrealBuildTool, `dotnet`, `cargo`,
+  MSBuild…): a chat's build left in the background, a Claude app or terminal session's, or one the
+  user started by hand.
+- **Room** is sized from bluevox's measurements that day: a compiler of its module commits 2.5 to
+  3.5 GB, one build alone ran 8 compilers with 17 GB free, and two heavy builds together took free
+  commit from 17 GB to 2.3. A build always starts alone. Beside others, one starts while fewer
+  builds run than the cores allow (one for each eight) and at least 10 GB of commit stays free
+  (`builds::BESIDE_FREE`), and only once the last build that started had 30 seconds to take its
+  memory (`builds::RAMP`).
+- **Waiting** is first come first served. A refused build's chat waits in `pc_wait`; when a build
+  ends, or the computer's two-second look finds room, the slot is kept for the first in line for two
+  minutes, and its `pc_wait` returns so that it runs the build again. While a measurement holds the
+  computer, only the measuring chat gets a slot. A chat's place in line ends with its reply.
+
+The wait shows in the reply's Time report as **Waiting for a build slot** (`slot`, On hold), apart
+from the build's own time, which before counted the wait inside a build script as compiling.
+
+## Named reservations and landing turns
+
+A reservation can hold a thing instead of the computer: `pc_reserve` with `name` (a shared folder,
+an editor that holds a project's assets) or `landing: true`, the landing turn of the repository
+the chat's folder belongs to (`reservations/named.rs`). One chat at a time holds a name, first come
+first served; the others wait in `pc_wait`, and their wait is **Waiting for its turn** (`turn`,
+On hold) in their Time report. Names read the same however they are written (case, spaces, folder
+separators). A landing turn's name is the repository's `origin` remote (`github.com/owner/repo`,
+whether written as https, ssh or `git@`), else its common Git folder, read from Git's own files,
+so every checkout and worktree of a repository shares one turn, a WSL folder's included through its
+`\\wsl.localhost` path. Agents take it just before fetching and merging the main branch for the
+final pipeline, and give it back right after the push, so another chat's landing never makes
+theirs redo its pipeline (38 minutes redone one afternoon). A named reservation holds nothing else:
+other chats' commands run. It ends with `pc_release` and its `name` or `landing`, or when the reply
+that took it ends; `pc_release` alone releases a chat's named reservations only when it holds no
+reservation of the computer. `pc_status` lists each name with its holder and those waiting, and the
+history keeps each turn (`"kind": "turn"`).
+
 ## Coordinating with other chats
 
 Agents coordinate by themselves, so the user is asked only about the user's own programs
@@ -178,8 +259,10 @@ On Windows each chat CLI runs in a job object of its own (`jobs.rs`), which ever
 joins, an editor left open included, so a process is the chat's however it was started. Jobs limit
 nothing: they let a process break away when it asks, never end their processes, and are dropped
 once none of their processes runs. A process outside every job is Agent Studio's when the app
-started it, the system's when it runs outside the signed-in session (Windows' services), and the
-user's otherwise. WSL's processes run inside its virtual machine, which Windows shows as one
+started it; a session's outside Agent Studio when it runs under Claude Code or Codex
+(`machine::SESSIONS`): the Claude app's, which runs its windows and its Code sessions as processes
+of one name, Claude Code's in a terminal or an editor, or Codex's; the system's when it runs
+outside the signed-in session (Windows' services); and the user's otherwise. WSL's processes run inside its virtual machine, which Windows shows as one
 process (`vmmemWSL`): it is WSL's, and when the chat measuring runs in WSL it counts as that
 chat's own processes, since other chats' commands wait meanwhile. A WSL chat's own process on
 Windows is the `wsl.exe` that runs its CLI, whose job keeps its launch followed while it runs.
@@ -201,29 +284,44 @@ reservation:
 - the computer while it was open, read every two seconds: CPU on average and at most, the
   measuring chat's processes apart from everything else, memory in use and free, and the busiest
   and largest other programs with whose they are;
+- whether the measurement ran beside other heavy work, whoever ran it (requested 2026-11-24):
+  the Measurement line reads `clean`, or `ran beside other heavy work` with each thing that did:
+  another chat's command or MCP tool call that ran while the window was open, and every owner
+  whose processes used at least a whole core and 5% of the computer in two readings or more
+  (`machine::Window::beside`): a chat's programs, the Claude app, Claude Code or Codex outside
+  Agent Studio, Agent Studio, the system, WSL or the user's own. The history keeps it as
+  `contaminated` and `ranBeside`. A window that never opened measured nothing;
 - how long other chats waited in `pc_wait` because of it, split by what kept the window closed
   at the time (time several things shared is split between them), and how many commands and MCP
   tool calls waited.
 
 A reply waiting in `pc_wait` counts that time as **Waiting for the computer** in its time ledger
-(`held`, in the On hold family of the Time report).
+(`held`, in the On hold family of the Time report), or as **Waiting for a build slot** (`slot`) or
+**Waiting for its turn** (`turn`), as the broker tells the ledger what it waits for
+(`Ledger::held_for`). The release's record in Work history carries the verdict as facts
+(Measurement, and Ran beside with each thing on a line), which the Time report lists below the
+time on hold, response by response, with how many of them ran beside other work.
 
 ## In the window
 
-While the computer is reserved, a gauge in the sidebar's footer, beside Connections, names the
-chat and its purpose on hover with where it stands (waiting for commands or for chats to hand
-over, measuring, chats waiting, reservations in line). It is in the warning colour while other
+While the computer is reserved, or chats' builds wait for a slot or chats for a turn, a gauge in
+the sidebar's footer, beside Connections, names the chat and its purpose on hover with where it
+stands (waiting for a lull, for commands or for chats to hand over, measuring, chats waiting,
+reservations in line, builds and turns waiting). It is in the warning colour while other
 chats' work finishes and in the accent while the measurement runs. The window follows
 reservations through `studio-pc` events and `pc_state`; nothing about them is saved or synced.
 
 The gauge opens the Reservations window (`ReservationsDialog.svelte`), which `/reservations` also
-opens at any time. It shows the reservations now, each with what its window waits for and the chats
-waiting, then every reservation this computer's history kept (`pc_history`, read whole, newest
-first): together, how many measurements, how long they waited to start and how long other chats
-waited; and each one with how long it waited and measured, what kept its window closed, the chats
-it asked to hand over, what was stopped for it, the processes held until it ended, the computer
-while it was open (CPU, this chat apart, with WSL when it measured there, memory and the busiest
-other programs with whose they were) and why other chats waited. A reservation that ends joins it
+opens at any time. It shows what waits In line (each name with its holder and the chats waiting
+for it, and the builds waiting for a slot), the reservations now, each with what its window waits
+for and the chats waiting, then every reservation this computer's history kept (`pc_history`,
+read whole, newest first): together, how many measurements, how many ran beside other work, how
+long they waited to start and how long other chats waited; and each one with how long it waited
+and measured, whether it ran beside other work and what that was, what kept its window closed,
+the chats it asked to hand over, what was stopped for it, the processes held until it ended, the
+computer while it was open (CPU, this chat apart, with WSL when it measured there, memory and the
+busiest other programs with whose they were) and why other chats waited; then the turns the
+history kept. A reservation that ends joins it
 while the window is open. Its chat opens from it. Each computer's desktop app keeps its own
 history, so the Viewer shows none.
 

@@ -30,6 +30,8 @@ export const timeKinds = [
   'user',
   'background',
   'held',
+  'slot',
+  'turn',
   'startup',
   'compaction',
   'other',
@@ -49,6 +51,8 @@ export const timeKindNames: Record<TimeKind, string> = {
   user: 'Waiting for you',
   background: 'Background work',
   held: 'Waiting for the computer',
+  slot: 'Waiting for a build slot',
+  turn: 'Waiting for its turn',
   compaction: 'Compacting',
   startup: 'Starting',
   other: 'Other',
@@ -61,6 +65,8 @@ export const timeKindHints: Partial<Record<TimeKind, string>> = {
   waiting: 'From each request until its answer began',
   background: 'The reply waited for work it left running',
   held: 'Another chat had the computer reserved for a measurement',
+  slot: 'The builds running left no room for its build',
+  turn: 'Another chat held what it reserved, such as its repository’s landing',
   startup: 'Before the agent took the message',
   unrecorded: 'Replies from before this was recorded, or cut off',
 };
@@ -90,6 +96,8 @@ export const kindFamily: Record<TimeKind, TimeFamily> = {
   user: 'hold',
   background: 'hold',
   held: 'hold',
+  slot: 'hold',
+  turn: 'hold',
   startup: 'overhead',
   compaction: 'overhead',
   other: 'overhead',
@@ -159,6 +167,12 @@ export type CommandGroup = { icon: CommandKind; name: string; ms: number; count:
 
 export type ReplyTime = { id: string; label: string; ms: number; makeup: Makeup };
 
+/**
+ * A measurement a reply made with the computer reserved, from its release's record: whether it
+ * ran beside other heavy work, and what that was (src-tauri/src/reservations.rs).
+ */
+export type TimedMeasurement = { reply: number; clean: boolean; beside?: string };
+
 export type TimeReport = {
   /** The replies' recorded time, with how many replies it covers and how many recorded none. */
   ms: number;
@@ -183,6 +197,8 @@ export type TimeReport = {
   written: TimedCall[];
   /** Each reply the report covers, in order. */
   list: ReplyTime[];
+  /** The measurements its replies made with the computer reserved, in order. */
+  measurements: TimedMeasurement[];
   /** Of a report on one reply that recorded it: its time in order, with what ran under it. */
   timeline?: TimeSlice[];
   stepSpans?: TimeSpan[];
@@ -306,6 +322,7 @@ export function timeReport(messages: readonly Message[], options: { folder?: str
     ran: [],
     written: [],
     list: [],
+    measurements: [],
   };
   let single: Pick<TimeReport, 'timeline' | 'stepSpans' | 'agentSpans'> = {};
   // What the user asked last names the reply that answers it.
@@ -446,6 +463,21 @@ export function timeReport(messages: readonly Message[], options: { folder?: str
       }
       const live = liveField(block, 'tool');
       if (typeof live !== 'object' || live === null) return;
+      // A release says whether its measurement ran beside other heavy work.
+      if (liveField(live, 'name') === 'Release the computer') {
+        const facts = (detached(liveField(live, 'facts')) ?? []) as {
+          label: string;
+          value: string;
+        }[];
+        const verdict = facts.find((fact) => fact.label === 'Measurement')?.value;
+        const beside = facts.find((fact) => fact.label === 'Ran beside')?.value;
+        if (verdict)
+          report.measurements.push({
+            reply,
+            clean: verdict === 'Clean',
+            ...(beside ? { beside } : {}),
+          });
+      }
       const category = liveField(live, 'category');
       if (category === 'agent') {
         // A group's sub-agents, read field by field: their messages can be long.
@@ -595,7 +627,15 @@ export const hasTimeDetails = (report: TimeReport) =>
   report.parts.some((part) => part.kind !== 'unrecorded') ||
   report.ran.length > 0 ||
   report.written.length > 0 ||
-  report.agents.length > 0;
+  report.agents.length > 0 ||
+  report.measurements.length > 0;
+
+/** How many of a report's measurements ran beside other heavy work, as words. */
+export function measurementsText(measurements: readonly TimedMeasurement[]): string {
+  const beside = measurements.filter((m) => !m.clean).length;
+  const count = `${measurements.length} ${measurements.length === 1 ? 'measurement' : 'measurements'}`;
+  return beside ? `${count}, ${beside} beside other heavy work` : `${count}, all clean`;
+}
 
 export function timeShare(share: number): string {
   const percent = share * 100;
@@ -697,6 +737,11 @@ export function timeReportMarkdown(
     agent.ms == null ? 'not recorded' : formatReplyTime(agent.ms),
     String(agent.calls) + (agent.failed ? `, ${agent.failed} failed` : ''),
     makeupText(agent.makeup),
+  ]);
+  table('Measurements', ['Measurement', 'Ran beside'], report.measurements, (measurement) => [
+    (measurement.clean ? 'Clean' : 'Beside other heavy work') +
+      (several ? ` (reply ${measurement.reply})` : ''),
+    cell((measurement.beside ?? '').replaceAll('\n', '; ')),
   ]);
   table('Commands by kind', ['Kind', 'Time', 'Calls'], report.commands, (group) => [
     group.name,

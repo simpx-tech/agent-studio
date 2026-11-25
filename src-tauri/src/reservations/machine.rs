@@ -31,8 +31,17 @@ pub struct Reading {
     pub total_ms: u64,
     pub memory_total: u64,
     pub memory_available: u64,
+    /// Memory programs may still commit (Windows' available commit), where it can be read.
+    pub commit_available: Option<u64>,
     pub cores: u32,
     pub processes: Vec<Process>,
+}
+impl Reading {
+    /// The memory a new program can still take: available commit on Windows, which binds before
+    /// physical memory does, else available memory.
+    pub fn free(&self) -> u64 {
+        self.commit_available.unwrap_or(self.memory_available)
+    }
 }
 
 /// Whose a process is.
@@ -43,8 +52,41 @@ pub enum Owner {
     System,
     /// WSL's virtual machine, which runs every process of the WSL distributions.
     Wsl,
+    /// A Claude Code or Codex session outside Agent Studio, with what it runs (`SESSIONS`).
+    Session(&'static str),
     Yours,
 }
+
+/// Sessions outside Agent Studio, by key: the Claude app and what its Code sessions run, Claude
+/// Code in a terminal or an editor, and Codex anywhere.
+pub const SESSIONS: [(&str, &str); 3] = [
+    ("claude-app", "the Claude app"),
+    ("claude-cli", "Claude Code outside Agent Studio"),
+    ("codex", "Codex outside Agent Studio"),
+];
+/// Programs a terminal or an editor runs Claude Code in.
+const TERMINALS: &[&str] = &[
+    "cmd",
+    "powershell",
+    "pwsh",
+    "bash",
+    "sh",
+    "zsh",
+    "fish",
+    "wsl",
+    "windowsterminal",
+    "openconsole",
+    "conhost",
+    "wezterm-gui",
+    "alacritty",
+    "mintty",
+    "code",
+    "cursor",
+    "windsurf",
+    "idea64",
+    "rider64",
+    "rustrover64",
+];
 
 /// A reading of this computer, or None where it cannot be read.
 pub fn read() -> Option<Reading> {
@@ -71,6 +113,7 @@ impl Owners {
 
 fn owner(process: &Process, index: &HashMap<u32, &Process>, members: &Members, app: u32) -> Owner {
     let mut current = process;
+    let mut chain = vec![process];
     // The chain of parents: a chat's CLI or this app started it, unless a parent's id now
     // belongs to a process that began after its child.
     for _ in 0..256 {
@@ -86,10 +129,14 @@ fn owner(process: &Process, index: &HashMap<u32, &Process>, members: &Members, a
         }
         match index.get(&current.parent) {
             Some(parent) if parent.pid != current.pid && parent.began <= current.began => {
-                current = parent
+                current = parent;
+                chain.push(parent);
             }
             _ => break,
         }
+    }
+    if let Some(session) = session(&chain) {
+        return Owner::Session(session);
     }
     if wsl_machine(&process.name) {
         Owner::Wsl
@@ -98,6 +145,32 @@ fn owner(process: &Process, index: &HashMap<u32, &Process>, members: &Members, a
     } else {
         Owner::Yours
     }
+}
+
+/// The session outside Agent Studio a chain of parents runs under, nearest first: Claude Code
+/// (`claude`), whose topmost process is the Claude app's own unless a terminal or an editor
+/// started it, or Codex.
+fn session(chain: &[&Process]) -> Option<&'static str> {
+    let name = |p: &Process| super::light::program_name(&p.name);
+    let at = chain
+        .iter()
+        .position(|p| matches!(name(p).as_str(), "claude" | "codex"))?;
+    if name(chain[at]) == "codex" {
+        return Some("codex");
+    }
+    // The Claude app runs its windows and its Code sessions as processes of the same name.
+    let mut top = at;
+    while chain.get(top + 1).is_some_and(|p| name(p) == "claude") {
+        top += 1;
+    }
+    let started_by = chain.get(top + 1).map(|p| name(p));
+    Some(
+        if started_by.is_some_and(|parent| TERMINALS.contains(&parent.as_str())) {
+            "claude-cli"
+        } else {
+            "claude-app"
+        },
+    )
 }
 
 /// WSL's virtual machine process (`vmmemWSL`, `vmmem` before it), which Windows shows for
@@ -176,6 +249,37 @@ pub struct Window {
     groups: HashMap<(Owner, String), Group>,
     /// The measuring chat runs in WSL, so WSL's virtual machine counted as its own.
     inside_wsl: bool,
+    /// Heavy work beside the measurement, by whose it was (`HEAVY`).
+    beside: HashMap<Owner, Beside>,
+}
+
+/// An owner whose processes used at least a whole core and 5% of the computer between two
+/// readings ran heavy work beside the measurement; one that did so in two readings or more
+/// disturbed it (requested 2026-11-24: mark each measurement that ran beside other heavy work,
+/// whoever ran it).
+const HEAVY_PERCENT: f64 = 5.0;
+const HEAVY_READINGS: u32 = 2;
+
+#[derive(Default)]
+struct Beside {
+    readings: u32,
+    ms: u64,
+    cpu_sum: f64,
+    cpu_peak: f64,
+    /// CPU by program, to name the busiest.
+    programs: HashMap<String, f64>,
+}
+
+/// Heavy work that ran beside a measurement.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BesideWork {
+    pub owner: Owner,
+    /// Its busiest program.
+    pub name: String,
+    /// How long it ran heavy work, and how much of the CPU it used meanwhile.
+    pub ms: u64,
+    pub cpu_average: f64,
+    pub cpu_peak: f64,
 }
 
 impl Window {
@@ -198,6 +302,7 @@ impl Window {
             self.cpu_sum += usage.cpu;
             self.cpu_peak = self.cpu_peak.max(usage.cpu);
             let mut sample: HashMap<(Owner, String), (f64, u64)> = HashMap::new();
+            let mut by_owner: HashMap<Owner, (f64, HashMap<String, f64>)> = HashMap::new();
             let mut holder_cpu = 0.0;
             let memory: HashMap<u32, (&str, u64)> = reading
                 .processes
@@ -214,11 +319,31 @@ impl Window {
                 let entry = sample.entry((owner.clone(), name.to_string())).or_default();
                 entry.0 += cpu;
                 entry.1 += bytes;
+                let whose = by_owner.entry(owner.clone()).or_default();
+                whose.0 += cpu;
+                *whose.1.entry(name.to_string()).or_default() += cpu;
                 self.groups
                     .entry((owner, name.to_string()))
                     .or_default()
                     .pids
                     .insert(*pid);
+            }
+            let heavy = (100.0 / f64::from(reading.cores.max(1))).max(HEAVY_PERCENT);
+            let interval = self.previous.as_ref().map_or(0, |p| {
+                reading.at.saturating_duration_since(p.at).as_millis() as u64
+            });
+            for (owner, (cpu, programs)) in by_owner {
+                if cpu < heavy {
+                    continue;
+                }
+                let beside = self.beside.entry(owner).or_default();
+                beside.readings += 1;
+                beside.ms += interval;
+                beside.cpu_sum += cpu;
+                beside.cpu_peak = beside.cpu_peak.max(cpu);
+                for (name, used) in programs {
+                    *beside.programs.entry(name).or_default() += used;
+                }
             }
             for (key, (cpu, bytes)) in sample {
                 let group = self.groups.entry(key).or_default();
@@ -232,6 +357,32 @@ impl Window {
             self.others_peak = self.others_peak.max(others);
         }
         self.previous = Some(reading);
+    }
+
+    /// Heavy work that ran beside the measurement, whoever's it was, the most first.
+    pub fn beside(&self) -> Vec<BesideWork> {
+        let mut work: Vec<BesideWork> = self
+            .beside
+            .iter()
+            .filter(|(_, b)| b.readings >= HEAVY_READINGS)
+            .map(|(owner, b)| BesideWork {
+                owner: owner.clone(),
+                name: b
+                    .programs
+                    .iter()
+                    .filter(|(name, _)| !name.is_empty())
+                    .max_by(|a, b| a.1.total_cmp(b.1))
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_default(),
+                ms: b.ms,
+                cpu_average: round(b.cpu_sum / f64::from(b.readings)),
+                cpu_peak: round(b.cpu_peak),
+            })
+            .collect();
+        work.sort_by(|a, b| {
+            (b.cpu_average * b.ms as f64).total_cmp(&(a.cpu_average * a.ms as f64))
+        });
+        work
     }
 
     /// The busiest programs that were not the measuring chat's, by their average CPU, then the
@@ -433,21 +584,29 @@ impl Now {
     }
 }
 
-fn owner_text(owner: &Owner, chat: &impl Fn(&str) -> String) -> String {
+pub(super) fn owner_text(owner: &Owner, chat: &impl Fn(&str) -> String) -> String {
     match owner {
         Owner::Chat(conversation) => chat(conversation),
         Owner::App => "Agent Studio".into(),
         Owner::System => "the system".into(),
         Owner::Wsl => "WSL".into(),
+        Owner::Session(key) => session_name(key).into(),
         Owner::Yours => "yours".into(),
     }
 }
-fn owner_key(owner: &Owner) -> Value {
+pub(super) fn session_name(key: &str) -> &'static str {
+    SESSIONS
+        .iter()
+        .find(|(k, _)| *k == key)
+        .map_or("a session outside Agent Studio", |(_, name)| name)
+}
+pub(super) fn owner_key(owner: &Owner) -> Value {
     match owner {
         Owner::Chat(conversation) => json!({"chat": conversation}),
         Owner::App => json!("app"),
         Owner::System => json!("system"),
         Owner::Wsl => json!("wsl"),
+        Owner::Session(key) => json!({"session": key}),
         Owner::Yours => json!("user"),
     }
 }
@@ -542,6 +701,7 @@ mod platform {
                 total_ms,
                 memory_total: memory.ullTotalPhys,
                 memory_available: memory.ullAvailPhys,
+                commit_available: Some(memory.ullAvailPageFile),
                 cores: std::thread::available_parallelism().map_or(1, |n| n.get() as u32),
                 processes,
             })
@@ -671,6 +831,7 @@ mod platform {
             total_ms,
             memory_total: field("MemTotal:")?,
             memory_available: field("MemAvailable:")?,
+            commit_available: None,
             cores: std::thread::available_parallelism().map_or(1, |n| n.get() as u32),
             processes,
         })
@@ -706,6 +867,7 @@ mod tests {
             total_ms,
             memory_total: 64 << 30,
             memory_available: 24 << 30,
+            commit_available: None,
             cores: 4,
             processes,
         }
@@ -855,6 +1017,108 @@ mod tests {
         let text = outside.text(|c| format!("the chat {c}")).unwrap();
         assert!(text.contains("vmmemWSL (WSL) 65% CPU on average"), "{text}");
         assert_eq!(outside.record()["programs"][0]["owner"], "wsl");
+    }
+
+    #[test]
+    fn sessions_outside_agent_studio_are_told_apart() {
+        let r = reading(
+            Instant::now(),
+            0,
+            0,
+            vec![
+                process(1, 0, "explorer.exe", 0, 0, 1),
+                // The Claude app, its window, a Code session it runs and what that runs.
+                process(10, 1, "Claude.exe", 0, 0, 10),
+                process(11, 10, "Claude.exe", 0, 0, 11),
+                process(12, 10, "claude.exe", 0, 0, 12),
+                process(13, 12, "cargo.exe", 0, 0, 13),
+                // Claude Code in a terminal.
+                process(20, 1, "WindowsTerminal.exe", 0, 0, 20),
+                process(21, 20, "pwsh.exe", 0, 0, 21),
+                process(22, 21, "claude.exe", 0, 0, 22),
+                process(23, 22, "node.exe", 0, 0, 23),
+                // Codex, from the same terminal.
+                process(30, 21, "codex.exe", 0, 0, 30),
+                process(31, 30, "rg.exe", 0, 0, 31),
+            ],
+        );
+        let members = Members {
+            chats: HashMap::new(),
+            roots: HashMap::new(),
+        };
+        let owners = Owners::new(&r, &members, 999);
+        assert_eq!(owners.of(11), Owner::Session("claude-app"));
+        assert_eq!(owners.of(13), Owner::Session("claude-app"));
+        assert_eq!(owners.of(23), Owner::Session("claude-cli"));
+        assert_eq!(owners.of(31), Owner::Session("codex"));
+        assert_eq!(owners.of(21), Owner::Yours);
+        assert_eq!(
+            owner_text(&Owner::Session("claude-cli"), &|c: &str| c.to_string()),
+            "Claude Code outside Agent Studio"
+        );
+        assert_eq!(
+            owner_key(&Owner::Session("codex")),
+            json!({"session": "codex"})
+        );
+    }
+
+    #[test]
+    fn heavy_work_beside_a_measurement_is_whoever_s_ran_it() {
+        // Four cores: heavy is a whole core, 25% of the computer, in two readings or more.
+        let start = Instant::now();
+        let members = Members {
+            chats: HashMap::from([(11, "bench".to_string())]),
+            roots: HashMap::new(),
+        };
+        let processes = |game: u64, chrome: u64, defender: u64| {
+            let mut scanner = process(30, 1, "MsMpEng.exe", defender, 1 << 28, 30);
+            scanner.system = true;
+            vec![
+                process(11, 1, "Game.exe", game, 1 << 30, 11),
+                process(20, 1, "chrome.exe", chrome, 1 << 30, 20),
+                scanner,
+            ]
+        };
+        let mut window = Window::default();
+        for (second, game, chrome, defender) in [
+            (0, 0, 0, 0),
+            (2, 4_000, 2_400, 600),
+            (4, 8_000, 4_800, 1_200),
+            (6, 12_000, 5_000, 1_300),
+        ] {
+            let r = reading(
+                start + Duration::from_secs(second),
+                second * 2_000,
+                second * 4_000,
+                processes(game, chrome, defender),
+            );
+            let owners = Owners::new(&r, &members, 10);
+            window.add(r, &owners, "bench", false);
+        }
+        // Chrome was heavy twice, Defender never, and the measuring game never counts.
+        assert_eq!(
+            window.beside(),
+            [BesideWork {
+                owner: Owner::Yours,
+                name: "chrome.exe".into(),
+                ms: 4_000,
+                cpu_average: 30.0,
+                cpu_peak: 30.0,
+            }]
+        );
+        // One heavy reading alone is not enough.
+        let mut brief = Window::default();
+        for (second, chrome) in [(0, 0), (2, 2_400), (4, 2_500)] {
+            let r = reading(
+                start + Duration::from_secs(second),
+                0,
+                second * 4_000,
+                processes(0, chrome, 0),
+            );
+            let owners = Owners::new(&r, &members, 10);
+            brief.add(r, &owners, "bench", false);
+        }
+        assert!(brief.beside().is_empty());
     }
 
     #[test]

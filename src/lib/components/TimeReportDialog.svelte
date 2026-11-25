@@ -7,6 +7,7 @@
     ChevronLeft,
     ChevronRight,
     Copy,
+    Gauge,
     Layers,
     ListChecks,
     MessagesSquare,
@@ -21,6 +22,7 @@
   import {
     agentOutcome,
     hasTimeDetails,
+    measurementsText,
     requestsText,
     timeFamilyNames,
     timeKindHints,
@@ -470,6 +472,27 @@
               </li>
             {/each}
           </ul>
+          {#if report.measurements.length}
+            <h4 id="time-measurements">
+              <Gauge size={12} aria-hidden="true" />{measurementsText(report.measurements)}
+            </h4>
+            <ul class="measurements" aria-labelledby="time-measurements">
+              {#each report.measurements as measurement, index (index)}
+                <li class:beside={!measurement.clean}>
+                  <span class="verdict"
+                    >{measurement.clean
+                      ? 'Clean'
+                      : 'Beside other heavy work'}{#if report.replies > 1}<span class="muted"
+                        >{' · '}response {measurement.reply}</span
+                      >{/if}</span
+                  >
+                  {#if measurement.beside}<span class="muted beside-what"
+                      >{measurement.beside.replaceAll('\n', '; ')}</span
+                    >{/if}
+                </li>
+              {/each}
+            </ul>
+          {/if}
         </section>
       {/if}
 
@@ -734,6 +757,39 @@
   }
   h3 :global(svg) {
     color: var(--text-muted);
+  }
+  /* The measurements a response made with the computer reserved, below the time on hold. */
+  h4 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 14px 0 6px;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    font-weight: 600;
+  }
+  .measurements {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: var(--text-sm);
+  }
+  .measurements li {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 10px;
+    padding-inline-start: 10px;
+    border-inline-start: 2px solid var(--success);
+  }
+  .measurements li.beside {
+    border-inline-start-color: var(--warning);
+  }
+  .verdict {
+    color: var(--text);
+  }
+  .beside-what {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   /* One grid for a card's rows, so names, bars and numbers line up. */
   .rows {

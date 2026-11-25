@@ -237,6 +237,30 @@ pub async fn kill_tree(child: &mut tokio::process::Child) {
     let _ = child.wait().await;
 }
 
+/// A chat's project folder as this computer reads it, whose repository its landing turn is
+/// (`reservations::named`): a folder inside a WSL distribution through its `\\wsl.localhost`
+/// path. None for a chat without a project folder.
+fn reservation_folder(
+    location: Option<&crate::folders::ChatLocation>,
+) -> Option<std::path::PathBuf> {
+    let path = location?.path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    let profile = crate::profiles::current();
+    match profile
+        .distribution
+        .as_deref()
+        .or(profile.folder_distribution.as_deref())
+    {
+        Some(distribution) if path.starts_with('/') => Some(std::path::PathBuf::from(format!(
+            r"\\wsl.localhost\{distribution}{}",
+            path.replace('/', "\\")
+        ))),
+        _ => Some(std::path::PathBuf::from(path)),
+    }
+}
+
 pub async fn run(
     app: tauri::AppHandle,
     request: RunRequest,
@@ -298,11 +322,20 @@ pub async fn run(
     {
         if request.tools_enabled() && matches!(request.agent.provider.as_str(), "claude" | "codex")
         {
-            let session = crate::reservations::tools::Session::new(
+            let mut session = crate::reservations::tools::Session::new(
                 broker.clone(),
                 conversation,
                 &request.run_id,
             );
+            session.folder(reservation_folder(request.location.as_ref()));
+            // What pc_wait waits for shows apart in the reply's time report.
+            let waits = ledger.clone();
+            session.held(Arc::new(move |reason| {
+                waits
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .held_for(reason);
+            }));
             // The messages other chats send it show in its Work history.
             let shown = output.clone();
             session.show(Arc::new(move |tool| {

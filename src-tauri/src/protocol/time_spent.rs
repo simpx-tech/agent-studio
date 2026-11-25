@@ -46,6 +46,11 @@ enum Kind {
     Background,
     /// Another chat holds this computer for a measurement (`reservations`).
     Held,
+    /// A build waits for a slot beside the builds running (`reservations::builds`).
+    Slot,
+    /// The reply waits for its turn at a named reservation, such as its repository's landing
+    /// (`reservations::named`).
+    Turn,
     Compaction,
     Other,
     /// Before the reply's turn began, not yet known to be the CLI getting ready or the first
@@ -71,6 +76,8 @@ impl Kind {
             Kind::User => "user",
             Kind::Background => "background",
             Kind::Held => "held",
+            Kind::Slot => "slot",
+            Kind::Turn => "turn",
             Kind::Compaction => "compaction",
             Kind::Other => "other",
         }
@@ -170,6 +177,9 @@ pub struct Ledger {
     asking: HashSet<String>,
     compacting: HashSet<String>,
     background: bool,
+    /// What a running `pc_wait` waits for, as the broker tells it: `slot`, `turn`, or else the
+    /// computer.
+    held_for: Option<&'static str>,
     /// The step of the reply's plan in progress, and when each began.
     step: Option<String>,
     steps: Vec<StepMark>,
@@ -257,6 +267,16 @@ impl Ledger {
         }
     }
 
+    /// What the reply's `pc_wait` waits for from now on (`reservations::Broker::wait`): the
+    /// time before goes to what it waited for until now.
+    pub fn held_for(&mut self, reason: Option<&'static str>) {
+        self.held_for_at(reason, Instant::now());
+    }
+    fn held_for_at(&mut self, reason: Option<&'static str>, now: Instant) {
+        self.advance(now);
+        self.held_for = reason;
+    }
+
     /// The reply's own time starts here.
     pub fn begin(&mut self, now: Instant) {
         self.began = Some(now);
@@ -320,9 +340,17 @@ impl Ledger {
         if waits(Wait::Hook) {
             return self.add(Kind::Hooks, time);
         }
-        // Waiting for the computer another chat measures with is on hold, whatever else runs.
+        // Waiting for the computer another chat measures with, a build slot or a turn is on
+        // hold, whatever else runs.
         if waits(Wait::Held) {
-            return self.add(Kind::Held, time);
+            return self.add(
+                match self.held_for {
+                    Some("slot") => Kind::Slot,
+                    Some("turn") => Kind::Turn,
+                    _ => Kind::Held,
+                },
+                time,
+            );
         }
         // Calls of several kinds running side by side share the time.
         let running: Vec<Kind> = [
@@ -767,6 +795,32 @@ mod tests {
             ]
         );
         assert_eq!(requests, 2);
+    }
+
+    #[test]
+    fn a_wait_for_the_computer_a_build_slot_or_a_turn_is_held_time_with_its_reason() {
+        let mut run = Run::new();
+        run.claude(prompt());
+        run.wait(500).claude(json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"w","name":"mcp__agent_studio__pc_wait","input":{}}]}}));
+        run.wait(1_000);
+        let now = run.now;
+        run.ledger.held_for_at(Some("slot"), now);
+        run.wait(3_000);
+        let now = run.now;
+        run.ledger.held_for_at(Some("turn"), now);
+        run.wait(2_000);
+        let now = run.now;
+        run.ledger.held_for_at(None, now);
+        run.wait(100).claude(result("w"));
+        assert_eq!(
+            run.spent(),
+            [
+                ("held", 1_100),
+                ("slot", 3_000),
+                ("turn", 2_000),
+                ("waiting", 500)
+            ]
+        );
     }
 
     #[test]

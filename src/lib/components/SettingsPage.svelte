@@ -9,6 +9,7 @@
   import DesktopNotifications from './DesktopNotifications.svelte';
   import NewChatSettings, { type BalanceAgent } from './NewChatSettings.svelte';
   import PushNotifications from './PushNotifications.svelte';
+  import ReservationSettings from './ReservationSettings.svelte';
   import WorkspaceAdministration from './WorkspaceAdministration.svelte';
   import { desktop, type AppUpdateStatus, type CliUpdates as CliUpdateState } from '$lib/transport';
   let {
@@ -77,6 +78,7 @@
           {workspaceSession}
         />{/if}
       {#if desktop()}<BackgroundSettings />
+        <ReservationSettings />
         <AppUpdates status={appUpdate} restart={restartToUpdate} />
         <CliUpdates updates={cliUpdates} apply={applyCliUpdates} {environmentName} />{/if}
       <NewChatSettings

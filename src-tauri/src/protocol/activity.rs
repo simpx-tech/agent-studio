@@ -254,15 +254,25 @@ fn pc_name(name: &str) -> Option<&str> {
 /// What a reservation call does, with the purpose a reservation names. Its answer, a report on
 /// the computer, is kept as other calls' results are.
 fn pc_tool(tool: &mut ToolActivity, name: &str, input: &Value) {
+    // A named reservation, or a repository's landing turn, rather than the computer.
+    let landing = input["landing"] == true;
+    let named = field(input, "name");
     tool.name = match name {
         "pc_status" => "Check the computer",
+        "pc_reserve" if landing => "Take the landing turn",
+        "pc_reserve" if named.is_some() => "Take a turn",
         "pc_reserve" => "Reserve the computer",
         "pc_wait" => "Wait for the computer",
         "pc_stop" => "Stop a chat's programs",
         "chat_message" => "Message a chat",
+        _ if landing => "Release the landing turn",
+        _ if named.is_some() => "Release a turn",
         _ => "Release the computer",
     }
     .into();
+    if let Some(named) = named {
+        fact(tool, "Name", named);
+    }
     tool.operation = Some(
         match name {
             "pc_wait" => "pcWait",
@@ -282,6 +292,36 @@ fn pc_tool(tool: &mut ToolActivity, name: &str, input: &Value) {
             fact(tool, "Asks", "To hand over what it holds");
         }
     }
+}
+/// What a reservation's release says of its measurement (`reservations`): its report's
+/// Measurement line, which says whether it ran beside other heavy work and whose.
+fn measurement(tool: &mut ToolActivity, report: &str) {
+    if tool.name != "Release the computer" {
+        return;
+    }
+    if let Some(line) = report
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Measurement: "))
+    {
+        let line = line.trim_end_matches('.');
+        let (verdict, rest) = line.split_once(", ").unwrap_or((line, ""));
+        fact(tool, "Measurement", capitalize(verdict));
+        if verdict == "ran beside other heavy work" {
+            if let Some((_, what)) = rest.split_once(": ") {
+                let what = what
+                    .strip_suffix(". Tell the user, and offer to measure again")
+                    .unwrap_or(what);
+                fact(tool, "Ran beside", what.replace("; ", "\n"));
+            }
+        }
+    }
+}
+fn capitalize(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 /// Agent Studio's own tools, whose arguments and results other panels already show.
 fn studio_tool(name: &str) -> bool {
@@ -502,6 +542,7 @@ impl ToolDecoder {
                     self.set_input(&mut tool, &item["arguments"]);
                     if method == "item/completed" {
                         let (text, images) = result_parts(&item["contentItems"]);
+                        measurement(&mut tool, &text);
                         let mut output = CapturedOutput::new(&tool.id);
                         output.stdout = text;
                         output.images = images;
@@ -1465,6 +1506,9 @@ impl ToolDecoder {
                                         fact(&mut tool, "Tools found", names.join("\n"));
                                     }
                                 }
+                                Some("pc") if !failed => {
+                                    measurement(&mut tool, &text_content(&block["content"]));
+                                }
                                 // An artifact's call names it by its title, with its link.
                                 Some(operation)
                                     if operation.starts_with("artifact:") && !failed =>
@@ -1782,6 +1826,50 @@ mod tests {
             .facts
             .iter()
             .any(|f| f.label == "Message" && f.value == "Close the editor when you can."));
+    }
+    #[test]
+    fn a_release_shows_whether_its_measurement_ran_beside_other_work() {
+        let mut d = ToolDecoder::default();
+        for (id, input) in [
+            ("clean", json!({})),
+            ("beside", json!({})),
+            ("landing", json!({"landing":true})),
+        ] {
+            d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":"mcp__agent_studio__pc_release","input":input}]}}));
+        }
+        d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"turn","name":"mcp__agent_studio__pc_reserve","input":{"purpose":"Mirror sources","name":"D:\\shared"}}]}}));
+        let report = |measurement: &str| {
+            format!("Released the computer (reserved for: Frame timing).\nThe window opened 0.0s after the reservation and stayed open 30.0s.\nMeasurement: {measurement}")
+        };
+        for (id, text) in [
+            ("clean", report("clean, no other heavy work ran while the window was open.")),
+            ("beside", report("ran beside other heavy work, so its numbers may be off: another chat ran `npm test` for 4.0s; programs of yours (chrome.exe) at 38% of the CPU, 38% at most, for 4.0s. Tell the user, and offer to measure again.")),
+            ("landing", "Released the landing of github.com/a/b (Push): this chat held it 1m 0s. Nobody waits for it.".into()),
+        ] {
+            d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":id,"content":text}]}}));
+        }
+        let fact = |index: usize, label: &str| {
+            d.tools[index]
+                .facts
+                .iter()
+                .find(|f| f.label == label)
+                .map(|f| f.value.clone())
+        };
+        assert_eq!(fact(0, "Measurement").as_deref(), Some("Clean"));
+        assert_eq!(fact(0, "Ran beside"), None);
+        assert_eq!(
+            fact(1, "Measurement").as_deref(),
+            Some("Ran beside other heavy work")
+        );
+        assert_eq!(
+            fact(1, "Ran beside").as_deref(),
+            Some("another chat ran `npm test` for 4.0s\nprograms of yours (chrome.exe) at 38% of the CPU, 38% at most, for 4.0s")
+        );
+        assert_eq!(d.tools[2].name, "Release the landing turn");
+        assert_eq!(fact(2, "Measurement"), None);
+        assert_eq!(d.tools[3].name, "Take a turn");
+        assert_eq!(fact(3, "Name").as_deref(), Some("D:\\shared"));
+        assert_eq!(d.tools[3].detail(), Some("Mirror sources"));
     }
     #[test]
     fn tool_details_keep_targets_patterns_and_results_without_file_bodies() {

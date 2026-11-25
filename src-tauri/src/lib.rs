@@ -416,6 +416,29 @@ async fn pc_history(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>, Str
         .map_err(|error| error.to_string())
 }
 
+/// This computer's settings of reservations (Settings → Reservations).
+#[tauri::command]
+async fn pc_settings(app: tauri::AppHandle) -> Result<reservations::Settings, String> {
+    Ok(app
+        .try_state::<std::sync::Arc<reservations::Broker>>()
+        .map(|broker| broker.settings())
+        .unwrap_or_default())
+}
+
+#[tauri::command]
+async fn set_pc_settings(
+    app: tauri::AppHandle,
+    settings: reservations::Settings,
+) -> Result<reservations::Settings, String> {
+    let broker = app
+        .try_state::<std::sync::Arc<reservations::Broker>>()
+        .map(|broker| broker.inner().clone())
+        .ok_or("Reservations are not available here")?;
+    tauri::async_runtime::spawn_blocking(move || broker.set_settings(settings))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
 /// Reservations of this computer, which name chats by the titles of the workspace this app last
 /// saved and follow the background work chats' CLIs keep.
 fn reservations_broker(app: &tauri::AppHandle) -> std::sync::Arc<reservations::Broker> {
@@ -2509,6 +2532,8 @@ pub fn run() {
             background_work,
             pc_state,
             pc_history,
+            pc_settings,
+            set_pc_settings,
             manage_account,
             read_context,
             search_mentions,

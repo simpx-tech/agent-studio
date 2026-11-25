@@ -3,14 +3,18 @@
   import {
     ChevronLeft,
     ChevronRight,
+    CircleCheck,
     CircleStop,
     Cpu,
     Gauge,
+    GitMerge,
+    Hammer,
     Handshake,
     Snowflake,
     History,
     Hourglass,
     MessageSquare,
+    TriangleAlert,
     Users,
     X,
   } from '@lucide/svelte';
@@ -18,14 +22,19 @@
   import { clock } from '$lib/clock';
   import { closeOnBackdrop } from '$lib/dialog-backdrop';
   import {
+    pcBesideText,
     pcEndedBy,
     pcHandingOver,
     pcOutcome,
     pcOwner,
     pcTotals,
+    pcTurnGroups,
     pcWaited,
     type PcRecord,
     type PcReservation,
+    type PcSlot,
+    type PcTurn,
+    type PcTurnRecord,
   } from '$lib/pc-reservations';
   import { formatReplyTime } from '$lib/replies';
   import { formatBytes } from '$lib/tool-output';
@@ -33,6 +42,8 @@
   import TimeMakeup from './TimeMakeup.svelte';
   let {
     reservations,
+    turns = [],
+    slots = [],
     title,
     opens,
     open,
@@ -40,6 +51,10 @@
   }: {
     /** This computer's reservations now, the one holding it first. */
     reservations: PcReservation[];
+    /** Named reservations now, each name's holder first. */
+    turns?: PcTurn[];
+    /** Chats' builds waiting for a slot, first in line first. */
+    slots?: PcSlot[];
     /** A chat's title. */
     title: (conversationId: string) => string;
     /** Whether a chat can be opened from here. */
@@ -51,12 +66,15 @@
   let closeButton: HTMLButtonElement;
 
   let records = $state<PcRecord[]>([]);
+  let turnRecords = $state<PcTurnRecord[]>([]);
   let loaded = $state(false);
   let failed = $state(false);
   let now = $state(Date.now());
   async function load() {
     try {
-      records = await readPcHistory();
+      const history = await readPcHistory();
+      records = history.reservations;
+      turnRecords = history.turns;
       failed = false;
     } catch {
       failed = true;
@@ -76,8 +94,11 @@
       if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
     };
   });
-  // A reservation that ends joins the history.
-  const live = $derived(reservations.map((r) => `${r.askedAt}:${r.id}`).join(' '));
+  // A reservation or a turn that ends joins the history.
+  const live = $derived(
+    [...reservations.map((r) => `${r.askedAt}:${r.id}`), ...turns.map((t) => t.id)].join(' '),
+  );
+  const groups = $derived(pcTurnGroups(turns));
   let seen = '';
   $effect(() => {
     const ids = live;
@@ -114,8 +135,12 @@
     reservation.phase === 'open'
       ? 'Measuring'
       : reservation.phase === 'draining'
-        ? 'Waiting'
-        : 'In line';
+        ? 'Holding'
+        : reservation.phase === 'lull'
+          ? 'Waiting for a lull'
+          : 'In line';
+  const turnName = (turn: { name: string; landing: boolean }) =>
+    turn.landing ? turn.name.replace(/^the landing of /, 'Landing of ') : turn.name;
   const since = (reservation: PcReservation) =>
     formatReplyTime(Math.max(0, clock.now - (reservation.openedAt ?? reservation.askedAt)));
   const askText = (ask: PcRecord['asks'][number]) =>
@@ -245,8 +270,46 @@
                 <span class="muted">{percent(machine.othersPeak)} at most</span>
               </li>
             {/if}
+            {#if record.contaminated != null}
+              <li data-family={record.contaminated ? 'warning' : 'work'}>
+                <span class="tile-name">Measurement</span>
+                <strong class="verdict"
+                  >{#if record.contaminated}<TriangleAlert
+                      size={15}
+                      aria-hidden="true"
+                    />{'Ran beside other work'}{:else}<CircleCheck
+                      size={15}
+                      aria-hidden="true"
+                    />{'Clean'}{/if}</strong
+                >
+              </li>
+            {/if}
           </ul>
         </section>
+
+        {#if record.ranBeside.length}
+          {@const top = longest(record.ranBeside.map((b) => b.ms))}
+          <section class="card" aria-labelledby="pc-beside">
+            <h3 id="pc-beside"><TriangleAlert size={14} aria-hidden="true" />Ran beside it</h3>
+            <ul class="rows">
+              {#each record.ranBeside as beside, index (index)}
+                <li class="row">
+                  <span class="name">{@render label(pcBesideText(beside, title))}</span>
+                  <TimeMakeup
+                    makeup={[
+                      { family: 'overhead', name: 'Ran beside it', ms: beside.ms, share: 1 },
+                    ]}
+                    scale={beside.ms / top}
+                  />
+                  <span class="time">{formatReplyTime(beside.ms)}</span>
+                  <span class="share"
+                    >{#if 'cpuAverage' in beside}{percent(beside.cpuAverage)}{/if}</span
+                  >
+                </li>
+              {/each}
+            </ul>
+          </section>
+        {/if}
 
         {#if record.blockers.length}
           {@const top = longest(record.blockers.map((b) => b.ms))}
@@ -444,6 +507,74 @@
         {/if}
       {/key}
     {:else}
+      {#if slots.length || groups.length}
+        <section class="card" aria-labelledby="pc-queues">
+          <h3 id="pc-queues"><Users size={14} aria-hidden="true" />In line</h3>
+          <ul class="live">
+            {#each groups as group (group.turns[0].id)}
+              <li>
+                <div class="live-head">
+                  <span class="tag" class:measuring={group.turns[0].grantedAt != null}
+                    >{#if group.turns[0].landing}<GitMerge
+                        size={11}
+                        aria-hidden="true"
+                      />{/if}{turnName(group.turns[0])}</span
+                  >
+                  <span class="name"
+                    >{group.turns[0].purpose}<span class="muted"
+                      >{' · '}{title(group.turns[0].conversationId)}</span
+                    ></span
+                  >
+                  <span class="time"
+                    >{formatReplyTime(
+                      Math.max(0, clock.now - (group.turns[0].grantedAt ?? group.turns[0].askedAt)),
+                    )}</span
+                  >
+                  {@render chat(group.turns[0].conversationId)}
+                </div>
+                {#if group.turns.length > 1}
+                  <ul class="waits">
+                    {#each group.turns.slice(1) as turn (turn.id)}
+                      <li>
+                        <Hourglass size={12} aria-hidden="true" />{title(turn.conversationId)}<span
+                          class="muted"
+                          >{' · '}{turn.purpose} · {formatReplyTime(
+                            Math.max(0, clock.now - turn.askedAt),
+                          )}</span
+                        >
+                      </li>
+                    {/each}
+                  </ul>
+                {/if}
+              </li>
+            {/each}
+            {#if slots.length}
+              <li>
+                <div class="live-head">
+                  <span class="tag"><Hammer size={11} aria-hidden="true" />Builds</span>
+                  <span class="name"
+                    >{slots.length}
+                    {slots.length === 1 ? 'build waits' : 'builds wait'} for a slot</span
+                  >
+                </div>
+                <ul class="waits">
+                  {#each slots as slot (slot.conversationId)}
+                    <li>
+                      <Hourglass size={12} aria-hidden="true" />{title(slot.conversationId)}<span
+                        class="muted"
+                        >{' · '}{@render label(slot.label)} · {slot.granted
+                          ? 'slot kept'
+                          : formatReplyTime(Math.max(0, clock.now - slot.since))}</span
+                      >
+                    </li>
+                  {/each}
+                </ul>
+              </li>
+            {/if}
+          </ul>
+        </section>
+      {/if}
+
       {#if reservations.length}
         <section class="card" aria-labelledby="pc-now">
           <h3 id="pc-now"><Gauge size={14} aria-hidden="true" />Now</h3>
@@ -501,6 +632,11 @@
               <strong>{totals.count}</strong>
               <span class="muted">{formatReplyTime(totals.windowMs)} measuring</span>
             </li>
+            <li data-family={totals.contaminated ? 'warning' : 'work'}>
+              <span class="tile-name">Ran beside other work</span>
+              <strong>{totals.contaminated}</strong>
+              <span class="muted">of {totals.count}</span>
+            </li>
             <li data-family="hold">
               <span class="tile-name">Waited to start</span>
               <strong>{formatReplyTime(totals.waitedMs)}</strong>
@@ -527,12 +663,19 @@
                   <span class="time">{formatReplyTime(spent(item))}</span>
                   <span
                     class="share"
-                    title={item.machine?.samples
-                      ? `Other programs used ${percent(item.machine.othersAverage)} of the CPU on average while it was open`
-                      : undefined}
-                    >{#if item.machine?.samples}<Cpu size={11} aria-hidden="true" />{percent(
-                        item.machine.othersAverage,
-                      )}{/if}</span
+                    class:beside={item.contaminated}
+                    title={item.contaminated
+                      ? 'Ran beside other heavy work'
+                      : item.machine?.samples
+                        ? `Other programs used ${percent(item.machine.othersAverage)} of the CPU on average while it was open`
+                        : undefined}
+                    >{#if item.contaminated}<TriangleAlert
+                        size={11}
+                        aria-label="Ran beside other heavy work"
+                      />{/if}{#if item.machine?.samples}<Cpu
+                        size={11}
+                        aria-hidden="true"
+                      />{percent(item.machine.othersAverage)}{/if}</span
                   >
                 </button>
               </li>
@@ -540,7 +683,34 @@
           </ol>
           {@render more('history', records.length, 20)}
         </section>
-      {:else if loaded && !reservations.length}
+      {/if}
+      {#if turnRecords.length}
+        <section class="card" aria-labelledby="pc-turns">
+          <h3 id="pc-turns"><GitMerge size={14} aria-hidden="true" />Turns</h3>
+          <ul class="facts">
+            {#each shown('turns', turnRecords, 10) as turn (`${turn.askedAt}:${turn.id}`)}
+              <li>
+                <span class="fact-name">{turnName(turn)}</span>
+                <span
+                  >{title(turn.conversationId)}<span class="muted"
+                    >{[
+                      '',
+                      turn.purpose,
+                      when(turn.askedAt),
+                      turn.heldMs != null && `held ${formatReplyTime(turn.heldMs)}`,
+                      turn.waitedMs >= 1000 && `waited ${formatReplyTime(turn.waitedMs)}`,
+                    ]
+                      .filter((part) => part !== false)
+                      .join(' · ')}</span
+                  ></span
+                >
+              </li>
+            {/each}
+          </ul>
+          {@render more('turns', turnRecords.length, 10)}
+        </section>
+      {/if}
+      {#if !records.length && !turnRecords.length && loaded && !reservations.length && !turns.length && !slots.length}
         <p class="empty">{failed ? 'The history could not be read.' : 'No reservations yet.'}</p>
       {/if}
       {#if failed && records.length}<p class="empty">The history could not be read.</p>{/if}
@@ -677,6 +847,23 @@
   }
   .tiles li[data-family='hold'] {
     border-inline-start-color: var(--time-hold);
+  }
+  .tiles li[data-family='warning'] {
+    border-inline-start-color: var(--warning);
+  }
+  .verdict {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .tiles li[data-family='warning'] .verdict :global(svg) {
+    color: var(--warning);
+  }
+  .tiles li[data-family='work'] .verdict :global(svg) {
+    color: var(--success);
+  }
+  .share.beside :global(svg:first-child) {
+    color: var(--warning);
   }
   .tile-name {
     flex: 1 0 100%;
@@ -850,6 +1037,11 @@
     font-size: var(--text-2xs);
     font-weight: 600;
     line-height: 18px;
+  }
+  .tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
   }
   .tag.measuring {
     background: var(--accent-soft);

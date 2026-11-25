@@ -766,6 +766,7 @@ mod tests {
             total_ms: 0,
             memory_total: 64 << 30,
             memory_available: 32 << 30,
+            commit_available: None,
             cores: 8,
             processes: vec![
                 process(10, 1, "agent-studio.exe", 0, 10),

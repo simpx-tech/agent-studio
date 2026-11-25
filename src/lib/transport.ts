@@ -76,7 +76,14 @@ import {
 } from './tool-output';
 import { renderModelViews, type ModelFormat } from './model-scene';
 import { backgroundWorkEventSchema, type BackgroundWorkEvent } from './background-work';
-import { pcRecords, pcSnapshotSchema, type PcRecord, type PcSnapshot } from './pc-reservations';
+import {
+  pcRecords,
+  pcSnapshotSchema,
+  pcTurnRecords,
+  type PcRecord,
+  type PcSnapshot,
+  type PcTurnRecord,
+} from './pc-reservations';
 import { answerSchema, type QuestionAnswer } from './questions';
 import { elicitationInputSchema, type ElicitationInput } from './elicitations';
 import { steeringInputSchema, type SteeringInput } from './steering';
@@ -964,10 +971,24 @@ export function watchPcReservations(listener: (snapshot: PcSnapshot) => void) {
   };
 }
 
-/** This computer's past reservations, newest first; the desktop app keeps them. */
-export async function readPcHistory(): Promise<PcRecord[]> {
-  if (!desktop()) return [];
-  return pcRecords(await invoke<unknown>('pc_history'));
+/** This computer's past reservations and turns, newest first; the desktop app keeps them. */
+export async function readPcHistory(): Promise<{
+  reservations: PcRecord[];
+  turns: PcTurnRecord[];
+}> {
+  if (!desktop()) return { reservations: [], turns: [] };
+  const history = await invoke<unknown>('pc_history');
+  return { reservations: pcRecords(history), turns: pcTurnRecords(history) };
+}
+
+/** This computer's settings of reservations (Settings → Reservations), desktop only. */
+export type PcSettings = { lullMinutes: number };
+const pcSettingsSchema = z.object({ lullMinutes: z.number().nonnegative() });
+export async function readPcSettings(): Promise<PcSettings> {
+  return pcSettingsSchema.parse(await invoke<unknown>('pc_settings'));
+}
+export async function savePcSettings(settings: PcSettings): Promise<PcSettings> {
+  return pcSettingsSchema.parse(await invoke<unknown>('set_pc_settings', { settings }));
 }
 let accountUpdatesStarted = false;
 export const accountUsageRevision = (connection?: string) =>

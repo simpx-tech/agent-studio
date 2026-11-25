@@ -38,6 +38,18 @@ test('the reservations window shows the computer now and each past measurement w
     endedBy: 'release',
     waitedMs: 9114,
     windowMs: 20_847,
+    lullMs: 4000,
+    contaminated: true,
+    ranBeside: [
+      { conversationId: art, label: 'Level step 3 `npm test`', ms: 3000 },
+      {
+        owner: { session: 'claude-cli' },
+        name: 'cl.exe',
+        ms: 8000,
+        cpuAverage: 41,
+        cpuPeak: 60,
+      },
+    ],
     blockers: [
       { conversationId: art, label: 'handing over', ms: 6344 },
       { conversationId: art, label: 'Level step 2 `Start-Sleep -Seconds 15`', ms: 4654 },
@@ -149,6 +161,43 @@ test('the reservations window shows the computer now and each past measurement w
         held: 1,
       },
     ],
+    // A repository's landing turn with a chat in line for it, and a build waiting for a slot.
+    turns: [
+      {
+        id: 'turn-1',
+        name: 'the landing of github.com/simpx-tech/bluevox',
+        landing: true,
+        conversationId: bench,
+        purpose: 'Final pipeline and push',
+        askedAt: Date.now() - 60_000,
+        grantedAt: Date.now() - 60_000,
+      },
+      {
+        id: 'turn-2',
+        name: 'the landing of github.com/simpx-tech/bluevox',
+        landing: true,
+        conversationId: art,
+        purpose: 'Final pipeline and push',
+        askedAt: Date.now() - 30_000,
+      },
+    ],
+    slots: [{ conversationId: art, label: '`Tools/Build.ps1`', since: Date.now() - 10_000 }],
+  };
+  // A landing turn that ended.
+  const landed = {
+    kind: 'turn',
+    id: 'turn-0',
+    conversationId: art,
+    name: 'the landing of github.com/simpx-tech/bluevox',
+    landing: true,
+    purpose: 'Merge and push',
+    askedAt: start + 100_000,
+    grantedAt: start + 105_000,
+    endedAt: start + 160_000,
+    endedBy: 'release',
+    waitedMs: 5000,
+    heldMs: 55_000,
+    waiting: 0,
   };
   await mockDesktop(page);
   await page.addInitScript(
@@ -160,7 +209,11 @@ test('the reservations window shows the computer now and each past measurement w
         localStorage.setItem('test-pc-state', JSON.stringify(state));
       }
     },
-    { w: workspace, history: [unopened, measured, 'a line that is not a record'], state: now },
+    {
+      w: workspace,
+      history: [unopened, measured, landed, 'a line that is not a record'],
+      state: now,
+    },
   );
   await page.goto('/');
 
@@ -168,15 +221,29 @@ test('the reservations window shows the computer now and each past measurement w
   const gauge = page.locator('.pc-reserved');
   await expect(gauge).toHaveAttribute(
     'title',
-    'Computer reserved: Benchmark again · Chunk benchmark · Waiting for 1 command and 1 chat to hand over · 1 chat waits',
+    'Computer reserved: Benchmark again · Chunk benchmark · Waiting for 1 command and 1 chat to hand over · 1 chat waits · 1 build waits for a slot · 1 chat waits for a turn',
     // Named once the workspace loaded.
     { timeout: 15_000 },
   );
   await gauge.click();
   const dialog = page.getByRole('dialog', { name: 'Reservations' });
   await expect(dialog).toBeVisible();
+  // What waits in line: a landing turn and its next chat, and a build for a slot.
+  const queues = dialog.getByLabel('In line');
+  await expect(queues.locator('.live-head').nth(0)).toContainText(
+    'Landing of github.com/simpx-tech/bluevox',
+  );
+  await expect(queues.locator('.live-head .name').nth(0)).toHaveText(
+    /^\s*Final pipeline and push\s*· Chunk benchmark\s*$/,
+  );
+  // Each with how long it has waited, by the clock.
+  await expect(queues.locator('.waits li')).toHaveText([
+    /Level art\s*· Final pipeline and push · \d/,
+    /Level art\s*· Tools\/Build\.ps1 · \d/,
+  ]);
+  await expect(queues.locator('.live-head').nth(1)).toContainText('1 build waits for a slot');
   const live = dialog.getByLabel('Now');
-  await expect(live.locator('.live-head')).toContainText('Waiting');
+  await expect(live.locator('.live-head')).toContainText('Holding');
   await expect(live.locator('.live-head .name')).toHaveText(
     /^\s*Benchmark again\s*· Chunk benchmark\s*$/,
   );
@@ -189,9 +256,14 @@ test('the reservations window shows the computer now and each past measurement w
   // What the measurements took together, then each one, newest first.
   await expect(dialog.locator('.tiles li')).toHaveText([
     /Measurements\s*2\s*20\.8s measuring/,
+    /Ran beside other work\s*1\s*of 2/,
     /Waited to start\s*39\.1s/,
     /Other chats waited\s*19\.4s\s*2 commands/,
   ]);
+  // The turns its history kept.
+  await expect(dialog.getByLabel('Turns').locator('li')).toHaveText(
+    /Landing of github\.com\/simpx-tech\/bluevox\s*Level art\s*· Merge and push · .* · held 55\.0s · waited 5\.0s/,
+  );
   const history = dialog.getByLabel('History');
   const rows = history.locator('button.row');
   await expect(rows).toHaveCount(2);
@@ -200,6 +272,10 @@ test('the reservations window shows the computer now and each past measurement w
   );
   await expect(rows.nth(0).locator('.time')).toHaveText('30.0s');
   await expect(rows.nth(0).locator('.share')).toHaveText('40%');
+  await expect(rows.nth(0).locator('.share')).toHaveAttribute(
+    'title',
+    'Ran beside other heavy work',
+  );
   await expect(rows.nth(1).locator('.name')).toContainText('Profile the build');
   await expect(rows.nth(1).locator('.share')).toHaveText('');
 
@@ -214,6 +290,11 @@ test('the reservations window shows the computer now and each past measurement w
     /Measuring\s*20\.8s/,
     /Other chats waited\s*19\.4s\s*1 chat · 2 commands/,
     /Other programs' CPU\s*40%\s*52% at most/,
+    /Measurement\s*Ran beside other work/,
+  ]);
+  await expect(dialog.getByLabel('Ran beside it').locator('.row')).toHaveText([
+    /Level art\s*· Level step 3 npm test\s*3\.0s/,
+    /Claude Code outside Agent Studio\s*· cl\.exe\s*8\.0s\s*41%/,
   ]);
   await expect(dialog.getByLabel('Before it opened').locator('.row')).toHaveText([
     /Level art\s*· handing over\s*6\.3s/,
@@ -268,6 +349,7 @@ test('the reservations window shows the computer now and each past measurement w
   await expect(rows).toHaveCount(3);
   await expect(rows.nth(0).locator('.name')).toContainText('Benchmark again');
   await expect(dialog.getByLabel('Now')).toHaveCount(0);
+  await expect(dialog.getByLabel('In line')).toHaveCount(0);
   await expect(gauge).toHaveCount(0);
 
   // A chat it names opens from it.
@@ -283,4 +365,33 @@ test('the reservations window shows the computer now and each past measurement w
   await expect(page.getByRole('dialog', { name: 'Reservations' })).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.getByRole('dialog', { name: 'Reservations' })).toHaveCount(0);
+});
+
+// How long a measurement waits for a lull before it holds other chats' work is this
+// computer's own setting (src-tauri/src/reservations.rs, `Settings`).
+test('Settings sets how long a measurement waits for a lull before it holds other chats', async ({
+  page,
+}) => {
+  await mockDesktop(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  const section = page.getByRole('region', { name: 'Reservations', exact: true });
+  const picker = section.getByRole('combobox', { name: 'Hold other chats after' });
+  await expect(picker).toHaveText(/3 minutes/);
+  await picker.click();
+  await expect(page.getByRole('option')).toHaveText([
+    /At once/,
+    /1 minute/,
+    /2 minutes/,
+    /3 minutes/,
+    /5 minutes/,
+    /10 minutes/,
+    /15 minutes/,
+    /30 minutes/,
+  ]);
+  await page.getByRole('option', { name: '10 minutes', exact: true }).click();
+  await expect(picker).toHaveText(/10 minutes/);
+  await expect
+    .poll(() => page.evaluate(() => localStorage.getItem('test-pc-settings')))
+    .toBe('{"lullMinutes":10}');
 });

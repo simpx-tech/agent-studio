@@ -4,17 +4,25 @@
 //! computer for itself, and it does so as a reservation rather than by waiting for quiet, which
 //! never comes while several chats work.
 //!
-//! A chat reserves the computer (`pc_reserve`). From that moment no other chat starts a command
-//! other than a light one (`light`): Claude chats' commands are refused before they start by a
-//! `PreToolUse` hook (`tools::gate`), which tells them to call `pc_wait`, a tool that returns once
-//! the computer is free. The reservation's window opens once no other chat runs a command, or
-//! background work a running reply of its own still waits on; the chat that reserved waits for it
-//! with `pc_wait` too. While the window is open the computer is measured (`machine`), and
-//! releasing it (`pc_release`, or the end of the reply that reserved it) gives a report: what kept
-//! the window closed and for how long, what else ran while it was open, what the computer did,
-//! and how long the other chats waited and because of what. Each report is kept in app data
+//! A chat reserves the computer (`pc_reserve`). First in line, it waits for a lull: its window
+//! opens at the first moment no other chat runs a command, or background work a running reply of
+//! its own still waits on, while other chats work on. Only once that has not come within a set
+//! wait (`Settings::lull_minutes`, a few minutes; requested 2026-11-24, since holding everyone at
+//! once cost other chats hours) does it hold their new work: from then on, and once its window
+//! opens, no other chat starts a command other than a light one (`light`): Claude chats'
+//! commands are refused before they start by a `PreToolUse` hook (`tools::gate`), which tells
+//! them to call `pc_wait`, a tool that returns once the computer is free. The chat that reserved
+//! waits for its window with `pc_wait` too. While the window is open the computer is measured
+//! (`machine`), and releasing it (`pc_release`, or the end of the reply that reserved it) gives a
+//! report: what kept the window closed and for how long, what else ran while it was open, what
+//! the computer did, whether the measurement ran beside other heavy work and whose, and how long
+//! the other chats waited and because of what. Each report is kept in app data
 //! `reservations/history.jsonl`. Reservations take turns, first come first served, and nothing is
 //! capped: a reservation, a wait and a queue last as long as their chats need.
+//!
+//! The same broker hands out build slots (`builds`): a chat's build waits at its gate while the
+//! builds already running leave no room for it, and named reservations (`named`), such as a
+//! repository's landing turn, which one chat at a time holds across its calls.
 //!
 //! Chats coordinate by themselves (`chat_message`): a message reaches a replying chat with its
 //! next tool call. The chat holding the computer may ask a replying chat to hand over what it
@@ -23,16 +31,18 @@
 //! the programs it left running (`programs`) and holds its commands like the others'. Programs a
 //! chat that no longer replies left running are stopped with `pc_stop`. A process such a program
 //! starts while the window is open waits, frozen at birth, until the reservation ends (`hold`).
+pub mod builds;
 pub mod codex_gate;
 mod hold;
 pub mod jobs;
 mod light;
 pub mod machine;
+pub mod named;
 pub mod programs;
 pub mod tools;
 
 use crate::protocol::activity::ToolActivity;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -43,8 +53,36 @@ use tokio_util::sync::CancellationToken;
 
 /// The event this computer's window follows reservations with.
 pub const EVENT: &str = "studio-pc";
-/// How often a reservation looks at the computer while it waits or is open.
+/// How often a reservation looks at the computer while it waits or is open, and builds waiting
+/// for a slot look at what runs.
 const TICK: Duration = Duration::from_secs(2);
+/// How long a build slot a chat was given waits for its build to start.
+const GRANT: Duration = Duration::from_secs(120);
+/// The file beside the history that keeps this computer's settings of reservations.
+const SETTINGS: &str = "settings.json";
+
+/// This computer's settings of reservations (app data `reservations/settings.json`, never
+/// synced), which Settings → Reservations changes.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Settings {
+    /// How long a reservation first in line waits for a lull, a moment when no other chat runs
+    /// heavy work, before it holds other chats' new work. Zero holds it at once.
+    pub lull_minutes: f64,
+}
+impl Default for Settings {
+    fn default() -> Self {
+        Self { lull_minutes: 3.0 }
+    }
+}
+impl Settings {
+    fn valid(self) -> Option<Self> {
+        (self.lull_minutes.is_finite() && self.lull_minutes >= 0.0).then_some(self)
+    }
+    fn lull(self) -> Duration {
+        Duration::from_secs_f64(self.lull_minutes * 60.0)
+    }
+}
 
 /// Background work a chat's CLI keeps running (`background_work`), as reservations see it.
 #[derive(Clone, Debug, PartialEq)]
@@ -76,6 +114,34 @@ const REPLY_ENDED: &str = "reply ended";
 #[serde(rename_all = "camelCase")]
 pub struct Snapshot {
     pub reservations: Vec<View>,
+    /// Named reservations, each name's holder before those waiting for it.
+    pub turns: Vec<TurnView>,
+    /// Chats whose builds wait for a slot, first come first served.
+    pub slots: Vec<SlotView>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnView {
+    pub id: String,
+    pub name: String,
+    pub landing: bool,
+    pub conversation_id: String,
+    pub purpose: String,
+    pub asked_at: u64,
+    /// When this chat's turn came: it holds the name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub granted_at: Option<u64>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlotView {
+    pub conversation_id: String,
+    /// The build it asked to run.
+    pub label: String,
+    pub since: u64,
+    /// A slot is free for it, until its build starts.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub granted: bool,
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,9 +149,14 @@ pub struct View {
     pub id: String,
     pub conversation_id: String,
     pub purpose: String,
-    /// `queued` behind another, `draining` while other chats' work finishes, or `open`.
+    /// `queued` behind another; first in line, `lull` while it waits for a moment when no other
+    /// chat runs heavy work, `draining` while it holds other chats' new work and theirs finishes,
+    /// or `open`.
     pub phase: &'static str,
     pub asked_at: u64,
+    /// While it waits for a lull: when it holds other chats' new work if none comes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub holds_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opened_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -120,6 +191,11 @@ pub struct Broker {
     background: Background,
     history: Option<PathBuf>,
     release: std::sync::OnceLock<Release>,
+    settings: Mutex<Settings>,
+    /// How it reads the computer: `machine::read`, or nothing in tests, which give their own.
+    read: Mutex<fn() -> Option<machine::Reading>>,
+    /// The broker itself, for the loop that looks at the computer.
+    me: std::sync::Weak<Broker>,
     /// Which chat each process belongs to.
     pub jobs: jobs::Jobs,
 }
@@ -142,8 +218,44 @@ struct State {
     readers: HashMap<String, Reader>,
     /// What chats stopped before they reserved, for the reservation each makes next.
     prepared: Vec<Stopping>,
+    /// Named reservations in the order they were asked for: the first of each name holds it.
+    turns: Vec<Turn>,
+    /// Chats whose builds wait for a slot, first come first served.
+    slots: Vec<SlotWait>,
+    /// When the last build started, which the next one beside it gives time to grow.
+    last_build: Option<Instant>,
+    /// When each chat last released the computer, and in which reply.
+    released: HashMap<String, (String, Instant)>,
     next: u64,
     ticking: bool,
+}
+/// A chat's turn at a named reservation (`named`).
+struct Turn {
+    id: String,
+    key: String,
+    name: String,
+    landing: bool,
+    conversation: String,
+    run_id: String,
+    purpose: String,
+    asked: Instant,
+    asked_at: u64,
+    granted: Option<Instant>,
+    granted_at: Option<u64>,
+}
+/// A chat whose build waits for a slot (`builds`).
+struct SlotWait {
+    conversation: String,
+    label: String,
+    since: Instant,
+    since_at: u64,
+    /// When a slot was kept for it.
+    granted: Option<Instant>,
+}
+/// A build running on the computer now.
+struct Running {
+    conversation: Option<String>,
+    label: String,
 }
 /// A message to a chat, from another chat or from Agent Studio.
 struct Message {
@@ -194,6 +306,8 @@ enum Asked {
 struct Call {
     label: String,
     light: bool,
+    /// It builds (`builds::is_build`), and so takes a build slot while it runs.
+    build: bool,
     /// The lengths of the command and description it was read from: Claude streams a call's
     /// input, so its first report may name neither.
     read: (usize, usize),
@@ -214,6 +328,8 @@ struct Reservation {
     asked_at: u64,
     /// When it came first in line.
     first: Option<Instant>,
+    /// When it began to hold other chats' new work: its lull wait ran out, or its window opened.
+    holding: Option<Instant>,
     opened: Option<Instant>,
     opened_at: Option<u64>,
     /// What kept the window closed, and for how long.
@@ -244,6 +360,8 @@ struct Span {
     key: String,
     conversation: String,
     label: String,
+    /// Background work its CLI keeps, rather than a call a reply runs.
+    background: bool,
     from: Instant,
     until: Option<Instant>,
 }
@@ -271,7 +389,13 @@ impl Broker {
         if let Some(history) = &history {
             hold::resume_saved(&history.with_file_name(FROZEN));
         }
-        let broker = Arc::new(Self {
+        let settings = history
+            .as_ref()
+            .and_then(|history| std::fs::read(history.with_file_name(SETTINGS)).ok())
+            .and_then(|bytes| serde_json::from_slice::<Settings>(&bytes).ok())
+            .and_then(Settings::valid)
+            .unwrap_or_default();
+        let broker = Arc::new_cyclic(|me| Self {
             state: Mutex::new(State::default()),
             version: watch::channel(0).0,
             emit,
@@ -279,6 +403,9 @@ impl Broker {
             background,
             history,
             release: std::sync::OnceLock::new(),
+            settings: Mutex::new(settings),
+            read: Mutex::new(if cfg!(test) { || None } else { machine::read }),
+            me: me.clone(),
             jobs: jobs::Jobs::default(),
         });
         let weak = Arc::downgrade(&broker);
@@ -401,6 +528,53 @@ impl Broker {
         let _ = self.release.set(release);
     }
 
+    /// A reading of the computer.
+    fn read(&self) -> Option<machine::Reading> {
+        (*self.read.lock().unwrap_or_else(|e| e.into_inner()))()
+    }
+
+    /// Reads the computer with `read`, as a test gives it.
+    #[cfg(test)]
+    pub fn read_with(&self, read: fn() -> Option<machine::Reading>) {
+        *self.read.lock().unwrap_or_else(|e| e.into_inner()) = read;
+    }
+
+    /// This computer's settings of reservations.
+    pub fn settings(&self) -> Settings {
+        *self.settings.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Changes this computer's settings, which apply at once: a reservation waiting for a lull
+    /// may hold other chats' work from now on, or wait longer.
+    pub fn set_settings(&self, settings: Settings) -> Result<Settings, String> {
+        let settings = settings
+            .valid()
+            .ok_or("The wait for a lull is a number of minutes, zero or more.")?;
+        if let Some(history) = &self.history {
+            let path = history.with_file_name(SETTINGS);
+            let folder = path
+                .parent()
+                .ok_or("Cannot save the reservations setting")?;
+            std::fs::create_dir_all(folder).map_err(|_| "Cannot save the reservations setting")?;
+            let mut file = tempfile::NamedTempFile::new_in(folder)
+                .map_err(|_| "Cannot save the reservations setting")?;
+            use std::io::Write;
+            file.write_all(&serde_json::to_vec(&settings).unwrap_or_default())
+                .and_then(|_| file.as_file().sync_all())
+                .map_err(|_| "Cannot save the reservations setting")?;
+            file.persist(path)
+                .map_err(|_| "Cannot finish saving the reservations setting")?;
+        }
+        *self.settings.lock().unwrap_or_else(|e| e.into_inner()) = settings;
+        let snapshot = {
+            let mut state = self.lock();
+            self.settled(&mut state, Instant::now());
+            self.view(&state)
+        };
+        self.publish(snapshot);
+        Ok(settings)
+    }
+
     /// A reply of `conversation` reads its messages, shown with `sink` when it has one.
     pub fn attach(&self, run_id: &str, conversation: &str, sink: Option<Sink>) {
         self.lock().readers.insert(
@@ -460,6 +634,7 @@ impl Broker {
         if !(tool.runs_command() || tool.is_monitor() || tool.connected().is_some()) {
             return;
         }
+        let mut regrant = false;
         let update = {
             let mut state = self.lock();
             if state.refused.contains(&tool.id) {
@@ -486,22 +661,83 @@ impl Broker {
                     Some((server, _)) => light::remote_server(server),
                     None => !command.is_empty() && light::is_light(&command),
                 };
+                let build = !light && builds::is_build(&command);
                 run.calls.insert(
                     tool.id.clone(),
                     Call {
                         label: label_of(tool),
                         light,
+                        build,
                         read,
                     },
                 );
-            } else if run.calls.remove(&tool.id).is_none() {
-                return;
+            } else {
+                match run.calls.remove(&tool.id) {
+                    None => return,
+                    Some(call) => regrant = call.build,
+                }
             }
+            regrant &= !state.slots.is_empty();
             self.settled(&mut state, Instant::now())
         };
         if let Some(snapshot) = update {
             self.publish(snapshot);
         }
+        // A build that ended leaves its slot to the next in line.
+        if regrant {
+            self.regrant();
+        }
+    }
+
+    /// Looks at the builds running now and keeps slots for those waiting that fit.
+    fn regrant(&self) {
+        let Some(broker) = self.me.upgrade() else {
+            return;
+        };
+        tauri::async_runtime::spawn(async move {
+            let read = *broker.read.lock().unwrap_or_else(|e| e.into_inner());
+            let reading = tauri::async_runtime::spawn_blocking(read)
+                .await
+                .ok()
+                .flatten();
+            let members = reading.as_ref().map(|_| broker.jobs.members());
+            let owners = reading
+                .as_ref()
+                .zip(members.as_ref())
+                .map(|(r, m)| machine::Owners::new(r, m, std::process::id()));
+            let snapshot = {
+                let mut state = broker.lock();
+                broker
+                    .grant(
+                        &mut state,
+                        reading.as_ref(),
+                        owners.as_ref(),
+                        Instant::now(),
+                    )
+                    .then(|| broker.view(&state))
+            };
+            if let Some(snapshot) = snapshot {
+                broker.publish(snapshot);
+            }
+        });
+    }
+
+    /// Keeps slots for the builds waiting that fit beside the builds running now, as `reading`
+    /// shows them with their `owners`. Returns whether anything changed.
+    fn grant(
+        &self,
+        state: &mut State,
+        reading: Option<&machine::Reading>,
+        owners: Option<&machine::Owners>,
+        now: Instant,
+    ) -> bool {
+        if state.slots.is_empty() {
+            return false;
+        }
+        let running = running_builds(state, reading.zip(owners), None);
+        let free = reading.map(machine::Reading::free);
+        let cores = reading.map_or_else(cores, |r| r.cores);
+        Self::grant_slots(state, running.len(), free, cores, now)
     }
 
     /// The reply `run_id` ended: its commands with it, and a reservation it held.
@@ -516,6 +752,8 @@ impl Broker {
                 .iter()
                 .position(|r| r.run_id == run_id)
                 .map(|index| self.end(&mut state, index, now, "reply"));
+            // The names it held or waited for go with the reply that took them.
+            let turns = self.end_turns(&mut state, |t| t.run_id == run_id, now, "reply");
             // Unless another reply of its chat took over, what the chat was asked ends with it.
             let asks_ended = match ended {
                 Some(conversation)
@@ -529,12 +767,15 @@ impl Broker {
             let snapshot = match (&report, changed) {
                 (_, Some(snapshot)) => Some(snapshot),
                 (Some(_), None) => Some(self.view(&state)),
-                (None, None) if asks_ended => Some(self.view(&state)),
+                (None, None) if asks_ended || !turns.is_empty() => Some(self.view(&state)),
                 (None, None) => None,
             };
-            (report, snapshot)
+            (
+                report.into_iter().chain(turns).collect::<Vec<_>>(),
+                snapshot,
+            )
         };
-        if let Some(report) = &report {
+        for report in &report {
             self.keep(report);
         }
         if let Some(snapshot) = snapshot {
@@ -562,6 +803,10 @@ impl Broker {
         let mut ended = false;
         // What it stopped without reserving afterwards reports nowhere.
         state.prepared.retain(|s| s.by != conversation);
+        // A build it waited a slot for will not start.
+        let waiting = state.slots.len();
+        state.slots.retain(|w| w.conversation != conversation);
+        ended |= state.slots.len() != waiting;
         for reservation in state.queue.iter_mut() {
             for ask in reservation
                 .asks
@@ -1003,7 +1248,25 @@ impl Broker {
             return None;
         }
         let items = items(state, &(self.background)());
-        settle(state, &items, now).then(|| self.view(state))
+        settle(state, &items, now, self.settings().lull()).then(|| self.view(state))
+    }
+
+    /// Starts looking at the computer every `TICK` while a reservation or a build slot needs it.
+    fn look(&self) {
+        let Some(broker) = self.me.upgrade() else {
+            return;
+        };
+        if std::mem::replace(&mut self.lock().ticking, true) {
+            return;
+        }
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::time::sleep(TICK).await;
+                if !broker.tick().await {
+                    break;
+                }
+            }
+        });
     }
 
     /// Reserves the computer for `conversation`'s reply `run_id`, or brings up to date the
@@ -1015,9 +1278,17 @@ impl Broker {
         purpose: &str,
         minutes: Option<f64>,
     ) -> String {
-        let (text, snapshot, tick) = {
+        let (text, snapshot) = {
             let mut state = self.lock();
             let now = Instant::now();
+            // The same reply reserving again soon after it released: one series, two waits.
+            let again = state
+                .released
+                .get(conversation)
+                .filter(|(run, at)| {
+                    run == run_id && now.saturating_duration_since(*at) < Duration::from_secs(600)
+                })
+                .map(|(_, at)| now.saturating_duration_since(*at));
             if let Some(existing) = state
                 .queue
                 .iter_mut()
@@ -1046,6 +1317,7 @@ impl Broker {
                     asked: now,
                     asked_at: epoch_ms(),
                     first: None,
+                    holding: None,
                     opened: None,
                     opened_at: None,
                     blockers: vec![],
@@ -1059,39 +1331,39 @@ impl Broker {
                 });
             }
             let items = items(&state, &(self.background)());
-            settle(&mut state, &items, now);
-            let text = self.standing(&state, conversation, &items);
-            let tick = !std::mem::replace(&mut state.ticking, true);
-            (text, self.view(&state), tick)
+            settle(&mut state, &items, now, self.settings().lull());
+            let mut text = self.standing(&state, conversation, &items);
+            if let Some(since) = again {
+                text.push_str(&format!(
+                    "\nThis reply released the computer {} ago: keep one reservation for a whole series of measured runs, and release it after the last, so the wait for other chats' work is paid once.",
+                    duration(since)
+                ));
+            }
+            (text, self.view(&state))
         };
         self.publish(snapshot);
-        if tick {
-            let broker = self.clone();
-            tauri::async_runtime::spawn(async move {
-                loop {
-                    tokio::time::sleep(TICK).await;
-                    if !broker.tick().await {
-                        break;
-                    }
-                }
-            });
-        }
+        self.look();
         text
     }
 
     /// Looks at the computer: settles the first reservation and measures an open window.
     /// Returns whether any reservation is left to look after.
     async fn tick(self: &Arc<Self>) -> bool {
-        let measuring = {
+        let idle = |state: &State| state.queue.is_empty() && state.slots.is_empty();
+        let (measuring, slots) = {
             let mut state = self.lock();
-            if state.queue.is_empty() {
+            if idle(&state) {
                 state.ticking = false;
                 return false;
             }
-            state.queue[0].opened.is_some()
+            (
+                state.queue.first().is_some_and(|r| r.opened.is_some()),
+                !state.slots.is_empty(),
+            )
         };
-        let reading = if measuring {
-            tauri::async_runtime::spawn_blocking(machine::read)
+        let reading = if measuring || slots {
+            let read = *self.read.lock().unwrap_or_else(|e| e.into_inner());
+            tauri::async_runtime::spawn_blocking(read)
                 .await
                 .ok()
                 .flatten()
@@ -1099,25 +1371,32 @@ impl Broker {
             None
         };
         let members = reading.as_ref().map(|_| self.jobs.members());
-        let inside_wsl = reading.as_ref().map(|_| self.jobs.wsl());
+        let inside_wsl = (measuring && reading.is_some()).then(|| self.jobs.wsl());
         let update = {
             let mut state = self.lock();
-            if state.queue.is_empty() {
+            if idle(&state) {
                 state.ticking = false;
                 return false;
             }
-            if let (Some(reading), Some(members), Some(inside_wsl)) = (reading, members, inside_wsl)
-            {
-                let holder = state.queue[0].conversation.clone();
-                if state.queue[0].opened.is_some() {
-                    let owners = machine::Owners::new(&reading, &members, std::process::id());
+            let now = Instant::now();
+            let owners = reading
+                .as_ref()
+                .zip(members.as_ref())
+                .map(|(r, m)| machine::Owners::new(r, m, std::process::id()));
+            // Builds waiting for a slot, beside what builds now.
+            let changed = self.grant(&mut state, reading.as_ref(), owners.as_ref(), now);
+            if let (Some(reading), Some(owners), Some(inside_wsl)) = (reading, owners, inside_wsl) {
+                if let Some(first) = state.queue.first_mut().filter(|r| r.opened.is_some()) {
+                    let holder = first.conversation.clone();
                     let inside_wsl = inside_wsl.iter().any(|j| j.conversation == holder);
-                    state.queue[0]
-                        .measure
-                        .add(reading, &owners, &holder, inside_wsl);
+                    first.measure.add(reading, &owners, &holder, inside_wsl);
                 }
             }
-            self.settled(&mut state, Instant::now())
+            match self.settled(&mut state, now) {
+                Some(snapshot) => Some(snapshot),
+                None if changed => Some(self.view(&state)),
+                None => None,
+            }
         };
         if let Some(snapshot) = update {
             self.publish(snapshot);
@@ -1133,13 +1412,222 @@ impl Broker {
                 .queue
                 .iter()
                 .position(|r| r.conversation == conversation)?;
+            let run_id = state.queue[index].run_id.clone();
             let report = self.end(&mut state, index, Instant::now(), "release");
+            state
+                .released
+                .insert(conversation.into(), (run_id, Instant::now()));
             self.settled(&mut state, Instant::now());
             (report, self.view(&state))
         };
         self.keep(&report);
         self.publish(snapshot);
         Some(report)
+    }
+
+    /// Takes a turn at the named reservation `key` (`named`) for `conversation`'s reply
+    /// `run_id`, or brings up to date the turn it has. The answer says where it stands.
+    pub fn take_turn(
+        &self,
+        run_id: &str,
+        conversation: &str,
+        key: &str,
+        name: &str,
+        landing: bool,
+        purpose: &str,
+    ) -> String {
+        let (text, snapshot) = {
+            let mut state = self.lock();
+            let now = Instant::now();
+            match state
+                .turns
+                .iter_mut()
+                .find(|t| t.conversation == conversation && t.key == key)
+            {
+                Some(turn) => {
+                    turn.purpose = purpose.trim().into();
+                    turn.run_id = run_id.into();
+                }
+                None => {
+                    state.next += 1;
+                    let id = format!("turn-{}", state.next);
+                    state.turns.push(Turn {
+                        id,
+                        key: key.into(),
+                        name: name.trim().into(),
+                        landing,
+                        conversation: conversation.into(),
+                        run_id: run_id.into(),
+                        purpose: purpose.trim().into(),
+                        asked: now,
+                        asked_at: epoch_ms(),
+                        granted: None,
+                        granted_at: None,
+                    });
+                }
+            }
+            grant_turns(&mut state.turns, now);
+            (
+                self.turn_standing(&state, conversation, key),
+                self.view(&state),
+            )
+        };
+        self.publish(snapshot);
+        text
+    }
+
+    /// Where `conversation`'s turn at `key` stands.
+    fn turn_standing(&self, state: &State, conversation: &str, key: &str) -> String {
+        let Some(mine) = state
+            .turns
+            .iter()
+            .find(|t| t.conversation == conversation && t.key == key)
+        else {
+            return "This chat has no turn at that name.".into();
+        };
+        let release = release_hint(mine);
+        if mine.granted.is_some() {
+            return format!(
+                "This chat holds {} now: another chat that asks for it waits until you release it with pc_release ({release}), or until this reply ends. Release it as soon as you are done with it.",
+                mine.name
+            );
+        }
+        let same: Vec<&Turn> = state.turns.iter().filter(|t| t.key == key).collect();
+        let holder = same[0];
+        let before = same
+            .iter()
+            .position(|t| t.conversation == conversation)
+            .unwrap_or_default()
+            .saturating_sub(1);
+        format!(
+            "Asked for {}: {} holds it ({}) since {} ago{}. Call pc_wait: it returns once your turn comes. Meanwhile keep working on what does not need it.",
+            mine.name,
+            self.named(&holder.conversation),
+            holder.purpose,
+            duration(holder.granted.map_or(Duration::ZERO, |at| at.elapsed())),
+            if before > 0 {
+                format!(", and {} before you", plural(before, "chat waits", "chats wait"))
+            } else {
+                String::new()
+            }
+        )
+    }
+
+    /// Ends `conversation`'s turns at `key`, or at every name when `key` is None, and reports
+    /// on each: the text for its agent, or None when it held none.
+    pub fn release_turns(&self, conversation: &str, key: Option<&str>) -> Option<String> {
+        let (reports, snapshot) = {
+            let mut state = self.lock();
+            let reports = self.end_turns(
+                &mut state,
+                |t| t.conversation == conversation && key.is_none_or(|key| t.key == key),
+                Instant::now(),
+                "release",
+            );
+            if reports.is_empty() {
+                return None;
+            }
+            (reports, self.view(&state))
+        };
+        for report in &reports {
+            self.keep(report);
+        }
+        self.publish(snapshot);
+        Some(
+            reports
+                .iter()
+                .map(|r| r.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    /// Takes the turns `ended` picks out of line, gives their names to the next in line, and
+    /// reports on each.
+    fn end_turns(
+        &self,
+        state: &mut State,
+        ended: impl Fn(&Turn) -> bool,
+        now: Instant,
+        by: &str,
+    ) -> Vec<Report> {
+        let (gone, kept): (Vec<Turn>, Vec<Turn>) = std::mem::take(&mut state.turns)
+            .into_iter()
+            .partition(ended);
+        state.turns = kept;
+        grant_turns(&mut state.turns, now);
+        gone.iter()
+            .map(|turn| {
+                let next = state
+                    .turns
+                    .iter()
+                    .find(|t| t.key == turn.key && t.granted.is_some());
+                let waiting = state
+                    .turns
+                    .iter()
+                    .filter(|t| t.key == turn.key && t.granted.is_none())
+                    .count();
+                let waited = turn
+                    .granted
+                    .unwrap_or(now)
+                    .saturating_duration_since(turn.asked);
+                let held = turn.granted.map(|at| now.saturating_duration_since(at));
+                let text = match held {
+                    Some(held) => format!(
+                        "Released {} ({}){}: this chat held it {}{}. {}",
+                        turn.name,
+                        turn.purpose,
+                        if by == "reply" {
+                            " when the reply that took it ended"
+                        } else {
+                            ""
+                        },
+                        duration(held),
+                        if waited >= Duration::from_secs(1) {
+                            format!(", after waiting {} for its turn", duration(waited))
+                        } else {
+                            String::new()
+                        },
+                        match (next, waiting) {
+                            (None, _) => "Nobody waits for it.".to_string(),
+                            (Some(next), 0) => format!(
+                                "{} has it now.",
+                                capitalized(&self.named(&next.conversation))
+                            ),
+                            (Some(next), _) => format!(
+                                "{} has it now, and {} after it.",
+                                capitalized(&self.named(&next.conversation)),
+                                plural(waiting, "chat waits", "chats wait")
+                            ),
+                        }
+                    ),
+                    None => format!(
+                        "Left the line for {} ({}) after {}, before its turn came.",
+                        turn.name,
+                        turn.purpose,
+                        duration(waited)
+                    ),
+                };
+                Report {
+                    text,
+                    record: json!({
+                        "kind": "turn",
+                        "id": turn.id,
+                        "conversationId": turn.conversation,
+                        "name": turn.name,
+                        "landing": turn.landing,
+                        "purpose": turn.purpose,
+                        "askedAt": turn.asked_at,
+                        "grantedAt": turn.granted_at,
+                        "endedAt": epoch_ms(),
+                        "endedBy": by,
+                        "waitedMs": ms(waited),
+                        "heldMs": held.map(ms),
+                        "waiting": waiting + usize::from(next.is_some()),
+                    }),
+                }
+            })
+            .collect()
     }
 
     /// Takes reservation `index` out of line and reports on it.
@@ -1195,8 +1683,187 @@ impl Broker {
         call: Option<&str>,
         wait: &str,
     ) -> Option<String> {
-        let light = light::is_light(&light::own(command));
-        self.hold(conversation, light, Asked::Command, call, wait)
+        let own = light::own(command);
+        let light = light::is_light(&own);
+        if let Some(reason) = self.hold(conversation, light, Asked::Command, call, wait) {
+            return Some(reason);
+        }
+        if light || !builds::is_build(&own) {
+            return None;
+        }
+        self.slot(conversation, &own, call, wait)
+    }
+
+    /// Whether a build `conversation` wants to start waits for a slot (`builds`): the reason to
+    /// give, or None. A slot kept for the chat is its build's; otherwise builds take their turns
+    /// first come first served, and one starts while the builds running leave room for it.
+    fn slot(
+        &self,
+        conversation: &str,
+        command: &str,
+        call: Option<&str>,
+        wait: &str,
+    ) -> Option<String> {
+        {
+            let mut state = self.lock();
+            if let Some(index) = state
+                .slots
+                .iter()
+                .position(|w| w.conversation == conversation && w.granted.is_some())
+            {
+                state.slots.remove(index);
+                state.last_build = Some(Instant::now());
+                let snapshot = self.view(&state);
+                drop(state);
+                self.publish(snapshot);
+                return None;
+            }
+        }
+        let reading = self.read();
+        let members = reading.as_ref().map(|_| self.jobs.members());
+        let owners = reading
+            .as_ref()
+            .zip(members.as_ref())
+            .map(|(r, m)| machine::Owners::new(r, m, std::process::id()));
+        let (reason, snapshot) = {
+            let mut state = self.lock();
+            let now = Instant::now();
+            let running = running_builds(&state, reading.as_ref().zip(owners.as_ref()), call);
+            let granted = state.slots.iter().filter(|w| w.granted.is_some()).count();
+            let ahead = state
+                .slots
+                .iter()
+                .take_while(|w| w.conversation != conversation)
+                .count();
+            let cores = reading.as_ref().map_or_else(cores, |r| r.cores);
+            let free = reading.as_ref().map(machine::Reading::free);
+            let since = state.last_build.map(|at| now.saturating_duration_since(at));
+            let taken = running.len() + granted;
+            if ahead == 0 && builds::admits(taken, free, cores, since) {
+                let waited = state.slots.len();
+                state.slots.retain(|w| w.conversation != conversation);
+                state.last_build = Some(now);
+                let snapshot = (state.slots.len() != waited).then(|| self.view(&state));
+                drop(state);
+                if let Some(snapshot) = snapshot {
+                    self.publish(snapshot);
+                }
+                return None;
+            }
+            // It never ran, though Claude Code reported it as started.
+            if let Some(call) = call {
+                state.refused.insert(call.into());
+                for run in state.runs.values_mut() {
+                    run.calls.remove(call);
+                }
+            }
+            if !state.slots.iter().any(|w| w.conversation == conversation) {
+                state.slots.push(SlotWait {
+                    conversation: conversation.into(),
+                    label: command_label(command),
+                    since: now,
+                    since_at: epoch_ms(),
+                    granted: None,
+                });
+            }
+            let why = if ahead > 0 {
+                format!(
+                    "{} {} before it",
+                    plural(ahead, "chat's build waits", "chats' builds wait"),
+                    if ahead == 1 {
+                        "its turn"
+                    } else {
+                        "their turns"
+                    }
+                )
+            } else if taken >= builds::slots(cores) {
+                format!(
+                    "this computer runs {} at once (one for each eight cores)",
+                    plural(builds::slots(cores), "build", "builds")
+                )
+            } else if free.is_some_and(|free| free < builds::BESIDE_FREE) {
+                format!(
+                    "a build beside them needs {} of free memory (commit) and {} is free",
+                    machine::bytes(builds::BESIDE_FREE),
+                    machine::bytes(free.unwrap_or_default())
+                )
+            } else {
+                format!(
+                    "the last build started {} ago and is still taking its memory",
+                    duration(since.unwrap_or_default())
+                )
+            };
+            let list = running
+                .iter()
+                .map(|build| match &build.conversation {
+                    Some(chat) => format!("{}: {}", self.chat(chat), build.label),
+                    None => build.label.clone(),
+                })
+                .collect::<Vec<_>>();
+            (
+                format!(
+                    "This build did not run: {} on this computer now{}, and {why}. Call {wait}, which returns once a build slot is free for this chat, then run the same command again. Meanwhile keep working on what does not need the build.",
+                    match taken {
+                        0 => "no build runs".to_string(),
+                        _ => plural(taken, "build runs", "builds run"),
+                    },
+                    if list.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" ({})", list.join("; "))
+                    }
+                ),
+                self.view(&state),
+            )
+        };
+        self.publish(snapshot);
+        self.look();
+        Some(reason)
+    }
+
+    /// Keeps a slot for the first builds in line that fit beside what runs now, one at a time
+    /// beside other builds. A slot its build did not take in time goes to the next. Returns
+    /// whether anything changed.
+    fn grant_slots(
+        state: &mut State,
+        running: usize,
+        free: Option<u64>,
+        cores: u32,
+        now: Instant,
+    ) -> bool {
+        let waiting = state.slots.len();
+        state.slots.retain(|w| {
+            w.granted
+                .is_none_or(|at| now.saturating_duration_since(at) < GRANT)
+        });
+        let mut changed = state.slots.len() != waiting;
+        let mut taken = running + state.slots.iter().filter(|w| w.granted.is_some()).count();
+        // While a measurement holds the computer, only its own chat may build.
+        let holder = state
+            .queue
+            .first()
+            .filter(|r| r.holding.is_some())
+            .map(|r| r.conversation.clone());
+        for index in 0..state.slots.len() {
+            if state.slots[index].granted.is_some() {
+                continue;
+            }
+            if holder
+                .as_ref()
+                .is_some_and(|holder| *holder != state.slots[index].conversation)
+            {
+                break;
+            }
+            let since = state.last_build.map(|at| now.saturating_duration_since(at));
+            if !builds::admits(taken, free, cores, since) {
+                break;
+            }
+            state.slots[index].granted = Some(now);
+            state.last_build = Some(now);
+            taken += 1;
+            changed = true;
+        }
+        changed
     }
 
     /// Whether a call of the MCP server `server`'s tool that `conversation` wants to make must
@@ -1224,6 +1891,8 @@ impl Broker {
         let (reason, snapshot) = {
             let mut state = self.lock();
             let first = state.queue.first_mut()?;
+            // While it waits for a lull, other chats work on.
+            first.holding?;
             // A chat asked to hand over finishes what it needs first.
             let handing = first
                 .asks
@@ -1276,29 +1945,50 @@ impl Broker {
 
     /// Waits for `conversation`'s turn: the window of its own reservation, or else for no other
     /// chat to hold the computer. The answer says how long it waited and what for.
+    /// `reason` hears what the chat waits for while it waits, for its reply's time report: the
+    /// computer (`held`), a build slot (`slot`) or its turn at a name (`turn`), and None once it
+    /// no longer waits.
     pub async fn wait(
         &self,
         conversation: &str,
         cancel: &CancellationToken,
+        reason: &(dyn Fn(Option<&'static str>) + Send + Sync),
     ) -> Result<String, String> {
         let mut changes = self.version.subscribe();
         let began = Instant::now();
-        let own = self
-            .lock()
-            .queue
-            .iter()
-            .any(|r| r.conversation == conversation);
+        let (own, slot, turns) = {
+            let state = self.lock();
+            (
+                state.queue.iter().any(|r| r.conversation == conversation),
+                state.slots.iter().any(|w| w.conversation == conversation),
+                state
+                    .turns
+                    .iter()
+                    .filter(|t| t.conversation == conversation && t.granted.is_none())
+                    .map(|t| t.key.clone())
+                    .collect::<Vec<_>>(),
+            )
+        };
         let mut guard = None;
+        let mut heard = None;
+        reason(None);
+        let hear = |now: Option<&'static str>, heard: &mut Option<&'static str>| {
+            if now != *heard {
+                reason(now);
+                *heard = now;
+            }
+        };
         enum Step {
             Opened(String),
             Done(String),
             Ended,
-            Wait(bool),
+            /// What it waits for, and whether its wait for the computer just began.
+            Wait(&'static str, bool),
         }
-        loop {
+        let result = loop {
             // A message ends the wait: the agent reads it, and waits again when it must.
             if let Some(messages) = self.deliver(conversation) {
-                return Ok(format!("{messages}\n\n{}", self.wait_status(conversation)));
+                break Ok(format!("{messages}\n\n{}", self.wait_status(conversation)));
             }
             let step = {
                 let mut state = self.lock();
@@ -1312,6 +2002,10 @@ impl Broker {
                         })
                     })
                     .map(|first| (first.conversation.clone(), first.purpose.clone()));
+                let held = state
+                    .queue
+                    .first()
+                    .is_some_and(|r| r.conversation != conversation && r.holding.is_some());
                 if let Some((holder, purpose)) = asked {
                     Step::Done(format!(
                         "{} asked this chat to hand over what it holds for its measurement ({purpose}). Your commands run again until you do: finish what you need, then call pc_release.",
@@ -1327,24 +2021,10 @@ impl Broker {
                         Some(0) if state.queue[0].opened.is_some() => {
                             Step::Opened(self.opened_text(&state.queue[0], began.elapsed()))
                         }
-                        Some(_) => Step::Wait(false),
+                        Some(_) => Step::Wait("held", false),
                     }
-                } else {
-                    let held = state
-                        .queue
-                        .first()
-                        .is_some_and(|r| r.conversation != conversation);
-                    if !held {
-                        Step::Done(if guard.is_some() {
-                            format!(
-                                "The computer is free again after {}: run your command or tool call now.",
-                                duration(began.elapsed())
-                            )
-                        } else {
-                            "The computer is not reserved: run your command or tool call now."
-                                .into()
-                        })
-                    } else if guard.is_none() {
+                } else if held {
+                    if guard.is_none() {
                         state.next += 1;
                         let id = state.next;
                         state.waits.push(Wait {
@@ -1354,36 +2034,87 @@ impl Broker {
                             until: None,
                         });
                         guard = Some(WaitGuard { broker: self, id });
-                        Step::Wait(true)
+                        Step::Wait("held", true)
                     } else {
-                        Step::Wait(false)
+                        Step::Wait("held", false)
                     }
+                } else if let Some(wait) =
+                    state.slots.iter().find(|w| w.conversation == conversation)
+                {
+                    match wait.granted {
+                        Some(at) => Step::Done(format!(
+                            "A build slot is free for this chat{}: run your build now. The slot waits {} for it.",
+                            if slot {
+                                format!(" after {}", duration(began.elapsed()))
+                            } else {
+                                String::new()
+                            },
+                            duration(GRANT.saturating_sub(at.elapsed()))
+                        )),
+                        None => Step::Wait("slot", false),
+                    }
+                } else if state
+                    .turns
+                    .iter()
+                    .any(|t| t.conversation == conversation && t.granted.is_none())
+                {
+                    Step::Wait("turn", false)
+                } else {
+                    let came: Vec<&str> = state
+                        .turns
+                        .iter()
+                        .filter(|t| t.conversation == conversation && turns.contains(&t.key))
+                        .map(|t| t.name.as_str())
+                        .collect();
+                    Step::Done(if !came.is_empty() {
+                        format!(
+                            "Your turn came after {}: this chat holds {} now. Release it with pc_release as soon as you are done.",
+                            duration(began.elapsed()),
+                            came.join(" and ")
+                        )
+                    } else if guard.is_some() {
+                        format!(
+                            "The computer is free again after {}: run your command or tool call now.",
+                            duration(began.elapsed())
+                        )
+                    } else if slot || !turns.is_empty() {
+                        "This chat no longer waits for a build slot or a turn.".into()
+                    } else if !state.queue.is_empty() {
+                        "A measurement waits for a moment when no other chat runs heavy work, and holds nothing yet: run your command or tool call now.".into()
+                    } else {
+                        "The computer is not reserved: run your command or tool call now.".into()
+                    })
                 }
             };
+            // A wait for the computer ends once nothing holds the chat for it.
+            if !matches!(step, Step::Wait("held", _)) {
+                drop(guard.take());
+            }
             match step {
                 Step::Opened(text) => {
                     let left = self.left_running().await;
-                    return Ok(format!("{text}{}", self.left_text(conversation, &left)));
+                    break Ok(format!("{text}{}", self.left_text(conversation, &left)));
                 }
-                Step::Done(text) => {
-                    drop(guard.take());
-                    return Ok(text);
-                }
+                Step::Done(text) => break Ok(text),
                 Step::Ended => {
-                    return Err("This chat's reservation ended before its window opened.".into())
+                    break Err("This chat's reservation ended before its window opened.".into())
                 }
-                // The window shows how many chats wait.
-                Step::Wait(true) => {
-                    let snapshot = self.view(&self.lock());
-                    (self.emit)(&snapshot);
+                Step::Wait(what, fresh) => {
+                    hear(Some(what), &mut heard);
+                    // The window shows how many chats wait.
+                    if fresh {
+                        let snapshot = self.view(&self.lock());
+                        (self.emit)(&snapshot);
+                    }
                 }
-                Step::Wait(false) => {}
             }
             tokio::select! {
-                changed = changes.changed() => if changed.is_err() { return Err("Agent Studio stopped following reservations.".into()) },
-                _ = cancel.cancelled() => return Err("Stopped while waiting for the computer.".into()),
+                changed = changes.changed() => if changed.is_err() { break Err("Agent Studio stopped following reservations.".into()) },
+                _ = cancel.cancelled() => break Err("Stopped while waiting for the computer.".into()),
             }
-        }
+        };
+        hear(None, &mut heard);
+        result
     }
 
     /// Where `conversation` stands after reading its messages in `pc_wait`.
@@ -1399,7 +2130,6 @@ impl Broker {
             }
             Some(_) => "Your window has not opened yet: call pc_wait again to wait for it.",
             None => match state.queue.first() {
-                None => "The computer is not reserved: run your command or tool call now.",
                 Some(first)
                     if first
                         .asks
@@ -1408,16 +2138,31 @@ impl Broker {
                 {
                     "Your commands and tool calls run again until you hand over with pc_release."
                 }
-                Some(_) => {
+                Some(first) if first.holding.is_some() => {
                     "The computer is still reserved: call pc_wait again before running a command or an MCP tool call."
                 }
+                _ if state
+                    .slots
+                    .iter()
+                    .any(|w| w.conversation == conversation && w.granted.is_none()) =>
+                {
+                    "Your build still waits for a slot: call pc_wait again before running it."
+                }
+                _ if state
+                    .turns
+                    .iter()
+                    .any(|t| t.conversation == conversation && t.granted.is_none()) =>
+                {
+                    "Your turn has not come yet: call pc_wait again to wait for it."
+                }
+                _ => "The computer is not reserved: run your command or tool call now.",
             },
         }
     }
 
     fn opened_text(&self, reservation: &Reservation, waited: Duration) -> String {
         let mut text = format!(
-            "The window is open: no other chat runs a command or an MCP tool call now, and their new ones wait until you call pc_release. Measure now, then release at once and analyze afterwards. You waited {}.",
+            "The window is open: no other chat runs a command or an MCP tool call now, and their new ones wait until you call pc_release. Run every measured run of the series now, then release at once, before reading logs or writing up: other chats wait until you do. You waited {}.",
             duration(waited)
         );
         let blockers = summed(
@@ -1444,7 +2189,31 @@ impl Broker {
             .filter(|w| w.until.is_none())
             .map(|w| w.conversation.as_str())
             .collect();
+        let lull = self.settings().lull();
         Snapshot {
+            turns: state
+                .turns
+                .iter()
+                .map(|t| TurnView {
+                    id: t.id.clone(),
+                    name: t.name.clone(),
+                    landing: t.landing,
+                    conversation_id: t.conversation.clone(),
+                    purpose: t.purpose.clone(),
+                    asked_at: t.asked_at,
+                    granted_at: t.granted_at,
+                })
+                .collect(),
+            slots: state
+                .slots
+                .iter()
+                .map(|w| SlotView {
+                    conversation_id: w.conversation.clone(),
+                    label: w.label.clone(),
+                    since: w.since_at,
+                    granted: w.granted.is_some(),
+                })
+                .collect(),
             reservations: state
                 .queue
                 .iter()
@@ -1453,12 +2222,19 @@ impl Broker {
                     id: r.id.clone(),
                     conversation_id: r.conversation.clone(),
                     purpose: r.purpose.clone(),
-                    phase: match (index, r.opened) {
-                        (0, Some(_)) => "open",
-                        (0, None) => "draining",
+                    phase: match (index, r.opened, r.holding) {
+                        (0, Some(_), _) => "open",
+                        (0, None, Some(_)) => "draining",
+                        (0, None, None) => "lull",
                         _ => "queued",
                     },
                     asked_at: r.asked_at,
+                    holds_at: (index == 0 && r.opened.is_none() && r.holding.is_none()).then(
+                        || {
+                            let first = r.first.unwrap_or(r.asked);
+                            r.asked_at + ms(first.saturating_duration_since(r.asked) + lull)
+                        },
+                    ),
                     opened_at: r.opened_at,
                     minutes: r.minutes,
                     waiting_for: if index == 0 && r.opened.is_none() {
@@ -1508,6 +2284,11 @@ impl Broker {
             )
         } else if mine.opened.is_some() {
             "Reserved, and the window is open: no other chat runs a command or an MCP tool call now. Measure, then call pc_release.".into()
+        } else if mine.holding.is_none() {
+            format!(
+                "Reserved: your window opens at the first moment no other chat runs a command, an MCP tool call or background work its reply waits on. Until then other chats work on, and if no such moment comes within {}, their new commands and MCP tool calls wait from then on, except light ones such as git status. Call pc_wait: it returns once the window opens.",
+                duration(self.settings().lull())
+            )
         } else {
             "Reserved: from now on other chats' commands and MCP tool calls wait, except light commands such as git status. Call pc_wait: it returns once the work below has finished and the window opens.".into()
         };
@@ -1545,15 +2326,30 @@ impl Broker {
         let mut text = {
             let state = self.lock();
             let items = items(&state, &(self.background)());
+            let lull_left = |first: &Reservation| {
+                let first_at = first.first.unwrap_or(first.asked);
+                duration(self.settings().lull().saturating_sub(first_at.elapsed()))
+            };
             let mut text = match state.queue.first() {
                 None => "The computer is not reserved.".to_string(),
                 Some(first) if first.conversation == conversation => {
                     if first.opened.is_some() {
                         "This chat holds the computer and its window is open.".into()
+                    } else if first.holding.is_none() {
+                        format!(
+                            "This chat holds the computer and waits for a lull: its window opens at the first moment no other chat runs the work listed below, and other chats' new work waits in {} if none comes. Call pc_wait.",
+                            lull_left(first)
+                        )
                     } else {
                         "This chat holds the computer; its window opens once the work listed below finishes. Call pc_wait.".into()
                     }
                 }
+                Some(first) if first.holding.is_none() => format!(
+                    "{} reserved the computer ({}) and waits for a moment when no other chat runs heavy work. Other chats' commands and MCP tool calls still run; in {} without such a moment, their new ones wait until its measurement ends.",
+                    capitalized(&self.named(&first.conversation)),
+                    first.purpose,
+                    lull_left(first)
+                ),
                 Some(first) => format!(
                     "{} holds the computer ({}); {}. Other chats' commands and MCP tool calls wait until it ends: call pc_wait before running one.",
                     capitalized(&self.named(&first.conversation)),
@@ -1611,6 +2407,43 @@ impl Broker {
                     self.named(&message.to)
                 ));
             }
+            text.push_str(&self.turns_text(&state, conversation));
+            let builds = running_builds(&state, None, None);
+            if !builds.is_empty() || !state.slots.is_empty() {
+                text.push_str(&format!(
+                    "\nBuilds of chats now ({} at once here, one for each eight cores, while memory lasts):",
+                    plural(builds::slots(cores()), "build runs", "builds run")
+                ));
+                for build in &builds {
+                    text.push_str(&format!(
+                        "\n- {}: {}",
+                        build
+                            .conversation
+                            .as_deref()
+                            .map(|c| self.named(c))
+                            .unwrap_or_default(),
+                        build.label
+                    ));
+                }
+                for (index, wait) in state.slots.iter().enumerate() {
+                    let who = if wait.conversation == conversation {
+                        "this chat".to_string()
+                    } else {
+                        self.named(&wait.conversation)
+                    };
+                    text.push_str(&if wait.granted.is_some() {
+                        format!("\n- A slot is kept for {who}'s build {}", wait.label)
+                    } else {
+                        format!(
+                            "\n- {} waits for a slot ({} in line, for {}): {}",
+                            capitalized(&who),
+                            index + 1,
+                            duration(wait.since.elapsed()),
+                            wait.label
+                        )
+                    });
+                }
+            }
             let others: Vec<&Item> = items
                 .iter()
                 .filter(|i| i.conversation != conversation)
@@ -1640,6 +2473,48 @@ impl Broker {
             text.push_str(&self.left_text(conversation, &now.left));
             text.push('\n');
             text.push_str(&now.text(|conversation| self.chat(conversation)));
+        }
+        text
+    }
+
+    /// The named reservations, each with its holder and the chats waiting for it, as text for
+    /// `conversation`'s agent. Empty when there are none.
+    fn turns_text(&self, state: &State, conversation: &str) -> String {
+        let mut keys: Vec<&str> = vec![];
+        for turn in &state.turns {
+            if !keys.contains(&turn.key.as_str()) {
+                keys.push(&turn.key);
+            }
+        }
+        let mut text = String::new();
+        for key in keys {
+            let same: Vec<&Turn> = state.turns.iter().filter(|t| t.key == key).collect();
+            let who = |turn: &Turn| {
+                if turn.conversation == conversation {
+                    "this chat".to_string()
+                } else {
+                    self.named(&turn.conversation)
+                }
+            };
+            let holder = same[0];
+            text.push_str(&format!(
+                "\nNamed reservation, {}: held by {} ({}) for {}",
+                holder.name,
+                who(holder),
+                holder.purpose,
+                duration(holder.granted.map_or(Duration::ZERO, |at| at.elapsed()))
+            ));
+            if same.len() > 1 {
+                text.push_str(&format!(
+                    "; waiting: {}",
+                    same[1..]
+                        .iter()
+                        .map(|t| format!("{} ({})", who(t), duration(t.asked.elapsed())))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            text.push('.');
         }
         text
     }
@@ -1773,10 +2648,19 @@ impl Broker {
                 ""
             }
         )];
+        let first = r.first.unwrap_or(r.asked);
         match (opened_after, window) {
             (Some(after), Some(window)) => lines.push(format!(
-                "The window opened {} after the reservation and stayed open {}.",
+                "The window opened {} after the reservation{} and stayed open {}.",
                 duration(after),
+                match (r.holding, r.opened) {
+                    (Some(holding), Some(opened)) if holding < opened => format!(
+                        " ({} waiting for a lull, then {} holding other chats' new work while theirs finished)",
+                        duration(holding.saturating_duration_since(first)),
+                        duration(opened.saturating_duration_since(holding))
+                    ),
+                    _ => ", at a moment no other chat ran heavy work".into(),
+                },
                 duration(window)
             )),
             _ => lines.push(format!(
@@ -1811,6 +2695,22 @@ impl Broker {
             if let Some(text) = r.measure.text(|conversation| self.chat(conversation)) {
                 lines.push(text);
             }
+        }
+        // Whether the measurement ran beside other heavy work, whoever ran it.
+        let beside = r.opened.map(|_| self.beside(r, now));
+        if let Some(beside) = &beside {
+            lines.push(if beside.is_empty() {
+                "Measurement: clean, no other heavy work ran while the window was open.".into()
+            } else {
+                format!(
+                    "Measurement: ran beside other heavy work, so its numbers may be off: {}. Tell the user, and offer to measure again.",
+                    beside
+                        .iter()
+                        .map(|(text, _)| text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            });
         }
         for ask in &r.asks {
             let after = |at: Instant| duration(at.saturating_duration_since(ask.asked));
@@ -1934,6 +2834,11 @@ impl Broker {
             "endedBy": by,
             "waitedMs": opened_after.map(ms),
             "windowMs": window.map(ms),
+            // How long it waited for a lull before it held other chats' new work, or before its
+            // window opened at one.
+            "lullMs": ms(r.holding.or(r.opened).unwrap_or(now).saturating_duration_since(first)),
+            "contaminated": beside.as_ref().map(|beside| !beside.is_empty()),
+            "ranBeside": beside.iter().flatten().map(|(_, record)| record.clone()).collect::<Vec<_>>(),
             "blockers": blockers.iter().map(|(conversation, label, time)| json!({"conversationId": conversation, "label": label, "ms": ms(*time)})).collect::<Vec<_>>(),
             "others": summed(&ran(&r.others), now).iter().map(|(conversation, label, time)| json!({"conversationId": conversation, "label": label, "ms": ms(*time)})).collect::<Vec<_>>(),
             "held": {
@@ -1962,6 +2867,63 @@ impl Broker {
             text: lines.join("\n"),
             record,
         }
+    }
+
+    /// Heavy work that ran beside a reservation's measurement, each as text and as a record:
+    /// other chats' commands and MCP tool calls that ran while its window was open, then what
+    /// the computer's readings show used it heavily (`machine::Window::beside`), whoever's it
+    /// was: a chat's programs, a Claude or Codex session outside Agent Studio, Agent Studio, the
+    /// system or the user's own.
+    fn beside(&self, r: &Reservation, now: Instant) -> Vec<(String, Value)> {
+        let calls: Vec<Span> = r
+            .others
+            .iter()
+            .filter(|s| !s.background && !s.key.starts_with("ask:"))
+            .filter(|s| !r.refused_calls.contains(&s.key))
+            .cloned()
+            .collect();
+        let mut chats = HashSet::new();
+        let mut list = vec![];
+        for (conversation, label, time) in summed(&calls, now) {
+            if time.is_zero() {
+                continue;
+            }
+            chats.insert(conversation.clone());
+            list.push((
+                format!(
+                    "{} ran {} for {}",
+                    self.chat(&conversation),
+                    label,
+                    duration(time)
+                ),
+                json!({"conversationId": conversation, "label": label, "ms": ms(time)}),
+            ));
+        }
+        for work in r.measure.beside() {
+            let whose = match &work.owner {
+                machine::Owner::Chat(chat) if chats.contains(chat) => continue,
+                machine::Owner::Chat(chat) => format!("processes of {}", self.chat(chat)),
+                machine::Owner::Yours => "programs of yours".into(),
+                owner => machine::owner_text(owner, &|c: &str| self.chat(c)),
+            };
+            list.push((
+                format!(
+                    "{whose} ({}) at {} of the CPU, {} at most, for {}",
+                    work.name,
+                    machine::percent(work.cpu_average),
+                    machine::percent(work.cpu_peak),
+                    duration(Duration::from_millis(work.ms))
+                ),
+                json!({
+                    "owner": machine::owner_key(&work.owner),
+                    "name": work.name,
+                    "ms": work.ms,
+                    "cpuAverage": work.cpu_average,
+                    "cpuPeak": work.cpu_peak,
+                }),
+            ));
+        }
+        list
     }
 
     /// Processes held, by chat and program, as text.
@@ -2042,6 +3004,94 @@ impl Drop for WaitGuard<'_> {
     }
 }
 
+/// Gives each name to the first chat in line for it. Returns whether any turn came.
+fn grant_turns(turns: &mut [Turn], now: Instant) -> bool {
+    let mut seen = HashSet::new();
+    let mut changed = false;
+    for turn in turns.iter_mut() {
+        if seen.insert(turn.key.clone()) && turn.granted.is_none() {
+            turn.granted = Some(now);
+            turn.granted_at = Some(epoch_ms());
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// How an agent names its turn to release it.
+fn release_hint(turn: &Turn) -> String {
+    if turn.landing {
+        "landing: true".into()
+    } else {
+        format!("name: \"{}\"", turn.name)
+    }
+}
+
+/// The builds running on the computer now, besides the call `except`: chats' calls that build,
+/// then from `machine`'s compilers the builds no such call stands for, such as a chat's build
+/// left in the background, a Claude app session's or one started by hand.
+fn running_builds(
+    state: &State,
+    machine: Option<(&machine::Reading, &machine::Owners)>,
+    except: Option<&str>,
+) -> Vec<Running> {
+    let mut running = vec![];
+    let mut tracked = HashSet::new();
+    for run in state.runs.values() {
+        for (id, call) in &run.calls {
+            if call.build && Some(id.as_str()) != except {
+                tracked.insert(run.conversation.clone());
+                running.push(Running {
+                    conversation: Some(run.conversation.clone()),
+                    label: call.label.clone(),
+                });
+            }
+        }
+    }
+    if let Some((reading, owners)) = machine {
+        for build in builds::compiling(reading, owners) {
+            let what = format!(
+                "{} with {}",
+                build.name,
+                plural(build.compilers, "compiler", "compilers")
+            );
+            match build.owner {
+                machine::Owner::Chat(chat) if tracked.contains(&chat) => {}
+                machine::Owner::Chat(chat) => running.push(Running {
+                    conversation: Some(chat),
+                    label: what,
+                }),
+                owner => {
+                    let whose = match &owner {
+                        machine::Owner::Yours => "a build of yours".to_string(),
+                        other => machine::owner_text(other, &|c: &str| c.to_string()),
+                    };
+                    running.push(Running {
+                        conversation: None,
+                        label: format!("{}: {what}", capitalized(&whose)),
+                    })
+                }
+            }
+        }
+    }
+    running
+}
+
+/// The computer's cores, where no reading tells them.
+fn cores() -> u32 {
+    std::thread::available_parallelism().map_or(1, |n| n.get() as u32)
+}
+
+/// A command as a label: its first line of its own, in backticks.
+fn command_label(command: &str) -> String {
+    command
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !light::hook_line(l))
+        .map(|line| format!("`{}`", shortened(line, 160)))
+        .unwrap_or_else(|| "a build".into())
+}
+
 /// The work other chats run now: their commands, and the background work their CLIs keep.
 fn items(state: &State, background: &[BackgroundWork]) -> Vec<Item> {
     let mut items: Vec<Item> = state
@@ -2082,7 +3132,7 @@ fn items(state: &State, background: &[BackgroundWork]) -> Vec<Item> {
 
 /// Brings the first reservation up to date with `items`: what keeps its window closed, whether
 /// it opens, and what else runs once it is open. Returns whether anything changed.
-fn settle(state: &mut State, items: &[Item], now: Instant) -> bool {
+fn settle(state: &mut State, items: &[Item], now: Instant, lull: Duration) -> bool {
     let Some(first) = state.queue.first_mut() else {
         return false;
     };
@@ -2129,6 +3179,15 @@ fn settle(state: &mut State, items: &[Item], now: Instant) -> bool {
         if blocking.is_empty() {
             first.opened = Some(now);
             first.opened_at = Some(epoch_ms());
+            // From its window on, other chats' new work waits.
+            first.holding.get_or_insert(now);
+            changed = true;
+        } else if first.holding.is_none()
+            && now.saturating_duration_since(first.first.unwrap_or(now)) >= lull
+        {
+            // No lull came in time: other chats' new work waits from now on, so the work
+            // running now is the last to finish before the window.
+            first.holding = Some(now);
             changed = true;
         }
     }
@@ -2162,6 +3221,7 @@ fn track(spans: &mut Vec<Span>, items: &[&Item], now: Instant) -> bool {
                 key: item.key.clone(),
                 conversation: item.conversation.clone(),
                 label: item.label.clone(),
+                background: item.background,
                 from: now,
                 until: None,
             });

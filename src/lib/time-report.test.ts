@@ -13,6 +13,7 @@ import {
   agentOutcome,
   hasTimeDetails,
   makeupText,
+  measurementsText,
   timeReport,
   timeReportMarkdown,
   timeShare,
@@ -57,6 +58,58 @@ const note = (id: string, text: string) => ({
   type: 'activity' as const,
   text,
   progress: { id, revision: 1 },
+});
+
+describe('time on hold with its reason, and the measurements made', () => {
+  it('tells waits for the computer, a build slot and a turn apart, with the measurements', () => {
+    const release = (id: string, facts: { label: string; value: string }[]) =>
+      call(id, {
+        category: 'tool',
+        name: 'Release the computer',
+        operation: 'pc',
+        elapsedMs: 200,
+        facts,
+      });
+    const report = timeReport([
+      reply(
+        {
+          durationMs: 60_000,
+          timeSpent: spent(2, { held: 10_000, slot: 20_000, turn: 5_000, commands: 25_000 }),
+        },
+        [
+          release('clean', [{ label: 'Measurement', value: 'Clean' }]),
+          release('beside', [
+            { label: 'Measurement', value: 'Ran beside other heavy work' },
+            {
+              label: 'Ran beside',
+              value: 'another chat ran `npm test` for 4.0s\nprograms of yours (chrome.exe)',
+            },
+          ]),
+        ],
+      ),
+    ]);
+    expect(report.parts.map((part) => [part.kind, part.name, part.family])).toEqual([
+      ['commands', 'Commands', 'work'],
+      ['slot', 'Waiting for a build slot', 'hold'],
+      ['held', 'Waiting for the computer', 'hold'],
+      ['turn', 'Waiting for its turn', 'hold'],
+    ]);
+    expect(report.measurements).toEqual([
+      { reply: 1, clean: true },
+      {
+        reply: 1,
+        clean: false,
+        beside: 'another chat ran `npm test` for 4.0s\nprograms of yours (chrome.exe)',
+      },
+    ]);
+    expect(measurementsText(report.measurements)).toBe('2 measurements, 1 beside other heavy work');
+    expect(measurementsText([{ reply: 1, clean: true }])).toBe('1 measurement, all clean');
+    const markdown = timeReportMarkdown(report, { title: 'Bench', scope: 'One response' });
+    expect(markdown).toContain('## Measurements');
+    expect(markdown).toContain(
+      '| Beside other heavy work | another chat ran `npm test` for 4.0s; programs of yours (chrome.exe) |',
+    );
+  });
 });
 
 describe('time report', () => {

@@ -106,7 +106,14 @@
     Gauge,
     Columns3,
   } from '@lucide/svelte';
-  import { pcReservationTitle, type PcReservation } from '$lib/pc-reservations';
+  import {
+    pcBusy,
+    pcQueueTitle,
+    pcReservationTitle,
+    type PcReservation,
+    type PcSlot,
+    type PcTurn,
+  } from '$lib/pc-reservations';
   import {
     abandonedReplyError,
     initialWorkspace,
@@ -2098,9 +2105,22 @@
   let hostBackground = $state<Record<string, HostBackgroundWork>>({});
   // Reservations of this computer for performance measurements (src/lib/pc-reservations.ts).
   let pcReservations = $state<PcReservation[]>([]);
+  // Named reservations, such as a repository's landing turn, and builds waiting for a slot.
+  let pcTurns = $state<PcTurn[]>([]);
+  let pcSlots = $state<PcSlot[]>([]);
   const pcChatTitle = (id: string) =>
     workspace.conversations.find((c) => c.id === id)?.title || 'Another chat';
-  const pcTitle = $derived(pcReservationTitle(pcReservations, pcChatTitle));
+  const pcShown = $derived(
+    pcBusy({ reservations: pcReservations, turns: pcTurns, slots: pcSlots }),
+  );
+  const pcTitle = $derived(
+    [
+      pcReservationTitle(pcReservations, pcChatTitle),
+      pcQueueTitle({ turns: pcTurns, slots: pcSlots }),
+    ]
+      .filter(Boolean)
+      .join(' · ') || 'Reservations',
+  );
   function applyBackgroundWork(event: BackgroundWorkEvent) {
     if (event.kind === 'snapshot') {
       if (event.runs.length)
@@ -3274,9 +3294,11 @@
     });
     const stopAccountUpdates = watchAccountUpdates(applyAccountUpdate);
     const stopBackgroundWork = watchBackgroundWork(applyBackgroundWork);
-    const stopPcReservations = watchPcReservations(
-      (snapshot) => (pcReservations = snapshot.reservations),
-    );
+    const stopPcReservations = watchPcReservations((snapshot) => {
+      pcReservations = snapshot.reservations;
+      pcTurns = snapshot.turns;
+      pcSlots = snapshot.slots;
+    });
     const stopUsageRefresh = watchUsageRefresh(refreshUsageConnection);
     const stopNotificationView = watchNotificationView(
       () => (loaded && view === 'chat' ? activeId || undefined : undefined),
@@ -8522,9 +8544,9 @@
               : 'Restart to update'}</span
           ></button
         >{/if}
-      {#if pcReservations.length}<button
+      {#if pcShown}<button
           class="icon-button pc-reserved"
-          class:measuring={pcReservations[0].phase === 'open'}
+          class:measuring={pcReservations[0]?.phase === 'open'}
           aria-label={pcTitle}
           title={pcTitle}
           onclick={() => (reservationsOpen = true)}
@@ -9631,6 +9653,8 @@
   />{/if}
 {#if reservationsOpen}<ReservationsDialog
     reservations={pcReservations}
+    turns={pcTurns}
+    slots={pcSlots}
     title={pcChatTitle}
     opens={(id) => workspace.conversations.some((c) => c.id === id)}
     open={(id) => {

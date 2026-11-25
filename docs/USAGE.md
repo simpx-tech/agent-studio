@@ -66,7 +66,7 @@ A reply's timing row opens a summary above its tokens and cost: the total, the m
 | Responses | Each reply of the chat with its time and what it was made of; a row opens that reply |
 | Steps | **Plan**: each step of the reply's plan with the time it was in progress, in how many stretches, and what that time was made of, then what no step covered. **Notes**: the stretches between the agent's own progress comments, each named by the comment's first line, longest first |
 | Sub-agents | Each sub-agent with how long it ran, its calls, and how much of its time was its own calls rather than its model |
-| What it waited on | The rows of the summary, with the family each belongs to |
+| What it waited on | The rows of the summary, with the family each belongs to, then each measurement the replies made with the computer reserved: clean, or what ran beside it |
 | Commands | The reply's commands by what they did: tests, builds and checks, Git, packages, scripts and the like, judged from each command's own text |
 | Longest calls, Longest to write | Calls by their own run time, and by the time the model took to write them, calls that did the same counted together |
 
@@ -81,6 +81,9 @@ What a reply waited on:
 | Commands, Tools, Sub-agents, Hooks | The reply's own calls while the model waited for them |
 | Waiting for you | A question, an MCP form or a plan decision waiting for an answer |
 | Background work | The reply's turn ended and it waited for work it left running |
+| Waiting for the computer | Another chat had the computer reserved for a measurement (docs/RESERVATIONS.md) |
+| Waiting for a build slot | The builds running on the computer left no room for the reply's build |
+| Waiting for its turn | Another chat held what the reply reserved by name, such as its repository's landing turn |
 | Compacting | A compaction of the context |
 | Not recorded | Replies saved before 2026-11-24, and what followed the last reading of a reply that was cut off |
 

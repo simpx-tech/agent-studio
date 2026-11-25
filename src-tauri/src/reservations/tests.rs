@@ -2,6 +2,13 @@ use super::*;
 use crate::protocol::activity::ToolDecoder;
 
 fn broker_with(background: Vec<BackgroundWork>, history: Option<PathBuf>) -> Arc<Broker> {
+    let broker = lulling(background, history);
+    broker.set_settings(Settings { lull_minutes: 0.0 }).unwrap();
+    broker
+}
+
+/// A broker whose reservations wait for a lull as this computer's setting says.
+fn lulling(background: Vec<BackgroundWork>, history: Option<PathBuf>) -> Arc<Broker> {
     Broker::new(
         Box::new(|_| {}),
         Box::new(|c| match c {
@@ -13,6 +20,9 @@ fn broker_with(background: Vec<BackgroundWork>, history: Option<PathBuf>) -> Arc
         history,
     )
 }
+
+/// A wait for the computer that does not tell what it waits for.
+fn quiet(_: Option<&'static str>) {}
 
 /// A Claude command `id` that runs `command`, then the same call once it ended.
 fn command(id: &str, command: &str) -> (ToolActivity, ToolActivity) {
@@ -74,7 +84,11 @@ async fn the_window_opens_once_other_chats_commands_finish() {
     // The window opens when the build ends, and the holder's wait returns.
     let waiting = {
         let broker = broker.clone();
-        tokio::spawn(async move { broker.wait("bench", &CancellationToken::new()).await })
+        tokio::spawn(async move {
+            broker
+                .wait("bench", &CancellationToken::new(), &quiet)
+                .await
+        })
     };
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(!waiting.is_finished());
@@ -242,7 +256,7 @@ async fn a_wait_ends_when_its_call_stops() {
     let cancel = CancellationToken::new();
     let waiting = {
         let (broker, cancel) = (broker.clone(), cancel.clone());
-        tokio::spawn(async move { broker.wait("ui", &cancel).await })
+        tokio::spawn(async move { broker.wait("ui", &cancel, &quiet).await })
     };
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert_eq!(broker.snapshot().reservations[0].held, 1);
@@ -252,7 +266,10 @@ async fn a_wait_ends_when_its_call_stops() {
     // Not reserved: a wait returns at once.
     broker.release("bench");
     assert_eq!(
-        broker.wait("ui", &CancellationToken::new()).await.unwrap(),
+        broker
+            .wait("ui", &CancellationToken::new(), &quiet)
+            .await
+            .unwrap(),
         "The computer is not reserved: run your command or tool call now."
     );
 }
@@ -389,6 +406,7 @@ fn held_time_goes_to_what_kept_the_window_closed() {
         key: label.into(),
         conversation: "ui".into(),
         label: label.into(),
+        background: false,
         from: at(from),
         until: Some(at(until)),
     };
@@ -401,6 +419,7 @@ fn held_time_goes_to_what_kept_the_window_closed() {
         asked: t0,
         asked_at: 0,
         first: Some(t0),
+        holding: Some(t0),
         opened: Some(at(6)),
         opened_at: None,
         blockers: vec![span("build", 0, 4), span("cook", 2, 6)],
@@ -509,7 +528,10 @@ async fn a_chat_asked_to_hand_over_works_on_and_the_window_waits_for_it() {
         .gate("other", "cargo build", None, "pc_wait")
         .is_some());
     // A chat waiting for the computer reads the request at once.
-    let read = broker.wait("ui", &CancellationToken::new()).await.unwrap();
+    let read = broker
+        .wait("ui", &CancellationToken::new(), &quiet)
+        .await
+        .unwrap();
     assert!(
         read.starts_with("The chat \"Chunk benchmark\" (id bench), another agent working on this computer (not the user), holds it for a performance measurement (Benchmark) and asks you to hand over what you hold: Close the editor once you are done."),
         "{read}"
@@ -607,7 +629,7 @@ async fn a_message_ends_a_wait_and_says_where_the_computer_stands() {
     broker.reserve("run-bench", "bench", "Benchmark", None);
     let waiting = {
         let broker = broker.clone();
-        tokio::spawn(async move { broker.wait("ui", &CancellationToken::new()).await })
+        tokio::spawn(async move { broker.wait("ui", &CancellationToken::new(), &quiet).await })
     };
     tokio::time::sleep(Duration::from_millis(20)).await;
     assert!(!waiting.is_finished());
@@ -821,4 +843,442 @@ async fn what_a_chat_s_cli_starts_runs_while_another_measures() {
     assert!(ends_within(&mut started, Duration::from_secs(10)).await);
     let report = broker.release("bench").unwrap();
     assert_eq!(report.record["frozen"].as_array().map(Vec::len), Some(0));
+}
+
+fn reading(
+    at: Instant,
+    total_ms: u64,
+    cores: u32,
+    free: u64,
+    processes: Vec<machine::Process>,
+) -> machine::Reading {
+    machine::Reading {
+        at,
+        busy_ms: 0,
+        total_ms,
+        memory_total: 64 << 30,
+        memory_available: free,
+        commit_available: Some(free),
+        cores,
+        processes,
+    }
+}
+/// Eight cores, one build at a time, and room for it.
+fn eight_cores() -> Option<machine::Reading> {
+    Some(reading(Instant::now(), 0, 8, 32 << 30, vec![]))
+}
+/// Thirty-two cores with little memory left.
+fn little_memory() -> Option<machine::Reading> {
+    Some(reading(Instant::now(), 0, 32, 6 << 30, vec![]))
+}
+/// Thirty-two cores with room.
+fn roomy() -> Option<machine::Reading> {
+    Some(reading(Instant::now(), 0, 32, 40 << 30, vec![]))
+}
+
+/// What a wait told its reply, in order.
+type Told = Arc<Mutex<Vec<Option<&'static str>>>>;
+
+/// What a wait told its reply it waits for, in order.
+fn heard() -> (Told, impl Fn(Option<&'static str>) + Send + Sync + 'static) {
+    let heard = Arc::new(Mutex::new(vec![]));
+    let tell = heard.clone();
+    (heard, move |reason| tell.lock().unwrap().push(reason))
+}
+
+#[tokio::test]
+async fn a_reservation_waits_for_a_lull_before_it_holds_other_chats() {
+    let broker = lulling(vec![], None);
+    broker.run_started("run-ui", "ui");
+    let (build, built) = command("build", "Build.bat BluevoxEditor Win64 Development");
+    broker.tool("run-ui", &build);
+    let text = broker.reserve("run-bench", "bench", "Frame timing", None);
+    assert!(
+        text.starts_with("Reserved: your window opens at the first moment no other chat runs"),
+        "{text}"
+    );
+    assert!(text.contains("within 3m 0s"), "{text}");
+    let view = &broker.snapshot().reservations[0];
+    assert_eq!(view.phase, "lull");
+    assert!(view
+        .holds_at
+        .is_some_and(|at| at >= view.asked_at + 180_000));
+    // Other chats work on meanwhile, and their waits return at once.
+    assert!(broker.gate("ui", "npm test", None, "pc_wait").is_none());
+    let free = broker
+        .wait("ui", &CancellationToken::new(), &quiet)
+        .await
+        .unwrap();
+    assert!(
+        free.starts_with("A measurement waits for a moment"),
+        "{free}"
+    );
+    let status = broker.status("ui", None);
+    assert!(
+        status.contains("waits for a moment when no other chat runs heavy work"),
+        "{status}"
+    );
+    // The first moment nothing runs, the window opens and holds their new work.
+    broker.tool("run-ui", &built);
+    assert_eq!(broker.snapshot().reservations[0].phase, "open");
+    assert!(broker.gate("ui", "npm test", None, "pc_wait").is_some());
+    let report = broker.release("bench").unwrap();
+    assert!(
+        report
+            .text
+            .contains("at a moment no other chat ran heavy work"),
+        "{}",
+        report.text
+    );
+    assert!(
+        report
+            .text
+            .contains("Measurement: clean, no other heavy work ran"),
+        "{}",
+        report.text
+    );
+    assert_eq!(report.record["contaminated"], false);
+}
+
+#[tokio::test]
+async fn without_a_lull_in_time_a_reservation_holds_other_chats_new_work() {
+    let broker = lulling(vec![], None);
+    // 30 milliseconds.
+    broker
+        .set_settings(Settings {
+            lull_minutes: 0.0005,
+        })
+        .unwrap();
+    broker.run_started("run-ui", "ui");
+    let (build, built) = command("build", "Build.bat BluevoxEditor Win64 Development");
+    broker.tool("run-ui", &build);
+    broker.reserve("run-bench", "bench", "Frame timing", None);
+    assert_eq!(broker.snapshot().reservations[0].phase, "lull");
+    assert!(broker.gate("ui", "npm test", None, "pc_wait").is_none());
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    broker.changed();
+    assert_eq!(broker.snapshot().reservations[0].phase, "draining");
+    assert!(broker.gate("ui", "npm test", None, "pc_wait").is_some());
+    broker.tool("run-ui", &built);
+    assert_eq!(broker.snapshot().reservations[0].phase, "open");
+    let report = broker.release("bench").unwrap();
+    assert!(
+        report.text.contains("waiting for a lull, then"),
+        "{}",
+        report.text
+    );
+    assert!(report.record["lullMs"].as_u64().unwrap() >= 30);
+    // A wait is a number of minutes, zero or more.
+    assert!(broker
+        .set_settings(Settings { lull_minutes: -1.0 })
+        .is_err());
+    assert!(broker
+        .set_settings(Settings {
+            lull_minutes: f64::NAN
+        })
+        .is_err());
+}
+
+#[tokio::test]
+async fn the_setting_is_kept_beside_the_history() {
+    let folder = tempfile::tempdir().unwrap();
+    let history = folder.path().join("reservations").join("history.jsonl");
+    let broker = lulling(vec![], Some(history.clone()));
+    assert_eq!(broker.settings(), Settings::default());
+    assert_eq!(Settings::default().lull_minutes, 3.0);
+    broker
+        .set_settings(Settings { lull_minutes: 10.0 })
+        .unwrap();
+    let again = lulling(vec![], Some(history));
+    assert_eq!(again.settings().lull_minutes, 10.0);
+}
+
+#[tokio::test]
+async fn a_measurement_beside_other_heavy_work_says_so_and_whose() {
+    let broker = broker_with(vec![], None);
+    broker.reserve("run-bench", "bench", "Frame timing", None);
+    assert_eq!(broker.snapshot().reservations[0].phase, "open");
+    // A command another chat runs anyway, such as a Codex chat's without its gate.
+    broker.run_started("run-codex", "codex");
+    let (test, _) = command("test", "npm test");
+    broker.tool("run-codex", &test);
+    // And a program of the user's, busy over two readings of four cores.
+    {
+        let members = jobs::Members {
+            chats: HashMap::new(),
+            roots: HashMap::new(),
+        };
+        let start = Instant::now();
+        let mut state = broker.lock();
+        for (second, chrome) in [(0, 0), (2, 3_000), (4, 6_000)] {
+            let processes = vec![machine::Process {
+                pid: 20,
+                parent: 1,
+                name: "chrome.exe".into(),
+                cpu_ms: chrome,
+                memory: 1 << 30,
+                began: 20,
+                system: false,
+            }];
+            let r = reading(
+                start + Duration::from_secs(second),
+                second * 4_000,
+                4,
+                32 << 30,
+                processes,
+            );
+            let owners = machine::Owners::new(&r, &members, 1);
+            state.queue[0].measure.add(r, &owners, "bench", false);
+        }
+    }
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let report = broker.release("bench").unwrap();
+    assert!(
+        report.text.contains(
+            "Measurement: ran beside other heavy work, so its numbers may be off: another chat ran `npm test` for"
+        ),
+        "{}",
+        report.text
+    );
+    assert!(
+        report
+            .text
+            .contains("programs of yours (chrome.exe) at 38% of the CPU, 38% at most, for 4.0s"),
+        "{}",
+        report.text
+    );
+    assert!(
+        report
+            .text
+            .ends_with("Tell the user, and offer to measure again.")
+            || report
+                .text
+                .contains("Tell the user, and offer to measure again.\n"),
+        "{}",
+        report.text
+    );
+    assert_eq!(report.record["contaminated"], true);
+    assert_eq!(report.record["ranBeside"][0]["conversationId"], "codex");
+    assert_eq!(report.record["ranBeside"][1]["owner"], "user");
+    assert_eq!(report.record["ranBeside"][1]["name"], "chrome.exe");
+    // A reservation whose window never opened measured nothing.
+    broker.run_started("run-ui", "ui");
+    let (build, _) = command("build", "Build.bat Game Win64 Shipping");
+    broker.tool("run-ui", &build);
+    broker.reserve("run-bench", "bench", "Frame timing", None);
+    let unopened = broker.release("bench").unwrap();
+    assert!(!unopened.text.contains("Measurement:"), "{}", unopened.text);
+    assert!(unopened.record["contaminated"].is_null());
+}
+
+#[tokio::test]
+async fn a_build_waits_for_a_slot_and_takes_the_one_its_turn_brings() {
+    let broker = broker_with(vec![], None);
+    broker.read_with(eight_cores);
+    broker.run_started("run-ui", "ui");
+    let (build, built) = command("build", "cargo build --release");
+    broker.tool("run-ui", &build);
+    // Another chat's build waits: one build at a time on eight cores.
+    broker.run_started("run-art", "art");
+    let reason = broker
+        .gate(
+            "art",
+            "pwsh -File Tools/Build.ps1 -Target Bluevox",
+            Some("claude:art-build"),
+            "pc_wait",
+        )
+        .unwrap();
+    assert!(
+        reason.starts_with(
+            "This build did not run: 1 build runs on this computer now (the chat \"Fix inventory UI\": `cargo build --release`), and this computer runs 1 build at once"
+        ),
+        "{reason}"
+    );
+    assert!(reason.contains("Call pc_wait"), "{reason}");
+    // A command that is not a build runs.
+    assert!(broker.gate("art", "npm test", None, "pc_wait").is_none());
+    // A third chat's build waits behind it.
+    broker.run_started("run-bench", "bench");
+    let behind = broker.gate("bench", "cargo test", None, "pc_wait").unwrap();
+    assert!(
+        behind.contains("1 chat's build waits its turn before it"),
+        "{behind}"
+    );
+    let waiting: Vec<String> = broker
+        .snapshot()
+        .slots
+        .iter()
+        .map(|s| s.conversation_id.clone())
+        .collect();
+    assert_eq!(waiting, ["art", "bench"]);
+    assert!(broker
+        .status("art", None)
+        .contains("waits for a slot (1 in line"));
+    // Its wait tells the reply it waits for a slot, and returns once the build ends.
+    let (told, tell) = heard();
+    let waiting = {
+        let broker = broker.clone();
+        tokio::spawn(async move { broker.wait("art", &CancellationToken::new(), &tell).await })
+    };
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(!waiting.is_finished());
+    broker.tool("run-ui", &built);
+    let free = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        free.starts_with("A build slot is free for this chat after"),
+        "{free}"
+    );
+    assert_eq!(*told.lock().unwrap(), [None, Some("slot"), None]);
+    // The slot is its build's, ahead of the chat behind it.
+    assert!(broker
+        .gate("bench", "cargo test", None, "pc_wait")
+        .is_some());
+    assert!(broker
+        .gate(
+            "art",
+            "pwsh -File Tools/Build.ps1 -Target Bluevox",
+            None,
+            "pc_wait"
+        )
+        .is_none());
+    assert_eq!(broker.snapshot().slots.len(), 1);
+    // A chat whose reply ends no longer waits.
+    broker.run_ended("run-bench");
+    assert!(broker.snapshot().slots.is_empty());
+}
+
+#[tokio::test]
+async fn a_build_beside_others_needs_free_memory_and_time_for_the_last_to_grow() {
+    let (build, _) = command("build", "cargo build");
+    let broker = broker_with(vec![], None);
+    broker.read_with(little_memory);
+    broker.run_started("run-ui", "ui");
+    broker.tool("run-ui", &build);
+    let reason = broker.gate("art", "dotnet build", None, "pc_wait").unwrap();
+    assert!(
+        reason.contains(
+            "a build beside them needs 10.0 GB of free memory (commit) and 6.0 GB is free"
+        ),
+        "{reason}"
+    );
+    // With room, one starts beside it, and the next waits while that one grows.
+    let broker = broker_with(vec![], None);
+    broker.read_with(roomy);
+    broker.run_started("run-ui", "ui");
+    broker.tool("run-ui", &build);
+    assert!(broker
+        .gate("art", "dotnet build", None, "pc_wait")
+        .is_none());
+    let reason = broker.gate("bench", "cargo test", None, "pc_wait").unwrap();
+    assert!(reason.contains("the last build started"), "{reason}");
+    // A build alone always starts.
+    let broker = broker_with(vec![], None);
+    broker.read_with(little_memory);
+    assert!(broker
+        .gate("art", "dotnet build", None, "pc_wait")
+        .is_none());
+}
+
+#[tokio::test]
+async fn named_reservations_take_turns_and_end_with_their_reply() {
+    let folder = tempfile::tempdir().unwrap();
+    let history = folder.path().join("history.jsonl");
+    let broker = broker_with(vec![], Some(history.clone()));
+    broker.run_started("run-bench", "bench");
+    broker.run_started("run-ui", "ui");
+    let key = named::key(r"D:\bluevox-server-build");
+    let held = broker.take_turn(
+        "run-bench",
+        "bench",
+        &key,
+        r"D:\bluevox-server-build",
+        false,
+        "Server build",
+    );
+    assert!(
+        held.starts_with(r"This chat holds D:\bluevox-server-build now"),
+        "{held}"
+    );
+    let asked = broker.take_turn(
+        "run-ui",
+        "ui",
+        &named::key("d:/BLUEVOX-server-build/"),
+        "d:/BLUEVOX-server-build/",
+        false,
+        "Mirror sources",
+    );
+    assert!(
+        asked.starts_with(
+            "Asked for d:/BLUEVOX-server-build/: the chat \"Chunk benchmark\" (id bench) holds it (Server build)"
+        ),
+        "{asked}"
+    );
+    // A turn holds nothing else.
+    assert!(broker.gate("ui", "npm test", None, "pc_wait").is_none());
+    let status = broker.status("ui", None);
+    assert!(
+        status.contains(
+            r#"Named reservation, D:\bluevox-server-build: held by the chat "Chunk benchmark" (id bench) (Server build)"#
+        ),
+        "{status}"
+    );
+    assert!(status.contains("waiting: this chat"), "{status}");
+    let turns = broker.snapshot().turns;
+    assert_eq!(turns.len(), 2);
+    assert!(turns[0].granted_at.is_some() && turns[1].granted_at.is_none());
+    let (told, tell) = heard();
+    let waiting = {
+        let broker = broker.clone();
+        tokio::spawn(async move { broker.wait("ui", &CancellationToken::new(), &tell).await })
+    };
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(!waiting.is_finished());
+    let released = broker.release_turns("bench", Some(&key)).unwrap();
+    assert!(
+        released.starts_with(r"Released D:\bluevox-server-build (Server build): this chat held it"),
+        "{released}"
+    );
+    assert!(
+        released.ends_with("The chat \"Fix inventory UI\" (id ui) has it now."),
+        "{released}"
+    );
+    let came = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        came.starts_with("Your turn came after") && came.contains("d:/BLUEVOX-server-build/"),
+        "{came}"
+    );
+    assert_eq!(*told.lock().unwrap(), [None, Some("turn"), None]);
+    // The reply that took it ends: so does its turn, which the history keeps.
+    broker.run_ended("run-ui");
+    assert!(broker.snapshot().turns.is_empty());
+    let records = read_history(&history);
+    assert_eq!(records.len(), 2);
+    assert!(records.iter().all(|r| r["kind"] == "turn"));
+    assert_eq!(records[1]["endedBy"], "reply");
+    assert_eq!(records[1]["conversationId"], "ui");
+    assert!(broker.release_turns("ui", None).is_none());
+}
+
+#[tokio::test]
+async fn reserving_again_soon_after_releasing_asks_for_one_reservation_a_series() {
+    let broker = broker_with(vec![], None);
+    broker.reserve("run-bench", "bench", "Run 1 of 5", None);
+    broker.release("bench");
+    let again = broker.reserve("run-bench", "bench", "Run 2 of 5", None);
+    assert!(
+        again.contains("keep one reservation for a whole series of measured runs"),
+        "{again}"
+    );
+    // Another reply's reservation begins another series.
+    broker.release("bench");
+    let next = broker.reserve("run-bench-2", "bench", "After the fix", None);
+    assert!(!next.contains("whole series"), "{next}");
 }

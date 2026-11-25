@@ -3315,7 +3315,7 @@ mod tests {
         r.native_session = Session::prepare(root.path(), &r).unwrap();
         // A new session reads the guidance with its first message, and is never told again.
         let first = r.stdin_payload();
-        assert!(first.contains("reserve the computer first with pc_reserve"));
+        assert!(first.contains("then reserve the computer with pc_reserve"));
         assert!(!first.contains("added this guidance"));
         let s = r.native_session.take().unwrap();
         assert!(!s.reservations_rule_changed);

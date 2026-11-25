@@ -35,6 +35,21 @@ Browser tests run in Edge, whose engine WebView2 shares. Tests tagged `@webkit`
 also run in Playwright's WebKit, the engine of the macOS and Linux apps and of
 the Viewer on an iPhone; install it once with `npx playwright install webkit`.
 
+Run the browser suite whole (`npx playwright test`, about nine minutes), with no
+pause before or between runs. Each test's browser context closes the five or so
+connections it opened to the test server, which Windows keeps in TIME_WAIT for
+two minutes, so a run leaves a thousand or two against about 15,000 ephemeral
+ports (measured 2026-11-25: 873 at most for a third of the suite, 1,149 for
+three thirds back to back, 1,347 for a whole run, nearly all of them
+connections to the test server; the production build left as many). Waiting
+for them to drain, as agents did between shards until then, cost about seven
+hours and prevented nothing: the rare page that stays blank lost one request to
+`ERR_NO_BUFFER_SPACE` with 903 sockets waiting, far from any limit, and others
+before to `ERR_NETWORK_CHANGED` as a WSL virtual machine started. A blank page
+says so in its trace (`*.network` entries with `_failureText`); read it, then
+run the failures again alone with `npx playwright test --last-failed`, as for
+a timing test that failed while other jobs loaded the computer.
+
 Every push to `main`, including a merge, builds these downloadable artifacts:
 
 | Platform | Architecture | Packages |

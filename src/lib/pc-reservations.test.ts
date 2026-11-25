@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
+  pcBesideText,
+  pcBusy,
   pcOutcome,
   pcOwner,
+  pcQueueTitle,
   pcRecords,
   pcReservationTitle,
   pcSnapshotSchema,
   pcTotals,
+  pcTurnGroups,
+  pcTurnRecords,
   pcWaited,
   type PcReservation,
 } from './pc-reservations';
@@ -21,6 +26,103 @@ const reservation = (overrides: Partial<PcReservation> = {}): PcReservation => (
   ...overrides,
 });
 const title = (id: string) => (id === 'bench' ? 'Chunk benchmark' : 'Another chat');
+
+describe('lulls, turns, build slots and what ran beside a measurement', () => {
+  it('reads a reservation waiting for a lull, the turns and the builds waiting for a slot', () => {
+    const snapshot = pcSnapshotSchema.parse({
+      reservations: [{ ...reservation(), phase: 'lull', holdsAt: 180_001 }],
+      turns: [
+        {
+          id: 'turn-1',
+          name: 'the landing of github.com/simpx-tech/bluevox',
+          landing: true,
+          conversationId: 'bench',
+          purpose: 'Final pipeline and push',
+          askedAt: 1,
+          grantedAt: 2,
+        },
+        {
+          id: 'turn-2',
+          name: 'the landing of github.com/simpx-tech/bluevox',
+          landing: true,
+          conversationId: 'ui',
+          purpose: 'Final pipeline and push',
+          askedAt: 3,
+        },
+      ],
+      slots: [{ conversationId: 'ui', label: '`cargo build`', since: 4 }],
+    });
+    expect(snapshot.reservations[0].holdsAt).toBe(180_001);
+    expect(pcReservationTitle(snapshot.reservations, title)).toBe(
+      'Computer reserved: Benchmark of chunk meshing · Chunk benchmark · Waiting for a lull',
+    );
+    const groups = pcTurnGroups(snapshot.turns);
+    expect(groups.map((group) => [group.name, group.turns.length])).toEqual([
+      ['the landing of github.com/simpx-tech/bluevox', 2],
+    ]);
+    expect(pcQueueTitle(snapshot)).toBe('1 build waits for a slot · 1 chat waits for a turn');
+    expect(pcBusy(snapshot)).toBe(true);
+    // A turn held with nobody waiting, and nothing else, is no reason to show the indicator.
+    expect(pcBusy({ reservations: [], turns: [snapshot.turns[0]], slots: [] })).toBe(false);
+    // A host older than turns and slots sends neither.
+    expect(pcSnapshotSchema.parse({ reservations: [] })).toEqual({
+      reservations: [],
+      turns: [],
+      slots: [],
+    });
+  });
+
+  it('keeps turns apart from reservations in the history, and says whose work ran beside', () => {
+    const history = [
+      {
+        id: 'pc-1',
+        conversationId: 'bench',
+        purpose: 'Frame timing',
+        askedAt: 1,
+        openedAt: 2,
+        endedAt: 10,
+        endedBy: 'release',
+        lullMs: 0,
+        contaminated: true,
+        ranBeside: [
+          { conversationId: 'ui', label: 'Build `cargo build`', ms: 4000 },
+          {
+            owner: { session: 'claude-cli' },
+            name: 'cl.exe',
+            ms: 6000,
+            cpuAverage: 40,
+            cpuPeak: 70,
+          },
+        ],
+      },
+      {
+        kind: 'turn',
+        id: 'turn-1',
+        conversationId: 'bench',
+        name: 'the landing of github.com/simpx-tech/bluevox',
+        landing: true,
+        purpose: 'Final pipeline and push',
+        askedAt: 1,
+        grantedAt: 1,
+        endedAt: 20,
+        endedBy: 'release',
+        waitedMs: 0,
+        heldMs: 19,
+        waiting: 0,
+      },
+    ];
+    const records = pcRecords(history);
+    expect(records.map((record) => record.id)).toEqual(['pc-1']);
+    expect(records[0].contaminated).toBe(true);
+    expect(pcTotals(records).contaminated).toBe(1);
+    expect(records[0].ranBeside.map((beside) => pcBesideText(beside, title))).toEqual([
+      'Another chat · Build `cargo build`',
+      'Claude Code outside Agent Studio · cl.exe',
+    ]);
+    expect(pcTurnRecords(history).map((turn) => [turn.id, turn.heldMs])).toEqual([['turn-1', 19]]);
+    expect(pcOwner({ session: 'claude-app' }, title)).toBe('Claude app');
+  });
+});
 
 describe('reservations of this computer', () => {
   it('reads the snapshot the host sends', () => {
@@ -126,6 +228,7 @@ describe('the history of reservations', () => {
       windowMs: 5000,
       heldMs: 5000,
       refused: 4,
+      contaminated: 0,
     });
   });
 

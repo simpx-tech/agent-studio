@@ -103,7 +103,7 @@ pub fn is_light(command: &str) -> bool {
 
 /// The parts of a command line, split where `&&`, `||`, `;`, `|` and line breaks stand outside
 /// quotes, each as its words with quotes taken away.
-fn parts(command: &str) -> Vec<Vec<String>> {
+pub(super) fn parts(command: &str) -> Vec<Vec<String>> {
     let (mut parts, mut words, mut word) = (vec![], vec![], String::new());
     let (mut quote, mut quoted) = (None, false);
     let end_word = |words: &mut Vec<String>, word: &mut String, quoted: &mut bool| {
@@ -174,7 +174,7 @@ fn light_part(words: &[String]) -> bool {
 }
 
 /// `NAME=value`, which a POSIX shell sets for the command after it.
-fn assignment(word: &str) -> bool {
+pub(super) fn assignment(word: &str) -> bool {
     word.split_once('=').is_some_and(|(name, _)| {
         !name.is_empty()
             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -183,7 +183,7 @@ fn assignment(word: &str) -> bool {
 }
 
 /// The program a word names: its file name without folders or `.exe`, in lower case.
-fn program_name(word: &str) -> String {
+pub(super) fn program_name(word: &str) -> String {
     let name = word.rsplit(['/', '\\']).next().unwrap_or(word);
     let name = name.to_ascii_lowercase();
     name.strip_suffix(".exe").map(String::from).unwrap_or(name)

@@ -142,6 +142,12 @@ export async function mockDesktop(page: Page, mode = 'success') {
             return JSON.parse(localStorage.getItem('test-pc-state') ?? '{"reservations":[]}');
           if (command === 'pc_history')
             return JSON.parse(localStorage.getItem('test-pc-history') ?? '[]');
+          if (command === 'pc_settings')
+            return JSON.parse(localStorage.getItem('test-pc-settings') ?? '{"lullMinutes":3}');
+          if (command === 'set_pc_settings') {
+            localStorage.setItem('test-pc-settings', JSON.stringify(args.settings));
+            return args.settings;
+          }
           if (command === 'record_window_stall') {
             (held.windowStalls ??= []).push(args.stall);
             return;
