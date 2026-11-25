@@ -30,14 +30,23 @@ const GATE_TIMEOUT_SECONDS: u64 = 30;
 /// How long the CLI waits for messages after a call, which a running reply also answers at once.
 const MESSAGES_TIMEOUT_SECONDS: u64 = 10;
 
-pub const GUIDANCE: &str = "Chats run side by side on this computer. To measure performance (a benchmark, profiling or a timing run), reserve the computer first with pc_reserve, wait for its window with pc_wait, measure, and release it with pc_release right after (Claude: mcp__agent_studio__pc_reserve, mcp__agent_studio__pc_wait, mcp__agent_studio__pc_release; pc_status shows what runs on the computer now, pc_stop stops programs chats left running, and chat_message writes to another chat). Never reserve it for ordinary builds, tests or runs. When a command of yours is refused because another chat reserved the computer, call pc_wait, then run the command again. When another chat asks you to hand over what you hold, finish what you need, then call pc_release.";
+pub const GUIDANCE: &str = "Chats run side by side on this computer. To measure performance (a benchmark, profiling or a timing run), reserve the computer first with pc_reserve, wait for its window with pc_wait, measure, and release it with pc_release right after (Claude: mcp__agent_studio__pc_reserve, mcp__agent_studio__pc_wait, mcp__agent_studio__pc_release; pc_status shows what runs on the computer now, pc_stop stops programs chats left running, and chat_message writes to another chat). Never reserve it for ordinary builds, tests or runs. When a command or MCP tool call of yours is refused because another chat reserved the computer, call pc_wait, then run it again. When another chat asks you to hand over what you hold, finish what you need, then call pc_release.";
+
+/// What a Claude session begun before chats could reserve this computer (Agent Studio 1.4.0)
+/// reads once, with its next reply's context (`Session::reservations_rule_changed`): its process
+/// has the tools, but its first message never named them, and a system prompt cannot reach it,
+/// since Claude Code keeps the one a session started with. A Codex thread keeps the tools it
+/// started with, so one begun before has none to hear of.
+pub fn guidance_added() -> String {
+    format!("Agent Studio added this guidance after this conversation began: {GUIDANCE}")
+}
 
 const STATUS_DESCRIPTION: &str = "Show whether this computer is reserved for a performance measurement and by which chat, what other chats run on it now (commands and background work, and whether each finishes by itself), the programs chats left running outside their CLIs (editors, games, servers) with their program numbers, and the computer's busiest and largest programs with whose they are: a chat's, Agent Studio's, the system's, or the user's own (\"yours\"). Chats are named by title and id. Call it before pc_reserve.";
-const RESERVE_DESCRIPTION: &str = "Reserve this computer for a performance measurement (a benchmark, profiling or a timing run) so that no other chat's work disturbs it. Chats otherwise work side by side: reserve only to measure performance, never for an ordinary build, test or game run. Before reserving, build, cook and prepare everything, and call pc_status: if programs the user started (\"yours\") use much CPU or memory, ask the user with studio_ask_user whether to close them or measure anyway, before reserving, so that no chat waits on the answer. From the moment you reserve, other chats' new commands wait, except light ones such as git status, and the commands they already run finish first. Programs chats left running, such as an editor or a game, keep running: stop those of chats that are not replying with pc_stop, and ask a replying chat that still works with one to hand it over with chat_message and hand_over: true, which your window then waits for. Then call pc_wait, which returns once the window opens; measure at once (warm up, run several times), call pc_release right after capturing, and analyze afterwards, since other chats wait until you release. Reservations take turns, and one ends by itself when this reply ends.";
-const WAIT_DESCRIPTION: &str = "Wait for this computer, as long as it takes. When this chat holds a reservation, it returns once its window opens: no other chat runs a command then. Otherwise it returns once no other chat holds the computer: call it when a command of yours was refused because another chat reserved the computer, then run the command again. A message from another chat ends the wait early: read it, then call pc_wait again if you still must wait.";
-const RELEASE_DESCRIPTION: &str = "End this chat's reservation of the computer, right after measuring, so other chats go on. Returns a report: what kept the window closed and for how long, other chats' work that ran while it was open, how busy the computer was (this chat's processes apart from everything else, with the busiest other programs and whose they are), and how long other chats waited because of it. Read it before trusting the numbers: when something else used the computer during the window, say so and offer to measure again. When the chat holding the computer asked this chat to hand over what it holds, pc_release hands over instead: Agent Studio closes the programs this chat left running, and its commands wait until that measurement ends.";
+const RESERVE_DESCRIPTION: &str = "Reserve this computer for a performance measurement (a benchmark, profiling or a timing run) so that no other chat's work disturbs it. Chats otherwise work side by side: reserve only to measure performance, never for an ordinary build, test or game run. Before reserving, build, cook and prepare everything, and call pc_status: if programs the user started (\"yours\") use much CPU or memory, ask the user with studio_ask_user whether to close them or measure anyway, before reserving, so that no chat waits on the answer. From the moment you reserve, other chats' new commands and MCP tool calls wait, except light commands such as git status, and the commands and calls they already run finish first. Programs chats left running, such as an editor or a game, keep running: stop those of chats that are not replying with pc_stop, and ask a replying chat that still works with one to hand it over with chat_message and hand_over: true, which your window then waits for. Then call pc_wait, which returns once the window opens; measure at once (warm up, run several times), call pc_release right after capturing, and analyze afterwards, since other chats wait until you release. Reservations take turns, and one ends by itself when this reply ends.";
+const WAIT_DESCRIPTION: &str = "Wait for this computer, as long as it takes. When this chat holds a reservation, it returns once its window opens: no other chat runs a command or an MCP tool call then. Otherwise it returns once no other chat holds the computer: call it when a command or MCP tool call of yours was refused because another chat reserved the computer, then run it again. A message from another chat ends the wait early: read it, then call pc_wait again if you still must wait.";
+const RELEASE_DESCRIPTION: &str = "End this chat's reservation of the computer, right after measuring, so other chats go on. Returns a report: what kept the window closed and for how long, other chats' work that ran while it was open, how busy the computer was (this chat's processes apart from everything else, with the busiest other programs and whose they are), and how long other chats waited because of it. Read it before trusting the numbers: when something else used the computer during the window, say so and offer to measure again. When the chat holding the computer asked this chat to hand over what it holds, pc_release hands over instead: Agent Studio closes the programs this chat left running, and its commands and MCP tool calls wait until that measurement ends.";
 const STOP_DESCRIPTION: &str = "Stop programs a chat left running on this computer outside its CLI, such as an editor, a game or a server, by the program numbers pc_status lists for it, and with background: true the background work its CLI keeps. Only for a chat that is not replying now, or this chat's own programs: ask a replying chat to hand over instead, with chat_message and hand_over: true. A program with a window is asked to close as its close button asks, so it may still ask about unsaved work; one without a window is ended. Programs the user started are never a chat's: ask the user about those.";
-const MESSAGE_DESCRIPTION: &str = "Send a message to another chat replying on this computer, to coordinate your work on it: another agent reads it with its next tool call, not the user. With hand_over: true, the chat holding the computer for a measurement asks that chat to hand over what it holds, such as an editor it still works with: that chat's commands run again until it hands over with pc_release, and your window waits until it does or its reply ends; Agent Studio then closes the programs it left running. Name the chat by its title or its id, as pc_status names it.";
+const MESSAGE_DESCRIPTION: &str = "Send a message to another chat replying on this computer, to coordinate your work on it: another agent reads it with its next tool call, not the user. With hand_over: true, the chat holding the computer for a measurement asks that chat to hand over what it holds, such as an editor it still works with: that chat's commands and MCP tool calls run again until it hands over with pc_release, and your window waits until it does or its reply ends; Agent Studio then closes the programs it left running. Name the chat by its title or its id, as pc_status names it.";
 
 fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> Value {
     json!({"name":name,"description":description,"inputSchema":{
@@ -102,11 +111,16 @@ pub fn codex_tools() -> Vec<Value> {
         .collect()
 }
 
-/// The `hooks` field of a Claude chat's `initialize` request: the gate before commands, and the
-/// delivery of messages after every call.
+/// The tools the gate is asked about: commands, monitors and every MCP server's tools. A matcher
+/// that is more than names is a regular expression to Claude Code, tried anywhere in the name
+/// unless anchored, so `BashOutput` would match `Bash`.
+pub const GATED: &str = "^(Bash|PowerShell|Monitor|mcp__.+)$";
+
+/// The `hooks` field of a Claude chat's `initialize` request: the gate before commands and MCP
+/// tool calls, and the delivery of messages after every call.
 pub fn hooks() -> Value {
     json!({
-        "PreToolUse":[{"matcher":"Bash|PowerShell|Monitor","hookCallbackIds":[GATE],"timeout":GATE_TIMEOUT_SECONDS}],
+        "PreToolUse":[{"matcher":GATED,"hookCallbackIds":[GATE],"timeout":GATE_TIMEOUT_SECONDS}],
         "PostToolUse":[{"hookCallbackIds":[MESSAGES],"timeout":MESSAGES_TIMEOUT_SECONDS}]
     })
 }
@@ -171,18 +185,26 @@ impl Session {
         let own = input["agent_id"].as_str().is_none_or(str::is_empty);
         let output = if callback == GATE {
             let refusal = if input["hook_event_name"] == "PreToolUse" {
-                let command = input["tool_input"]["command"].as_str().unwrap_or_default();
                 // The call's activity identity, as the tool decoder names a Claude call.
                 let call = input["tool_use_id"]
                     .as_str()
                     .or_else(|| request["tool_use_id"].as_str())
                     .map(|id| format!("claude:{id}"));
-                self.broker.gate(
-                    &self.conversation,
-                    command,
-                    call.as_deref(),
-                    "mcp__agent_studio__pc_wait",
-                )
+                let tool = input["tool_name"].as_str().unwrap_or_default();
+                let wait = "mcp__agent_studio__pc_wait";
+                match crate::protocol::activity::mcp_tool(tool) {
+                    Some((server, _)) => {
+                        self.broker
+                            .gate_call(&self.conversation, server, call.as_deref(), wait)
+                    }
+                    // Agent Studio's own tools, pc_wait among them, answer for themselves.
+                    None if tool.starts_with("mcp__") => None,
+                    None => {
+                        let command = input["tool_input"]["command"].as_str().unwrap_or_default();
+                        self.broker
+                            .gate(&self.conversation, command, call.as_deref(), wait)
+                    }
+                }
             } else {
                 None
             };
@@ -447,10 +469,20 @@ mod tests {
             .iter()
             .all(|t| t["type"] == "function" && t.get("_meta").is_none()));
         assert_eq!(hooks()["PreToolUse"][0]["hookCallbackIds"][0], GATE);
-        assert_eq!(
-            hooks()["PreToolUse"][0]["matcher"],
-            "Bash|PowerShell|Monitor"
-        );
+        assert_eq!(hooks()["PreToolUse"][0]["matcher"], GATED);
+        // Claude Code tests a matcher that is more than names as a regular expression.
+        let gated = regex::Regex::new(GATED).unwrap();
+        for name in [
+            "Bash",
+            "PowerShell",
+            "Monitor",
+            "mcp__unreal-mcp__execute_python",
+        ] {
+            assert!(gated.is_match(name), "{name}");
+        }
+        for name in ["BashOutput", "Read", "Edit", "mcp__", "WebFetch"] {
+            assert!(!gated.is_match(name), "{name}");
+        }
         // Messages arrive after any call.
         assert_eq!(hooks()["PostToolUse"][0]["hookCallbackIds"][0], MESSAGES);
         assert!(hooks()["PostToolUse"][0].get("matcher").is_none());
@@ -489,6 +521,47 @@ mod tests {
         let mut other_callback = hook("cargo build");
         other_callback["request"]["callback_id"] = json!("studio-after-compaction-0");
         assert!(other.gate(&other_callback).is_none());
+    }
+
+    #[tokio::test]
+    async fn the_gate_refuses_other_chats_mcp_calls_but_not_agent_studio_s_own() {
+        let broker = broker();
+        let other = Session::new(broker.clone(), "other", "run-other");
+        let mcp = |tool: &str| {
+            let mut value = hook("");
+            value["request"]["input"]["tool_name"] = json!(tool);
+            value["request"]["input"]["tool_input"] = json!({"code":"print(1)"});
+            value
+        };
+        let editor = mcp("mcp__unreal-mcp__execute_python");
+        assert_eq!(
+            other.gate(&editor).unwrap()["response"]["response"],
+            json!({})
+        );
+        broker.reserve("run-bench", "bench", "Frame timing", None);
+        let refused = other.gate(&editor).unwrap();
+        let output = &refused["response"]["response"]["hookSpecificOutput"];
+        assert_eq!(output["permissionDecision"], "deny");
+        let reason = output["permissionDecisionReason"].as_str().unwrap();
+        assert!(reason.starts_with("This tool call did not run"), "{reason}");
+        assert!(reason.contains("mcp__agent_studio__pc_wait"), "{reason}");
+        // The tool it must call to wait, connectors that run elsewhere and the holder's own
+        // calls go ahead.
+        for tool in [
+            "mcp__agent_studio__pc_wait",
+            "mcp__claude_ai_Linear__list_issues",
+        ] {
+            assert_eq!(
+                other.gate(&mcp(tool)).unwrap()["response"]["response"],
+                json!({}),
+                "{tool}"
+            );
+        }
+        let holder = Session::new(broker.clone(), "bench", "run-bench");
+        assert_eq!(
+            holder.gate(&editor).unwrap()["response"]["response"],
+            json!({})
+        );
     }
 
     #[tokio::test]

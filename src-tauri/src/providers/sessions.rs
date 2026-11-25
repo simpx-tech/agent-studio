@@ -91,6 +91,12 @@ struct Record {
     /// the reply's context (`SUB_AGENTS_NOTE`). A binding written before 2026-11-19 has not.
     #[serde(default)]
     sub_agents_rule: bool,
+    /// Whether its session has the guidance on reserving the computer for a measurement
+    /// (`reservations::tools::GUIDANCE`), in its first message or the reply's context. A binding
+    /// written before 2026-11-25 has not: a Claude session begun before Agent Studio 1.4.0 never
+    /// read it, though its process has the tools.
+    #[serde(default)]
+    reservations_rule: bool,
     /// The sessions this chat's history ran in before this one, nearest first. A fork of a
     /// compacted Claude session leaves out what came before the compaction, which stays there.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -115,6 +121,10 @@ impl Record {
     /// Whether the session may still hold the earlier request to delegate work to sub-agents.
     fn before_sub_agents_rule(&self) -> bool {
         !self.received || !self.sub_agents_rule
+    }
+    /// Whether the session may never have read how to reserve the computer.
+    fn before_reservations_rule(&self) -> bool {
+        !self.received || !self.reservations_rule
     }
     /// This session and the ones before it, nearest first.
     fn lineage(&self) -> Vec<String> {
@@ -147,6 +157,9 @@ pub struct Session {
     /// The session began under the earlier rule for pages, so this reply's context carries the
     /// current one (`artifacts::pages_rule_changed`), once.
     pub pages_rule_changed: bool,
+    /// The session began before chats could reserve the computer, so this reply's context carries
+    /// the guidance (`reservations::tools::guidance_added`), once.
+    pub reservations_rule_changed: bool,
     pub shared_context_changed: bool,
     pub unconfirmed_message: Option<usize>,
     transfer_from: Option<Record>,
@@ -612,6 +625,7 @@ impl Session {
                 shared_context: String::new(),
                 pages_rule: true,
                 sub_agents_rule: true,
+                reservations_rule: true,
                 ancestors: Vec::new(),
                 turns: Vec::new(),
                 rewound_at: None,
@@ -659,6 +673,9 @@ impl Session {
                 .as_ref()
                 .is_some_and(|p| !p.received || p.instructions != instructions),
             pages_rule_changed: previous.as_ref().is_some_and(Record::before_pages_rule),
+            reservations_rule_changed: previous
+                .as_ref()
+                .is_some_and(Record::before_reservations_rule),
             unconfirmed_message: previous
                 .as_ref()
                 .filter(|p| !p.received)
@@ -678,6 +695,7 @@ impl Session {
                 shared_context,
                 pages_rule: true,
                 sub_agents_rule: true,
+                reservations_rule: true,
                 ancestors,
                 turns,
                 rewound_at: None,
@@ -725,6 +743,7 @@ impl Session {
             self.resumed = true;
             self.instructions_changed = true;
             self.pages_rule_changed = previous.before_pages_rule();
+            self.reservations_rule_changed = previous.before_reservations_rule();
             self.withdraw_sub_agents(previous.before_sub_agents_rule());
             self.unconfirmed_message = (!previous.received).then_some(previous.history.len() - 1);
             return Ok(());
@@ -752,6 +771,7 @@ impl Session {
         // Refresh conversation instructions while leaving provider-native history intact.
         self.instructions_changed = true;
         self.pages_rule_changed = previous.before_pages_rule();
+        self.reservations_rule_changed = previous.before_reservations_rule();
         self.withdraw_sub_agents(previous.before_sub_agents_rule());
         self.unconfirmed_message = (!previous.received).then_some(previous.history.len() - 1);
         Ok(())
@@ -869,6 +889,7 @@ impl Session {
         self.switched_account = record.scope != self.record.scope;
         self.instructions_changed = record.instructions != self.record.instructions;
         self.pages_rule_changed = !record.pages_rule;
+        self.reservations_rule_changed = !record.reservations_rule;
         self.shared_context_changed = record.shared_context != self.record.shared_context;
         self.unconfirmed_message = None;
         self.notes
@@ -899,6 +920,7 @@ impl Session {
         self.history_rewritten = rewound;
         self.instructions_changed = false;
         self.pages_rule_changed = false;
+        self.reservations_rule_changed = false;
         self.shared_context_changed = false;
         self.record.id = uuid::Uuid::new_v4().to_string();
     }
@@ -1008,6 +1030,7 @@ impl Session {
         self.transcript_missing = true;
         self.instructions_changed = false;
         self.pages_rule_changed = false;
+        self.reservations_rule_changed = false;
         self.shared_context_changed = false;
         self.unconfirmed_message = None;
         self.record.id = uuid::Uuid::new_v4().to_string();
@@ -3282,6 +3305,64 @@ mod tests {
         drop(s);
         r.native_session = Session::prepare(root.path(), &r).unwrap();
         assert!(r.native_session.as_ref().unwrap().pages_rule_changed);
+    }
+
+    #[test]
+    fn a_claude_session_begun_before_reservations_hears_how_to_reserve_once() {
+        let root = tempfile::tempdir().unwrap();
+        let mut r = request();
+        let note = crate::reservations::tools::guidance_added();
+        r.native_session = Session::prepare(root.path(), &r).unwrap();
+        // A new session reads the guidance with its first message, and is never told again.
+        let first = r.stdin_payload();
+        assert!(first.contains("reserve the computer first with pc_reserve"));
+        assert!(!first.contains("added this guidance"));
+        let s = r.native_session.take().unwrap();
+        assert!(!s.reservations_rule_changed);
+        s.bind(s.id(), true).unwrap();
+        let binding = s.path.clone();
+        drop(s);
+        r.messages
+            .extend([message("assistant", "Answer"), message("user", "Next")]);
+        r.native_session = Session::prepare(root.path(), &r).unwrap();
+        assert!(!r.native_session.as_ref().unwrap().reservations_rule_changed);
+        assert_eq!(r.stdin_payload().lines().count(), 1);
+        r.native_session = None;
+        // A binding as earlier releases wrote it says nothing of the guidance.
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&binding).unwrap()).unwrap();
+        assert_eq!(record["reservations_rule"], true);
+        record.as_object_mut().unwrap().remove("reservations_rule");
+        std::fs::write(&binding, serde_json::to_vec(&record).unwrap()).unwrap();
+        r.native_session = Session::prepare(root.path(), &r).unwrap();
+        let lines: Vec<serde_json::Value> = r
+            .stdin_payload()
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["shouldQuery"], false);
+        assert_eq!(lines[0]["message"]["content"][0]["text"], note.as_str());
+        // A Codex thread keeps the tools it started with, so it has none to hear of.
+        r.agent.provider = "codex".into();
+        assert!(r.native_context().is_none());
+        r.agent.provider = "claude".into();
+        // Told once, it is told no more.
+        let s = r.native_session.take().unwrap();
+        s.bind(s.id(), true).unwrap();
+        assert!(saved(&s).reservations_rule);
+        drop(s);
+        r.messages
+            .extend([message("assistant", "Answer"), message("user", "Again")]);
+        r.native_session = Session::prepare(root.path(), &r).unwrap();
+        assert!(!r.native_session.as_ref().unwrap().reservations_rule_changed);
+        assert_eq!(r.stdin_payload().lines().count(), 1);
+        // A message that never arrived may have carried it, so the next reply carries it again.
+        let s = r.native_session.take().unwrap();
+        s.bind(s.id(), false).unwrap();
+        drop(s);
+        r.native_session = Session::prepare(root.path(), &r).unwrap();
+        assert!(r.native_session.as_ref().unwrap().reservations_rule_changed);
     }
 
     #[test]

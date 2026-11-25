@@ -68,6 +68,13 @@ pub fn hook_line(line: &str) -> bool {
     .is_match(line.trim())
 }
 
+/// Whether an MCP server's tools run elsewhere, so a call to one loads this computer no more than
+/// a light command: claude.ai's connectors (`claude_ai_…` in Claude Code) and Codex's apps
+/// (`codex_apps`). Every other server may drive a program here, as unreal-mcp drives an editor.
+pub fn remote_server(server: &str) -> bool {
+    server.starts_with("claude_ai_") || server == "codex_apps"
+}
+
 /// A command as its agent wrote it, without the lines CLI hooks put before it.
 pub fn own(command: &str) -> String {
     command

@@ -25,10 +25,11 @@ one broker, since they share the computer.
    `studio_ask_user` (close them, or measure anyway), and it asks before reserving, so no other
    chat waits on the answer. What chats left running it handles itself (below).
 2. **Reserve.** `pc_reserve` with a purpose and, optionally, the minutes the measurement takes.
-   From that moment other chats' new commands wait, except light ones. The answer lists what
-   still runs.
-3. **Wait for the window.** `pc_wait` returns once no other chat runs a command, nor background
-   work that a reply of its own still runs and waits on, nor holds what it was asked to hand over.
+   From that moment other chats' new commands and MCP tool calls wait, except light ones. The
+   answer lists what still runs.
+3. **Wait for the window.** `pc_wait` returns once no other chat runs a command or an MCP tool
+   call, nor background work that a reply of its own still runs and waits on, nor holds what it
+   was asked to hand over.
    Background work and programs a chat left running after its reply ended (a dev server, an
    editor) do not keep the window closed; they are listed, with the programs other chats left
    running, so that the agent can stop them first, and they show in the report.
@@ -45,11 +46,14 @@ or its reply ends.
 ## What waits, and how
 
 - **Claude chats.** Each chat process registers a `PreToolUse` hook callback for `Bash`,
-  `PowerShell` and `Monitor` in its `initialize` request, beside the compaction hooks. The
-  running reply answers it: with no opinion when the computer is free, the command is light, or
-  the chat holds the reservation itself (its sub-agents included); otherwise with a refusal that
-  names the chat measuring and its purpose and tells the agent to call `pc_wait` and run the
-  command again. A refusal rather than a held answer: a process parked between replies has nobody
+  `PowerShell`, `Monitor` and every MCP server's tools in its `initialize` request, beside the
+  compaction hooks: `tools::GATED`, `^(Bash|PowerShell|Monitor|mcp__.+)$`, anchored because
+  Claude Code (2.1.332) tests a matcher that is more than names as a regular expression anywhere
+  in the tool's name, where `Bash` alone would match `BashOutput`. The running reply
+  answers it: with no opinion when the computer is free, the call is light, or the chat holds the
+  reservation itself (its sub-agents included); otherwise with a refusal that names the chat
+  measuring and its purpose and tells the agent to call `pc_wait` and run the command, or make the
+  call, again. A refusal rather than a held answer: a process parked between replies has nobody
   to answer its hooks, so the hook's timeout is 30 seconds, and a command an unobserved turn of a
   parked process starts goes ahead after it. Claude Code names an SDK callback
   `PreToolUse:Callback`, which Work history leaves out. It also reports a call as started before
@@ -58,10 +62,22 @@ or its reply ends.
 - **Light commands** run anyway (`light.rs`): reading files, listing folders, searching text and
   asking Git about the checkout, every part of the command line. A command substitution, a script
   block, `Invoke-Expression` or any program the list does not name makes the command wait.
+- **MCP tool calls** wait like commands (requested 2026-11-25, since a chat driving an open
+  editor through unreal-mcp loads the computer as much as a command does). Both agents name an MCP
+  tool `mcp__<server>__<tool>` to their hooks (`activity::mcp_tool`), and the broker decides by
+  the server (`Broker::gate_call`): Agent Studio's own tools, `pc_wait` among them, answer for
+  themselves, and servers whose tools run elsewhere, claude.ai's connectors (`claude_ai_…` in
+  Claude Code) and Codex's apps (`codex_apps`), go ahead like light commands
+  (`light::remote_server`); every other server may drive a program here and waits. A call
+  already running keeps the window closed until it ends, as a command does: the tool decoder
+  records which server and tool a call reaches (`ToolActivity::connected`, never shown), and
+  `pc_status` and the report name it `<tool> of <server>`. `call_mcp_tool`, which reaches the
+  servers of another place of this computer, waits in its own handler, for both agents.
 - **Codex chats** on Windows get the same refusal (`reservations/codex_gate.rs`, found
   2026-11-24 on Codex 0.172). Codex runs `preToolUse` hooks before a shell command (its tool is
-  `Bash` to hooks, as in Claude Code) and blocks it when one answers `permissionDecision: deny`
-  with a reason. Each Codex chat's app-server starts with such a hook given as a session flag,
+  `Bash` to hooks, as in Claude Code) and before an MCP tool call, and blocks either when a hook
+  answers `permissionDecision: deny` with a reason; the hook's matcher is a regular expression
+  on the tool's name, `^(Bash|mcp__.+)$`. Each Codex chat's app-server starts with such a hook given as a session flag,
   `-c hooks.PreToolUse=[...]`, which Codex adds to the user's own hooks: this app's program in
   its gate mode (`--pc-gate`), run as PowerShell runs a quoted path (`& '…' --pc-gate`; Codex
   runs hook commands through PowerShell, and a hook that fails lets its command run). The gate
@@ -72,7 +88,9 @@ or its reply ends.
   and gate command, an app-server started with the hook and no thread lists its hooks
   (`hooks/list`), and the key and hash it reports go with every launch after
   (`-c hooks.state={<key> = {trusted_hash = …}}`, merged with the user's own trust entries),
-  kept in memory and in app data `reservations/codex-gate.json`. Work history shows the gate
+  kept in memory and in app data `reservations/codex-gate.json` under the whole session flag, so
+  a change of the hook's definition, its matcher included, asks Codex again: Codex skips a hook
+  whose definition changed. Work history shows the gate
   only when it blocks a command. `thread/start`'s `config` does not register hooks, and the
   `untrusted` approval mode, whose requests the app could have held, is gone from Codex 0.172.
 - **WSL Codex chats** run the same gate. Their hook command is this app's program at the path
@@ -184,7 +202,8 @@ reservation:
   measuring chat's processes apart from everything else, memory in use and free, and the busiest
   and largest other programs with whose they are;
 - how long other chats waited in `pc_wait` because of it, split by what kept the window closed
-  at the time (time several things shared is split between them), and how many commands waited.
+  at the time (time several things shared is split between them), and how many commands and MCP
+  tool calls waited.
 
 A reply waiting in `pc_wait` counts that time as **Waiting for the computer** in its time ledger
 (`held`, in the On hold family of the Time report).
@@ -208,7 +227,20 @@ other programs with whose they were) and why other chats waited. A reservation t
 while the window is open. Its chat opens from it. Each computer's desktop app keeps its own
 history, so the Viewer shows none.
 
+## Chats begun before reservations
+
+A chat agent learns of reservations from its first message (`tools::GUIDANCE`), and after a
+compaction. A Claude session begun before Agent Studio 1.4.0 never read it, though each process
+of its chat has the tools, and a system prompt cannot reach it, since Claude Code keeps the one a
+session started with. Its next reply's context carries the guidance once (`guidance_added`,
+requested 2026-11-25), as a session begun under an earlier rule for pages hears the current one:
+the binding records `reservations_rule` once a session has it, and one written before
+2026-11-25 has not, so a session begun on 1.4.0 hears it a second time.
+
 ## Not yet
 
 - Holding processes that begin inside a WSL distribution while a window is open: a WSL chat's
   program that starts work then is in the report, under WSL's virtual machine.
+- A Codex thread begun before Agent Studio 1.4.0 keeps the tools it started with: its commands
+  and MCP calls wait like any other chat's, but it has no `pc_wait` to wait with, nor
+  `pc_reserve` to measure with.

@@ -93,6 +93,10 @@ pub struct ToolActivity {
     facts: Vec<ActivityFact>,
     sources: Vec<Source>,
     agents: Vec<AgentActivity>,
+    /// The MCP server and tool a call reaches, which a reservation of the computer counts as
+    /// work (`reservations`). Never shown: the call's name and facts say it.
+    #[serde(skip)]
+    connected: Option<(String, String)>,
 }
 /// What a reply waits for while a record of its own runs (`time_spent`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,6 +142,12 @@ impl ToolActivity {
     }
     pub fn is_monitor(&self) -> bool {
         self.operation.as_deref() == Some("monitor")
+    }
+    /// The server and tool of a call to an MCP server, Agent Studio's own excepted.
+    pub fn connected(&self) -> Option<(&str, &str)> {
+        self.connected
+            .as_ref()
+            .map(|(server, tool)| (server.as_str(), tool.as_str()))
     }
     /// A message another chat, or Agent Studio, sent the reply that read it
     /// (`reservations::Broker::deliver`). `from` names the sender.
@@ -218,7 +228,14 @@ fn fresh(id: String, category: &str, name: &str) -> ToolActivity {
         facts: vec![],
         sources: vec![],
         agents: vec![],
+        connected: None,
     }
+}
+/// The server and tool of an MCP tool as Claude Code and Codex name it, `mcp__<server>__<tool>`,
+/// Agent Studio's own server excepted.
+pub(crate) fn mcp_tool(name: &str) -> Option<(&str, &str)> {
+    let (server, tool) = name.strip_prefix("mcp__")?.split_once("__")?;
+    (!server.is_empty() && !tool.is_empty() && server != "agent_studio").then_some((server, tool))
 }
 fn is_image_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
@@ -937,11 +954,15 @@ impl ToolDecoder {
                 tool.detail = Some("A skill file read was reported by the CLI. This does not establish that every skill instruction was followed.".into());
             }
         } else if kind == "mcp_tool_call" {
-            if let Some(name) = field(item, "tool") {
+            let (server, called) = (field(item, "server"), field(item, "tool"));
+            if let Some(name) = &called {
                 tool.name = format!("Connected tool: {name}");
             }
-            if let Some(server) = field(item, "server") {
+            if let Some(server) = &server {
                 fact(&mut tool, "Connection", server);
+            }
+            if let (Some(server), Some(called)) = (server, called) {
+                tool.connected = (server != "agent_studio").then_some((server, called));
             }
             self.set_input(&mut tool, &item["arguments"]);
             if event == "item.completed" {
@@ -1136,6 +1157,8 @@ impl ToolDecoder {
                         Some(place) => format!("{called} of {server} in {place}"),
                         None => format!("{called} of {server}"),
                     });
+                    // It reaches that server's tool as the chat's own MCP calls do.
+                    tool.connected = Some((server, called));
                 }
             }
             "mcp__agent_studio__list_mcp_tools" => tool.detail = field(input, "where"),
@@ -1167,7 +1190,11 @@ impl ToolDecoder {
                 self.set_input(&mut tool, &shown);
             }
             // Connected (MCP) and unrecognized tools show the arguments they were sent.
-            _ if !claude_builtin(name) && !studio_tool(name) => self.set_input(&mut tool, input),
+            _ if !claude_builtin(name) && !studio_tool(name) => {
+                tool.connected =
+                    mcp_tool(name).map(|(server, called)| (server.into(), called.into()));
+                self.set_input(&mut tool, input)
+            }
             _ => {}
         }
         self.publish(tool, out);

@@ -1101,6 +1101,14 @@ impl RunRequest {
             if session.pages_rule_changed && self.uses_claude_visualizer() {
                 context.push(crate::artifacts::pages_rule_changed());
             }
+            // A Claude chat's tools come with each process, so a session begun before them has
+            // them now; a Codex thread keeps the tools it started with.
+            if session.reservations_rule_changed
+                && self.uses_claude_visualizer()
+                && self.conversation_id.is_some()
+            {
+                context.push(crate::reservations::tools::guidance_added());
+            }
             context.extend(session.notes.iter().map(|note| note.to_string()));
             if session.instructions_changed {
                 context.push(format!("Current user instructions for this conversation (replace earlier conversation instructions): {}", serde_json::to_string(&self.agent.instructions).unwrap()));

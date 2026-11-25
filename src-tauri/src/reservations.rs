@@ -184,6 +184,13 @@ struct Run {
     /// The commands it runs, by tool activity identity.
     calls: HashMap<String, Call>,
 }
+/// What a chat asks to start while another may hold the computer.
+#[derive(Clone, Copy)]
+enum Asked {
+    Command,
+    /// A call of an MCP server's tool.
+    Tool,
+}
 struct Call {
     label: String,
     light: bool,
@@ -447,9 +454,10 @@ impl Broker {
         );
     }
 
-    /// A call a running reply reported. Commands and monitors count while they run.
+    /// A call a running reply reported. Commands, monitors and calls of MCP servers' tools count
+    /// while they run.
     pub fn tool(&self, run_id: &str, tool: &ToolActivity) {
-        if !(tool.runs_command() || tool.is_monitor()) {
+        if !(tool.runs_command() || tool.is_monitor() || tool.connected().is_some()) {
             return;
         }
         let update = {
@@ -474,11 +482,15 @@ impl Broker {
                 {
                     return;
                 }
+                let light = match tool.connected() {
+                    Some((server, _)) => light::remote_server(server),
+                    None => !command.is_empty() && light::is_light(&command),
+                };
                 run.calls.insert(
                     tool.id.clone(),
                     Call {
                         label: label_of(tool),
-                        light: !command.is_empty() && light::is_light(&command),
+                        light,
                         read,
                     },
                 );
@@ -690,7 +702,7 @@ impl Broker {
                             ask.read.get_or_insert(now);
                         }
                         format!(
-                            "{}, another agent working on this computer (not the user), holds it for a performance measurement ({}) and asks you to hand over what you hold: {}\nUntil you hand over, your commands still run while that measurement waits for you. Finish what you need from what you already run, without starting new heavy work, and stop the background work you no longer need. Then hand over with pc_release (Claude: mcp__agent_studio__pc_release): Agent Studio closes the programs you left running, and your commands wait until the measurement ends. If that takes long, say so with chat_message.",
+                            "{}, another agent working on this computer (not the user), holds it for a performance measurement ({}) and asks you to hand over what you hold: {}\nUntil you hand over, your commands and MCP tool calls still run while that measurement waits for you. Finish what you need from what you already run, without starting new heavy work, and stop the background work you no longer need. Then hand over with pc_release (Claude: mcp__agent_studio__pc_release): Agent Studio closes the programs you left running, and your commands and MCP tool calls wait until the measurement ends. If that takes long, say so with chat_message.",
                             capitalized(&from),
                             first.purpose,
                             message.text
@@ -854,7 +866,7 @@ impl Broker {
                     .join("; ")
             ));
         }
-        text.push_str(" From now on your commands wait until that measurement ends, except light ones: call pc_wait before running one.");
+        text.push_str(" From now on your commands and MCP tool calls wait until that measurement ends, except light commands: call pc_wait before running one.");
         Some(Ok(text))
     }
 
@@ -1183,16 +1195,41 @@ impl Broker {
         call: Option<&str>,
         wait: &str,
     ) -> Option<String> {
+        let light = light::is_light(&light::own(command));
+        self.hold(conversation, light, Asked::Command, call, wait)
+    }
+
+    /// Whether a call of the MCP server `server`'s tool that `conversation` wants to make must
+    /// wait, as `gate` tells for a command: a server may drive a program here, as unreal-mcp
+    /// drives an editor. Agent Studio's own tools and servers whose tools run elsewhere go ahead.
+    pub fn gate_call(
+        &self,
+        conversation: &str,
+        server: &str,
+        call: Option<&str>,
+        wait: &str,
+    ) -> Option<String> {
+        let light = server == "agent_studio" || light::remote_server(server);
+        self.hold(conversation, light, Asked::Tool, call, wait)
+    }
+
+    fn hold(
+        &self,
+        conversation: &str,
+        light: bool,
+        asked: Asked,
+        call: Option<&str>,
+        wait: &str,
+    ) -> Option<String> {
         let (reason, snapshot) = {
             let mut state = self.lock();
             let first = state.queue.first_mut()?;
             // A chat asked to hand over finishes what it needs first.
-            let asked = first
+            let handing = first
                 .asks
                 .iter()
                 .any(|a| a.conversation == conversation && a.ended.is_none() && !a.closing);
-            if first.conversation == conversation || asked || light::is_light(&light::own(command))
-            {
+            if first.conversation == conversation || handing || light {
                 return None;
             }
             // A command waited once however often its call asks.
@@ -1205,7 +1242,7 @@ impl Broker {
                     run.calls.remove(call);
                 }
             }
-            let reason = self.refusal(&state.queue[0], wait);
+            let reason = self.refusal(&state.queue[0], asked, wait);
             (reason, self.settled(&mut state, Instant::now()))
         };
         if let Some(snapshot) = snapshot {
@@ -1214,9 +1251,13 @@ impl Broker {
         Some(reason)
     }
 
-    fn refusal(&self, first: &Reservation, wait: &str) -> String {
+    fn refusal(&self, first: &Reservation, asked: Asked, wait: &str) -> String {
+        let (what, again) = match asked {
+            Asked::Command => ("This command", "run the same command again"),
+            Asked::Tool => ("This tool call", "make the same call again"),
+        };
         format!(
-            "This command did not run: {} reserved this computer for a performance measurement ({}), and other chats' commands wait until it ends, {}. Call {wait}, which returns once the computer is free, then run the same command again. Meanwhile keep reading and editing files; light commands such as git status, ls and rg still run.",
+            "{what} did not run: {} reserved this computer for a performance measurement ({}), and other chats' commands and MCP tool calls wait until it ends, {}. Call {wait}, which returns once the computer is free, then {again}. Meanwhile keep reading and editing files; light commands such as git status, ls and rg still run.",
             self.chat(&first.conversation),
             first.purpose,
             match first.opened {
@@ -1228,7 +1269,7 @@ impl Broker {
                         .map(|m| format!(" of about {}", duration(Duration::from_secs_f64(m.max(0.0) * 60.0))))
                         .unwrap_or_default()
                 ),
-                None => "and it waits for other chats' commands to finish first".into(),
+                None => "and it waits for other chats' commands and tool calls to finish first".into(),
             }
         )
     }
@@ -1296,11 +1337,12 @@ impl Broker {
                     if !held {
                         Step::Done(if guard.is_some() {
                             format!(
-                                "The computer is free again after {}: run your command now.",
+                                "The computer is free again after {}: run your command or tool call now.",
                                 duration(began.elapsed())
                             )
                         } else {
-                            "The computer is not reserved: run your command now.".into()
+                            "The computer is not reserved: run your command or tool call now."
+                                .into()
                         })
                     } else if guard.is_none() {
                         state.next += 1;
@@ -1357,17 +1399,17 @@ impl Broker {
             }
             Some(_) => "Your window has not opened yet: call pc_wait again to wait for it.",
             None => match state.queue.first() {
-                None => "The computer is not reserved: run your command now.",
+                None => "The computer is not reserved: run your command or tool call now.",
                 Some(first)
                     if first
                         .asks
                         .iter()
                         .any(|a| a.conversation == conversation && a.ended.is_none()) =>
                 {
-                    "Your commands run again until you hand over with pc_release."
+                    "Your commands and tool calls run again until you hand over with pc_release."
                 }
                 Some(_) => {
-                    "The computer is still reserved: call pc_wait again before running a command."
+                    "The computer is still reserved: call pc_wait again before running a command or an MCP tool call."
                 }
             },
         }
@@ -1375,7 +1417,7 @@ impl Broker {
 
     fn opened_text(&self, reservation: &Reservation, waited: Duration) -> String {
         let mut text = format!(
-            "The window is open: no other chat runs a command now, and their new commands wait until you call pc_release. Measure now, then release at once and analyze afterwards. You waited {}.",
+            "The window is open: no other chat runs a command or an MCP tool call now, and their new ones wait until you call pc_release. Measure now, then release at once and analyze afterwards. You waited {}.",
             duration(waited)
         );
         let blockers = summed(
@@ -1459,15 +1501,15 @@ impl Broker {
         let mut text = if index > 0 {
             let first = &state.queue[0];
             format!(
-                "Reserved, after {} ({}), whose turn comes first{}. Other chats' new commands, yours included, wait until it ends. Call pc_wait: it returns once your window opens.",
+                "Reserved, after {} ({}), whose turn comes first{}. Other chats' new commands and MCP tool calls, yours included, wait until it ends. Call pc_wait: it returns once your window opens.",
                 self.chat(&first.conversation),
                 first.purpose,
                 if index > 1 { format!(", and {} more before you", index - 1) } else { String::new() }
             )
         } else if mine.opened.is_some() {
-            "Reserved, and the window is open: no other chat runs a command now. Measure, then call pc_release.".into()
+            "Reserved, and the window is open: no other chat runs a command or an MCP tool call now. Measure, then call pc_release.".into()
         } else {
-            "Reserved: from now on other chats' commands wait, except light ones such as git status. Call pc_wait: it returns once the work below has finished and the window opens.".into()
+            "Reserved: from now on other chats' commands and MCP tool calls wait, except light commands such as git status. Call pc_wait: it returns once the work below has finished and the window opens.".into()
         };
         let others: Vec<&Item> = items
             .iter()
@@ -1513,10 +1555,10 @@ impl Broker {
                     }
                 }
                 Some(first) => format!(
-                    "{} holds the computer ({}); {}. Other chats' commands wait until it ends: call pc_wait before running one.",
+                    "{} holds the computer ({}); {}. Other chats' commands and MCP tool calls wait until it ends: call pc_wait before running one.",
                     capitalized(&self.named(&first.conversation)),
                     first.purpose,
-                    if first.opened.is_some() { "its window is open" } else { "it waits for other chats' commands to finish" }
+                    if first.opened.is_some() { "its window is open" } else { "it waits for other chats' commands and tool calls to finish" }
                 ),
             };
             if let Some(index) = state
@@ -1536,7 +1578,7 @@ impl Broker {
                     .iter()
                     .any(|a| a.conversation == conversation && a.ended.is_none())
                 {
-                    text.push_str(" It asked this chat to hand over what it holds: your commands run until you do, so finish what you need, then call pc_release.");
+                    text.push_str(" It asked this chat to hand over what it holds: your commands and tool calls run until you do, so finish what you need, then call pc_release.");
                 }
                 if first.conversation == conversation {
                     let frozen = frozen_groups(&first.frozen);
@@ -1574,7 +1616,9 @@ impl Broker {
                 .filter(|i| i.conversation != conversation)
                 .collect();
             if others.is_empty() {
-                text.push_str("\nNo other chat runs a command or background work now.");
+                text.push_str(
+                    "\nNo other chat runs a command, an MCP tool call or background work now.",
+                );
             } else {
                 text.push_str("\nOther chats' work now:");
                 for item in others {
@@ -1757,7 +1801,7 @@ impl Broker {
         if r.opened.is_some() {
             let others = summed(&ran(&r.others), now);
             if others.is_empty() {
-                lines.push("During it, no other chat ran a command.".into());
+                lines.push("During it, no other chat ran a command or an MCP tool call.".into());
             } else {
                 lines.push(format!(
                     "Other chats' work that ran during it anyway: {}.",
@@ -1871,7 +1915,11 @@ impl Broker {
             }
             line.push_str(&format!(
                 ", and {} waited.",
-                plural(r.refused as usize, "command", "commands")
+                plural(
+                    r.refused as usize,
+                    "command or tool call",
+                    "commands and tool calls"
+                )
             ));
             lines.push(line);
         }
@@ -2214,6 +2262,9 @@ fn held(r: &Reservation, waits: &[Wait], now: Instant) -> Held {
 
 /// A call's label for text: its description, else the first line of its command.
 fn label_of(tool: &ToolActivity) -> String {
+    if let Some((server, called)) = tool.connected() {
+        return format!("{} of {}", shortened(called, 80), shortened(server, 80));
+    }
     let command = tool
         .command()
         .and_then(|c| {

@@ -450,7 +450,7 @@ async fn the_gate_refuses_commands_while_another_chat_measures_and_pc_wait_answe
         .unwrap();
     assert_eq!(
         init["request"]["hooks"]["PreToolUse"][0]["matcher"],
-        "Bash|PowerShell|Monitor"
+        crate::reservations::tools::GATED
     );
     assert!(init["request"]["hooks"]["SessionStart"].is_array());
     let gate = input

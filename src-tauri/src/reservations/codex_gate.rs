@@ -92,10 +92,15 @@ fn linux_program(program: &Path) -> Option<String> {
     ))
 }
 
-/// The session flag that adds the gate before every shell command.
+/// The tools the gate is asked about: shell commands, which Codex names `Bash` to hooks, and every
+/// MCP server's tools, which it names `mcp__<server>__<tool>` (Codex's hooks documentation).
+const GATED: &str = "^(Bash|mcp__.+)$";
+
+/// The session flag that adds the gate before every shell command and MCP tool call.
 pub fn hook_flag(command: &str) -> String {
     format!(
-        "hooks.PreToolUse=[{{matcher = \"^Bash$\", hooks = [{{type = \"command\", command = {}, timeout = {TIMEOUT_SECONDS}}}]}}]",
+        "hooks.PreToolUse=[{{matcher = {}, hooks = [{{type = \"command\", command = {}, timeout = {TIMEOUT_SECONDS}}}]}}]",
+        toml_string(GATED),
         toml_string(command)
     )
 }
@@ -147,12 +152,15 @@ pub async fn launch(
     })
 }
 
-/// The Codex executable and hook command the trust holds for. A WSL Codex is named by its
-/// launch, which this computer cannot read the file of, so its trust is kept for the run alone.
+/// The Codex executable and hook the trust holds for: the whole session flag, since Codex trusts
+/// a hash of the hook's definition, matcher included, and skips a hook whose definition changed.
+/// A WSL Codex is named by its launch, which this computer cannot read the file of, so its trust
+/// is kept for the run alone.
 fn identity(exe: &crate::providers::Executable, command: &str) -> Option<String> {
+    let hook = hook_flag(command);
     if exe.wsl.is_some() {
         return Some(format!(
-            "wsl|{}|{command}",
+            "wsl|{}|{hook}",
             crate::wsl::reusable_prefix(exe).join("\u{1f}")
         ));
     }
@@ -164,7 +172,7 @@ fn identity(exe: &crate::providers::Executable, command: &str) -> Option<String>
         .ok()?
         .as_millis();
     Some(format!(
-        "{}|{}|{modified}|{command}",
+        "{}|{}|{modified}|{hook}",
         exe.program.display(),
         meta.len()
     ))
@@ -333,8 +341,8 @@ async fn listen(
     }
 }
 
-/// One question of the gate: may this chat run this command? Messages other chats sent the
-/// chat's own agent come with the answer.
+/// One question of the gate: may this chat run this command, or call this MCP tool? Messages
+/// other chats sent the chat's own agent come with the answer.
 #[cfg(windows)]
 async fn answer(
     pipe: tokio::net::windows::named_pipe::NamedPipeServer,
@@ -347,7 +355,13 @@ async fn answer(
     let request: Value = serde_json::from_str(&line).unwrap_or_default();
     let reply = match (request["chat"].as_str(), request["command"].as_str()) {
         (Some(chat), Some(command)) => {
-            let deny = broker.gate(chat, command, request["call"].as_str(), "pc_wait");
+            let deny = decide(
+                broker,
+                chat,
+                request["tool"].as_str().unwrap_or_default(),
+                command,
+                request["call"].as_str(),
+            );
             // A sub-agent works in a thread of its own: messages wait for the chat's own agent.
             let messages = request["thread"]
                 .as_str()
@@ -366,6 +380,23 @@ async fn answer(
     write.flush().await
 }
 
+/// Whether `chat` must wait to call the hook's `tool`: an MCP server's tool, or else the shell
+/// with `command`. Agent Studio's own tools, pc_wait among them, answer for themselves.
+#[cfg(any(windows, test))]
+fn decide(
+    broker: &super::Broker,
+    chat: &str,
+    tool: &str,
+    command: &str,
+    call: Option<&str>,
+) -> Option<String> {
+    match crate::protocol::activity::mcp_tool(tool) {
+        Some((server, _)) => broker.gate_call(chat, server, call, "pc_wait"),
+        None if tool.starts_with("mcp__") => None,
+        None => broker.gate(chat, command, call, "pc_wait"),
+    }
+}
+
 /// What the app answers the gate.
 #[derive(Debug, Default, PartialEq)]
 pub struct Reply {
@@ -375,25 +406,22 @@ pub struct Reply {
     pub context: Option<String>,
 }
 
-/// Asks the app on `pipe` whether `chat` may run `command` in `thread`. Nothing when the app
-/// does not answer, since a gate that fails holds nothing.
-pub fn ask(
-    pipe: &str,
-    chat: &str,
-    command: &str,
-    call: Option<&str>,
-    thread: Option<&str>,
-) -> Reply {
-    asked(pipe, chat, command, call, thread).unwrap_or_default()
+/// What the gate asks the app: the hook's tool, the command a shell call runs, the call's
+/// activity identity and the thread it was made in.
+pub struct Question<'a> {
+    pub tool: &'a str,
+    pub command: &'a str,
+    pub call: Option<&'a str>,
+    pub thread: Option<&'a str>,
 }
 
-fn asked(
-    pipe: &str,
-    chat: &str,
-    command: &str,
-    call: Option<&str>,
-    thread: Option<&str>,
-) -> Option<Reply> {
+/// Asks the app on `pipe` whether `chat` may make the call `question` names. Nothing when the
+/// app does not answer, since a gate that fails holds nothing.
+pub fn ask(pipe: &str, chat: &str, question: &Question) -> Reply {
+    asked(pipe, chat, question).unwrap_or_default()
+}
+
+fn asked(pipe: &str, chat: &str, question: &Question) -> Option<Reply> {
     use std::io::{BufRead, BufReader, Write};
     // Between two questions the pipe has no instance waiting for a moment.
     let mut file = None;
@@ -417,7 +445,7 @@ fn asked(
     writeln!(
         file,
         "{}",
-        json!({"chat": chat, "command": command, "call": call, "thread": thread})
+        json!({"chat": chat, "tool": question.tool, "command": question.command, "call": question.call, "thread": question.thread})
     )
     .ok()?;
     let mut line = String::new();
@@ -439,31 +467,31 @@ pub fn gate_main() -> i32 {
     let (Ok(pipe), Ok(chat)) = (std::env::var(PIPE_ENV), std::env::var(CHAT_ENV)) else {
         return 0;
     };
-    if let Some(output) = refusal(&input, |command, call, thread| {
-        ask(&pipe, &chat, command, call, thread)
-    }) {
+    if let Some(output) = refusal(&input, |question| ask(&pipe, &chat, question)) {
         print!("{output}");
     }
     0
 }
 
 /// The hook's output for its input, given how the app answers.
-fn refusal(
-    input: &str,
-    ask: impl FnOnce(&str, Option<&str>, Option<&str>) -> Reply,
-) -> Option<String> {
+fn refusal(input: &str, ask: impl FnOnce(&Question) -> Reply) -> Option<String> {
     let hook: Value = serde_json::from_str(input).ok()?;
     if hook["hook_event_name"] != "PreToolUse" {
         return None;
     }
-    let command = hook["tool_input"]["command"].as_str().unwrap_or_default();
     let thread = hook["session_id"].as_str();
     // The call's activity identity, as the tool decoder names a Codex call.
     let call = match (thread, hook["tool_use_id"].as_str()) {
         (Some(thread), Some(id)) => Some(format!("codex:{thread}:{id}")),
         _ => None,
     };
-    let output = match ask(command, call.as_deref(), thread) {
+    let question = Question {
+        tool: hook["tool_name"].as_str().unwrap_or_default(),
+        command: hook["tool_input"]["command"].as_str().unwrap_or_default(),
+        call: call.as_deref(),
+        thread,
+    };
+    let output = match ask(&question) {
         Reply {
             deny: Some(reason), ..
         } => json!({"hookSpecificOutput":{
@@ -495,7 +523,11 @@ mod tests {
         );
         let hook: toml::Value = toml::from_str(&hook_flag(&command)).unwrap();
         let group = &hook["hooks"]["PreToolUse"][0];
-        assert_eq!(group["matcher"].as_str(), Some("^Bash$"));
+        assert_eq!(group["matcher"].as_str(), Some(GATED));
+        // Codex tests the matcher as a regular expression against the hook's tool name.
+        let gated = regex::Regex::new(GATED).unwrap();
+        assert!(gated.is_match("Bash") && gated.is_match("mcp__unreal-mcp__execute_python"));
+        assert!(!gated.is_match("apply_patch") && !gated.is_match("update_plan"));
         assert_eq!(group["hooks"][0]["type"].as_str(), Some("command"));
         assert_eq!(
             group["hooks"][0]["command"].as_str(),
@@ -536,11 +568,12 @@ mod tests {
     fn the_hook_refuses_only_what_the_app_refuses_and_names_the_call() {
         let input = json!({"session_id":"t1","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cargo build"},"tool_use_id":"exec-1"}).to_string();
         let mut asked = None;
-        let output = refusal(&input, |command, call, thread| {
+        let output = refusal(&input, |question| {
             asked = Some((
-                command.to_string(),
-                call.map(String::from),
-                thread.map(String::from),
+                question.tool.to_string(),
+                question.command.to_string(),
+                question.call.map(String::from),
+                question.thread.map(String::from),
             ));
             Reply {
                 deny: Some("Wait for the benchmark.".into()),
@@ -551,6 +584,7 @@ mod tests {
         assert_eq!(
             asked,
             Some((
+                "Bash".into(),
                 "cargo build".into(),
                 Some("codex:t1:exec-1".into()),
                 Some("t1".into())
@@ -563,7 +597,7 @@ mod tests {
             "Wait for the benchmark."
         );
         // Messages reach the agent beside a command that runs.
-        let context = refusal(&input, |_, _, _| Reply {
+        let context = refusal(&input, |_| Reply {
             deny: None,
             context: Some("A message from another chat.".into()),
         })
@@ -573,10 +607,40 @@ mod tests {
             context["hookSpecificOutput"],
             json!({"hookEventName":"PreToolUse","additionalContext":"A message from another chat."})
         );
-        assert!(refusal(&input, |_, _, _| Reply::default()).is_none());
-        assert!(refusal("not json", |_, _, _| panic!("never asked")).is_none());
+        assert!(refusal(&input, |_| Reply::default()).is_none());
+        assert!(refusal("not json", |_| panic!("never asked")).is_none());
         let other = json!({"hook_event_name":"PostToolUse"}).to_string();
-        assert!(refusal(&other, |_, _, _| panic!("never asked")).is_none());
+        assert!(refusal(&other, |_| panic!("never asked")).is_none());
+        // An MCP call goes by its tool's name, its arguments carrying no command.
+        let mcp = json!({"session_id":"t1","hook_event_name":"PreToolUse","tool_name":"mcp__unreal-mcp__execute_python","tool_input":{"code":"print(1)"},"tool_use_id":"call-2"}).to_string();
+        refusal(&mcp, |question| {
+            assert_eq!(
+                (question.tool, question.command),
+                ("mcp__unreal-mcp__execute_python", "")
+            );
+            Reply::default()
+        });
+    }
+
+    #[test]
+    fn the_app_holds_mcp_calls_but_not_its_own_tools() {
+        let broker = super::super::Broker::new(
+            Box::new(|_| {}),
+            Box::new(|_| Some("Chunk benchmark".into())),
+            Box::new(Vec::new),
+            None,
+        );
+        broker.reserve("run-bench", "bench", "Benchmark", None);
+        let deny = |tool: &str, command: &str| decide(&broker, "ui", tool, command, None);
+        let reason = deny("mcp__unreal-mcp__execute_python", "").unwrap();
+        assert!(reason.starts_with("This tool call did not run"), "{reason}");
+        assert!(reason.contains("Call pc_wait"), "{reason}");
+        assert!(deny("mcp__agent_studio__pc_wait", "").is_none());
+        assert!(deny("mcp__codex_apps__github_search", "").is_none());
+        assert!(deny("Bash", "cargo build")
+            .unwrap()
+            .starts_with("This command did not run"));
+        assert!(deny("Bash", "git status").is_none());
     }
 
     #[test]
@@ -728,7 +792,13 @@ mod tests {
         let ask_in = |chat: &'static str, command: &'static str, thread: &'static str| {
             let name = name.clone();
             tokio::task::spawn_blocking(move || {
-                ask(&name, chat, command, Some("codex:t:c"), Some(thread))
+                let question = Question {
+                    tool: "Bash",
+                    command,
+                    call: Some("codex:t:c"),
+                    thread: Some(thread),
+                };
+                ask(&name, chat, &question)
             })
         };
         let ask_now = |chat: &'static str, command: &'static str| ask_in(chat, command, "t");
@@ -767,15 +837,30 @@ mod tests {
             context.contains("Close your editor when you can."),
             "{context}"
         );
+        // An MCP call that drives a program here waits like a command.
+        let mcp = {
+            let name = name.clone();
+            tokio::task::spawn_blocking(move || {
+                let question = Question {
+                    tool: "mcp__unreal-mcp__execute_python",
+                    command: "",
+                    call: None,
+                    thread: Some("t"),
+                };
+                ask(&name, "other", &question)
+            })
+        };
+        let reason = mcp.await.unwrap().deny.unwrap();
+        assert!(reason.starts_with("This tool call did not run"), "{reason}");
         // No app on the pipe: the command runs.
+        let question = Question {
+            tool: "Bash",
+            command: "cargo build",
+            call: None,
+            thread: None,
+        };
         assert_eq!(
-            ask(
-                r"\\.\pipe\agent-studio-pc-nobody",
-                "ui",
-                "cargo build",
-                None,
-                None
-            ),
+            ask(r"\\.\pipe\agent-studio-pc-nobody", "ui", &question),
             Reply::default()
         );
     }

@@ -52,7 +52,7 @@ async fn the_window_opens_once_other_chats_commands_finish() {
         Some(5.0),
     );
     assert!(
-        text.starts_with("Reserved: from now on other chats' commands wait"),
+        text.starts_with("Reserved: from now on other chats' commands and MCP tool calls wait"),
         "{text}"
     );
     assert!(
@@ -120,7 +120,11 @@ async fn the_gate_counts_refusals_and_the_report_tells_what_happened() {
         "{}",
         report.text
     );
-    assert!(report.text.contains("1 command waited"), "{}", report.text);
+    assert!(
+        report.text.contains("1 command or tool call waited"),
+        "{}",
+        report.text
+    );
     assert_eq!(report.record["held"]["refused"], 1);
     assert_eq!(report.record["endedBy"], "release");
     assert!(broker.release("bench").is_none());
@@ -249,7 +253,7 @@ async fn a_wait_ends_when_its_call_stops() {
     broker.release("bench");
     assert_eq!(
         broker.wait("ui", &CancellationToken::new()).await.unwrap(),
-        "The computer is not reserved: run your command now."
+        "The computer is not reserved: run your command or tool call now."
     );
 }
 
@@ -304,12 +308,77 @@ async fn a_command_the_gate_refused_never_counts_as_run() {
     assert!(
         report
             .text
-            .contains("During it, no other chat ran a command."),
+            .contains("During it, no other chat ran a command or an MCP tool call."),
         "{}",
         report.text
     );
-    assert!(report.text.contains("1 command waited"), "{}", report.text);
+    assert!(
+        report.text.contains("1 command or tool call waited"),
+        "{}",
+        report.text
+    );
     assert!(broker.lock().refused.is_empty());
+}
+
+/// A Claude call `id` of the MCP tool `name`, then the same call once it ended.
+fn mcp_call(id: &str, name: &str) -> (ToolActivity, ToolActivity) {
+    let mut decoder = ToolDecoder::default();
+    let started = decoder
+        .decode(
+            "claude",
+            &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":name,"input":{"code":"print(1)"}}]}}),
+        )
+        .pop()
+        .unwrap();
+    let ended = decoder
+        .decode(
+            "claude",
+            &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":id,"content":"done"}]}}),
+        )
+        .pop()
+        .unwrap();
+    (started, ended)
+}
+
+#[tokio::test]
+async fn other_chats_mcp_calls_wait_and_keep_the_window_closed_while_they_run() {
+    let broker = broker_with(vec![], None);
+    broker.run_started("run-ui", "ui");
+    // A call that drives a program here, such as an editor through unreal-mcp, runs while the
+    // reservation begins; one of claude.ai's connectors runs elsewhere.
+    let (editor, edited) = mcp_call("e1", "mcp__unreal-mcp__execute_python");
+    let (linear, _) = mcp_call("l1", "mcp__claude_ai_Linear__list_issues");
+    assert_eq!(editor.connected(), Some(("unreal-mcp", "execute_python")));
+    broker.tool("run-ui", &editor);
+    broker.tool("run-ui", &linear);
+    broker.reserve("run-bench", "bench", "Benchmark", None);
+    let view = &broker.snapshot().reservations[0];
+    assert_eq!(view.phase, "draining");
+    assert_eq!(view.waiting_for.len(), 1);
+    assert_eq!(view.waiting_for[0].label, "execute_python of unreal-mcp");
+    broker.tool("run-ui", &edited);
+    assert_eq!(broker.snapshot().reservations[0].phase, "open");
+    // New calls wait like commands, but for the holder's own, Agent Studio's and connectors'.
+    let reason = broker
+        .gate_call("ui", "unreal-mcp", None, "pc_wait")
+        .unwrap();
+    assert!(reason.starts_with("This tool call did not run: the chat \"Chunk benchmark\""));
+    assert!(reason.contains("then make the same call again"), "{reason}");
+    assert!(broker
+        .gate_call("bench", "unreal-mcp", None, "pc_wait")
+        .is_none());
+    for server in ["agent_studio", "claude_ai_Linear", "codex_apps"] {
+        assert!(broker.gate_call("ui", server, None, "pc_wait").is_none());
+    }
+    let report = broker.release("bench").unwrap();
+    assert!(
+        report.text.contains("1 command or tool call waited"),
+        "{}",
+        report.text
+    );
+    // Agent Studio's own tools are no MCP server's.
+    let (own, _) = mcp_call("s1", "mcp__agent_studio__pc_status");
+    assert_eq!(own.connected(), None);
 }
 
 #[test]
@@ -446,7 +515,9 @@ async fn a_chat_asked_to_hand_over_works_on_and_the_window_waits_for_it() {
         "{read}"
     );
     assert!(
-        read.ends_with("Your commands run again until you hand over with pc_release."),
+        read.ends_with(
+            "Your commands and tool calls run again until you hand over with pc_release."
+        ),
         "{read}"
     );
     let status = broker.status("bench", None);
@@ -457,7 +528,7 @@ async fn a_chat_asked_to_hand_over_works_on_and_the_window_waits_for_it() {
     // Handing over opens the window, and its commands wait from then on.
     let handed = broker.hand_over("ui").await.unwrap().unwrap();
     assert!(
-        handed.starts_with("Handed over to the chat \"Chunk benchmark\" (id bench) for its measurement (Benchmark). This chat left no programs running. From now on your commands wait"),
+        handed.starts_with("Handed over to the chat \"Chunk benchmark\" (id bench) for its measurement (Benchmark). This chat left no programs running. From now on your commands and MCP tool calls wait"),
         "{handed}"
     );
     assert_eq!(broker.snapshot().reservations[0].phase, "open");
@@ -547,7 +618,7 @@ async fn a_message_ends_a_wait_and_says_where_the_computer_stands() {
     assert!(read.contains("About ten minutes."), "{read}");
     assert!(
         read.ends_with(
-            "The computer is still reserved: call pc_wait again before running a command."
+            "The computer is still reserved: call pc_wait again before running a command or an MCP tool call."
         ),
         "{read}"
     );

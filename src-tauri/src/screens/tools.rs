@@ -133,6 +133,8 @@ pub struct Context {
     data: PathBuf,
     screens: Arc<super::Screens>,
     launch: Arc<dyn super::mcp::Launch>,
+    /// What holds a call of an MCP tool while another chat measures this computer.
+    reservations: Option<Arc<crate::reservations::Broker>>,
     conversation_id: String,
     run_id: String,
     provider: String,
@@ -156,6 +158,9 @@ impl Context {
             data: app.path().app_local_data_dir().ok()?,
             screens: app.try_state::<Arc<super::Screens>>()?.inner().clone(),
             launch: Arc::new(super::mcp::Host(app.clone())),
+            reservations: app
+                .try_state::<Arc<crate::reservations::Broker>>()
+                .map(|broker| broker.inner().clone()),
             conversation_id,
             run_id: request.run_id.clone(),
             provider: request.agent.provider.clone(),
@@ -174,6 +179,7 @@ impl Context {
             data,
             screens,
             launch: Arc::new(super::mcp::Unlaunched),
+            reservations: None,
             conversation_id: request.conversation_id.clone().expect("a conversation"),
             run_id: request.run_id.clone(),
             provider: request.agent.provider.clone(),
@@ -478,7 +484,8 @@ async fn servers(context: &Context, args: &Value) -> Result<String, String> {
     .map_err(|_| "Cannot list these MCP servers".into())
 }
 
-async fn call(context: &Context, args: &Value) -> Result<String, String> {
+/// `activity` is the call's tool activity identity, when known, which then never counts as run.
+async fn call(context: &Context, args: &Value, activity: Option<&str>) -> Result<String, String> {
     let object = args
         .as_object()
         .ok_or("Send server, tool and arguments, with where and account when needed.")?;
@@ -493,6 +500,18 @@ async fn call(context: &Context, args: &Value) -> Result<String, String> {
         Some(Value::Object(arguments)) => arguments.clone(),
         Some(_) => return Err("arguments must be an object of the tool's arguments.".into()),
     };
+    // It waits while another chat measures this computer, as the chat's own MCP calls do: the
+    // server may drive a program here or in WSL.
+    if let Some(broker) = &context.reservations {
+        let wait = if context.provider == "claude" {
+            "mcp__agent_studio__pc_wait"
+        } else {
+            "pc_wait"
+        };
+        if let Some(reason) = broker.gate_call(&context.conversation_id, &server, activity, wait) {
+            return Err(reason);
+        }
+    }
     let (place, account) = reach(object)?;
     let (site, candidates) = reached(context, place.as_deref(), account.clone()).await?;
     let (result, answered) = context
@@ -520,11 +539,13 @@ impl Agent {
         self.saved
     }
 
+    /// `activity` is the call's tool activity identity, when known.
     async fn answer(
         &self,
         name: &str,
         args: &Value,
         context: Option<&Context>,
+        activity: Option<&str>,
     ) -> Result<(String, Option<Card>), String> {
         let context = context
             .ok_or("Screens are available in saved Claude and Codex conversations with tools.")?;
@@ -534,7 +555,7 @@ impl Agent {
                 .map(|(text, card)| (text, Some(card))),
             LIST => list(context, args).await.map(|text| (text, None)),
             SERVERS => servers(context, args).await.map(|text| (text, None)),
-            CALL => call(context, args).await.map(|text| (text, None)),
+            CALL => call(context, args, activity).await.map(|text| (text, None)),
             _ => read(context, args).await.map(|text| (text, None)),
         }
     }
@@ -598,7 +619,9 @@ impl Agent {
             .map(|(id, _)| id.clone());
         let result = match call {
             Some(call) => {
-                let answer = self.answer(name, args, context).await;
+                // The call's identity as the tool decoder names a Claude call.
+                let activity = format!("claude:{call}");
+                let answer = self.answer(name, args, context, Some(&activity)).await;
                 if let Ok((_, Some(card))) = &answer {
                     self.accepted.insert(call, card.clone());
                 }
@@ -635,7 +658,7 @@ impl Agent {
             && p["threadId"] == root
             && crate::providers::codex_chat::own_namespace(&p["namespace"])
         {
-            self.answer(name, &p["arguments"], context).await
+            self.answer(name, &p["arguments"], context, None).await
         } else {
             Err("Screens are saved and read by the parent conversation.".into())
         };
