@@ -2172,9 +2172,18 @@ fn has_owned_work(app: &tauri::AppHandle) -> bool {
             > 0
 }
 
+/// Lets the processes a measurement holds run again (reservations/hold.rs): what other chats'
+/// programs started while its window was open waits no longer once this app quits.
+fn thaw_held(app: &tauri::AppHandle) {
+    if let Some(broker) = app.try_state::<std::sync::Arc<reservations::Broker>>() {
+        broker.thaw_all();
+    }
+}
+
 /// Cancel all owned work, release parked CLIs, and wait until owned processes have stopped,
 /// including the ones still ending after their work, which may be saving a renewed login.
 async fn release_owned_work(app: &tauri::AppHandle) {
+    thaw_held(app);
     for token in owned_tokens(app) {
         token.cancel();
     }
@@ -2197,6 +2206,7 @@ async fn release_owned_work(app: &tauri::AppHandle) {
 /// does, except replies: none runs when it begins, and one that begins meanwhile is the caller's
 /// to wait for rather than stop.
 async fn release_for_shutdown(app: &tauri::AppHandle) {
+    thaw_held(app);
     for token in background_tokens(app) {
         token.cancel();
     }
@@ -2568,6 +2578,7 @@ pub fn run() {
         // The window thread stops taking tasks on purpose now; that is no freeze.
         if let tauri::RunEvent::Exit = event {
             watchdog::stop(handle);
+            thaw_held(handle);
         }
         // The window is built again after WebView2 ended under it, and closing the old one
         // left none for a moment (window_recovery.rs).

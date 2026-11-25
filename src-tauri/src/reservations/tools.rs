@@ -328,7 +328,7 @@ async fn act(
     };
     let result = match name {
         STATUS => {
-            let now = super::machine::now(broker.jobs.members()).await;
+            let now = broker.now().await;
             Ok(broker.status(conversation, now.as_ref()))
         }
         RESERVE => {
@@ -341,7 +341,7 @@ async fn act(
                 .as_f64()
                 .filter(|m| m.is_finite() && *m > 0.0);
             let text = broker.reserve(run_id, conversation, purpose, minutes);
-            Ok(match super::machine::now(broker.jobs.members()).await {
+            Ok(match broker.now().await {
                 Some(now) => format!(
                     "{text}{}\n{}",
                     broker.left_text(conversation, &now.left),

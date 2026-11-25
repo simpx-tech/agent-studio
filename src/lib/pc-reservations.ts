@@ -97,12 +97,18 @@ export const pcRecordSchema = z.object({
       programs: list(stoppedProgramSchema),
     }),
   ),
+  /** Processes other chats' programs started while the window was open, which waited for it. */
+  frozen: list(
+    z.object({ conversationId: z.string(), name: z.string(), processes: z.number().catch(1) }),
+  ),
   machine: z
     .object({
       samples: z.number(),
       cpuAverage: z.number(),
       cpuPeak: z.number(),
       holderAverage: z.number(),
+      /** The measuring chat ran in WSL, whose virtual machine counted as its own. */
+      insideWsl: z.boolean().catch(false),
       othersAverage: z.number(),
       othersPeak: z.number(),
       memoryTotal: z.number(),
@@ -156,7 +162,9 @@ export function pcTotals(records: readonly PcRecord[]) {
 /** Whose a program was, naming a chat by its title. */
 export function pcOwner(owner: PcProgram['owner'], title: (id: string) => string): string {
   if (typeof owner === 'object') return title(owner.chat);
-  return owner === 'app' ? 'Agent Studio' : owner === 'system' ? 'System' : 'Yours';
+  if (owner === 'app') return 'Agent Studio';
+  if (owner === 'system') return 'System';
+  return owner === 'wsl' ? 'WSL' : 'Yours';
 }
 
 /** What became of a program stopped for a measurement (src-tauri/src/reservations/programs.rs). */

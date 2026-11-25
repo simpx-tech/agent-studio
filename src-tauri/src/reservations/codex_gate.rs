@@ -14,8 +14,12 @@
 //! (`-c hooks.state={...}`, which Codex merges with the user's own trust entries). Both are kept
 //! in memory and in app data `reservations/codex-gate.json`. Found 2026-11-24 on Codex 0.172.
 //!
-//! WSL distributions and other systems run their hooks through another shell and have no named
-//! pipe to this app: their Codex chats are not held yet.
+//! A Codex chat in a WSL distribution this computer manages gets the same hook, run by the
+//! distribution's shell: this Windows program at the path the distribution reaches it by
+//! (`/mnt/<drive>/…`), started through WSL's interop, with the pipe and the chat passed into the
+//! distribution and back out through `WSLENV` (requested 2026-11-24). A distribution without
+//! interop cannot run it, and its commands go ahead as when any hook fails. Other systems have no
+//! named pipe to this app: their Codex chats are not held yet.
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -66,6 +70,28 @@ fn hook_command(program: &Path) -> String {
     )
 }
 
+/// The hook command inside a WSL distribution: this Windows program, at the path the
+/// distribution reaches it by, run through WSL's interop by the distribution's shell.
+fn wsl_hook_command(program: &str) -> String {
+    format!("'{}' {GATE_ARG}", program.replace('\'', r"'\''"))
+}
+
+/// Where a WSL distribution reaches a program of this computer's drives: `/mnt/<drive>/…`.
+fn linux_program(program: &Path) -> Option<String> {
+    let text = program.to_string_lossy();
+    let text = text.strip_prefix(r"\\?\").unwrap_or(&text);
+    let mut chars = text.chars();
+    let drive = chars.next().filter(char::is_ascii_alphabetic)?;
+    if chars.next() != Some(':') {
+        return None;
+    }
+    Some(format!(
+        "/mnt/{}{}",
+        drive.to_ascii_lowercase(),
+        text[2..].replace('\\', "/")
+    ))
+}
+
 /// The session flag that adds the gate before every shell command.
 pub fn hook_flag(command: &str) -> String {
     format!(
@@ -89,27 +115,47 @@ pub struct Launch {
     pub env: Vec<(&'static str, String)>,
 }
 
-/// The gate for a Windows Codex chat with tools, or None where it cannot run: another system or a
-/// WSL distribution, no pipe, or a Codex that did not report the gate's trust.
+/// The gate for a Codex chat with tools, on Windows or in one of its WSL distributions, or None
+/// where it cannot run: another system, no pipe, or a Codex that did not report the gate's trust.
 pub async fn launch(
     exe: &crate::providers::Executable,
     conversation: &str,
     data: &Path,
 ) -> Option<Launch> {
-    if !cfg!(windows) || exe.wsl.is_some() {
+    if !cfg!(windows) {
         return None;
     }
     let pipe = PIPE.get()?.clone();
-    let command = hook_command(&std::env::current_exe().ok()?);
+    let program = std::env::current_exe().ok()?;
+    let mut env = vec![(PIPE_ENV, pipe), (CHAT_ENV, conversation.to_string())];
+    let command = match &exe.wsl {
+        None => hook_command(&program),
+        Some(_) => {
+            // The pipe and the chat cross into the distribution with the launch and back out to
+            // this program with the hook: WSLENV names them without a direction.
+            env.push((
+                "WSLENV",
+                crate::wsl::passing(&format!("{PIPE_ENV}:{CHAT_ENV}")),
+            ));
+            wsl_hook_command(&linux_program(&program)?)
+        }
+    };
     let trust = trust(exe, data, &command).await?;
     Some(Launch {
         flags: vec![hook_flag(&command), trust_flag(&trust)],
-        env: vec![(PIPE_ENV, pipe), (CHAT_ENV, conversation.into())],
+        env,
     })
 }
 
-/// The Codex executable and hook command the trust holds for.
+/// The Codex executable and hook command the trust holds for. A WSL Codex is named by its
+/// launch, which this computer cannot read the file of, so its trust is kept for the run alone.
 fn identity(exe: &crate::providers::Executable, command: &str) -> Option<String> {
+    if exe.wsl.is_some() {
+        return Some(format!(
+            "wsl|{}|{command}",
+            crate::wsl::reusable_prefix(exe).join("\u{1f}")
+        ));
+    }
     let meta = std::fs::metadata(&exe.program).ok()?;
     let modified = meta
         .modified()
@@ -135,21 +181,25 @@ async fn trust(exe: &crate::providers::Executable, data: &Path, command: &str) -
     {
         return Some(trust);
     }
-    let file = data.join("reservations").join("codex-gate.json");
-    let mut saved: HashMap<String, Trust> = std::fs::read(&file)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default();
-    let trust = match saved.get(&identity) {
-        Some(trust) => trust.clone(),
-        None => {
-            let trust = probe(exe, data, command).await?;
-            saved.insert(identity.clone(), trust.clone());
-            if let Some(folder) = file.parent() {
-                let _ = std::fs::create_dir_all(folder);
+    let trust = if exe.wsl.is_some() {
+        probe(exe, data, "/", command).await?
+    } else {
+        let file = data.join("reservations").join("codex-gate.json");
+        let mut saved: HashMap<String, Trust> = std::fs::read(&file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        match saved.get(&identity) {
+            Some(trust) => trust.clone(),
+            None => {
+                let trust = probe(exe, data, &data.to_string_lossy(), command).await?;
+                saved.insert(identity.clone(), trust.clone());
+                if let Some(folder) = file.parent() {
+                    let _ = std::fs::create_dir_all(folder);
+                }
+                let _ = std::fs::write(&file, serde_json::to_vec(&saved).ok()?);
+                trust
             }
-            let _ = std::fs::write(&file, serde_json::to_vec(&saved).ok()?);
-            trust
         }
     };
     if let Ok(mut known) = TRUSTED.lock() {
@@ -161,8 +211,14 @@ async fn trust(exe: &crate::providers::Executable, data: &Path, command: &str) -
 }
 
 /// Asks Codex for the gate's trust: an app-server started with the hook lists it, untrusted, with
-/// its key and hash. It starts no thread or turn.
-async fn probe(exe: &crate::providers::Executable, data: &Path, command: &str) -> Option<Trust> {
+/// its key and hash, for `folder` as Codex reaches it. It starts no thread or turn, and ends as
+/// any CLI of this app ends, with its input, so a WSL one leaves nothing behind.
+async fn probe(
+    exe: &crate::providers::Executable,
+    data: &Path,
+    folder: &str,
+    command: &str,
+) -> Option<Trust> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let mut c = exe.command();
     c.args(["app-server", "--stdio", "-c", &hook_flag(command)])
@@ -172,7 +228,6 @@ async fn probe(exe: &crate::providers::Executable, data: &Path, command: &str) -
         .stderr(std::process::Stdio::null());
     let mut child = c.spawn().ok()?;
     let (mut input, output) = (child.stdin.take()?, child.stdout.take()?);
-    let folder = data.to_string_lossy().into_owned();
     let asked = async {
         let mut lines = BufReader::new(output).lines();
         let send = |value: Value| format!("{value}\n");
@@ -211,7 +266,7 @@ async fn probe(exe: &crate::providers::Executable, data: &Path, command: &str) -
         .await
         .ok()
         .flatten();
-    crate::runner::kill_tree(&mut child).await;
+    exe.end(child, Some(input), None, None).await;
     trust
 }
 
@@ -524,6 +579,114 @@ mod tests {
         assert!(refusal(&other, |_, _, _| panic!("never asked")).is_none());
     }
 
+    #[test]
+    fn a_wsl_codex_runs_this_program_at_the_path_its_distribution_reaches() {
+        assert_eq!(
+            linux_program(Path::new(
+                r"C:\Users\O'Neil\AppData\Local\Agent Studio\agent-studio.exe"
+            ))
+            .as_deref(),
+            Some("/mnt/c/Users/O'Neil/AppData/Local/Agent Studio/agent-studio.exe")
+        );
+        assert_eq!(
+            linux_program(Path::new(r"\\?\D:\Apps\agent-studio.exe")).as_deref(),
+            Some("/mnt/d/Apps/agent-studio.exe")
+        );
+        assert_eq!(linux_program(Path::new(r"\\server\share\a.exe")), None);
+        let command = wsl_hook_command("/mnt/c/Users/O'Neil/Agent Studio/agent-studio.exe");
+        assert_eq!(
+            command,
+            r"'/mnt/c/Users/O'\''Neil/Agent Studio/agent-studio.exe' --pc-gate"
+        );
+        let hook: toml::Value = toml::from_str(&hook_flag(&command)).unwrap();
+        assert_eq!(
+            hook["hooks"]["PreToolUse"][0]["hooks"][0]["command"].as_str(),
+            Some(command.as_str())
+        );
+    }
+
+    /// Run with `cargo build` first, then `cargo test --lib
+    /// the_gate_answers_a_wsl_hook_through_interop -- --ignored` on a computer with a WSL
+    /// distribution (AGENT_STUDIO_TEST_WSL, Ubuntu by default) whose interop is on.
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "runs the built app's gate inside a WSL distribution"]
+    async fn the_gate_answers_a_wsl_hook_through_interop() {
+        use std::process::Stdio;
+        use tokio::io::AsyncWriteExt;
+        let app = std::env::current_exe()
+            .unwrap()
+            .parent()
+            .and_then(Path::parent)
+            .map(|debug| debug.join("agent-studio.exe"))
+            .unwrap();
+        assert!(app.exists(), "build the app first: {}", app.display());
+        let broker = super::super::Broker::new(
+            Box::new(|_| {}),
+            Box::new(|_| Some("Chunk benchmark".into())),
+            Box::new(Vec::new),
+            None,
+        );
+        let name = format!(
+            r"\\.\pipe\agent-studio-pc-test-{}",
+            uuid::Uuid::new_v4().simple()
+        );
+        let (ready, accepting) = tokio::sync::oneshot::channel();
+        tokio::spawn({
+            let (name, broker) = (name.clone(), broker.clone());
+            async move { listen(&name, broker, Some(ready)).await }
+        });
+        accepting.await.unwrap();
+        broker.reserve("run-bench", "bench", "Benchmark", None);
+        let distribution =
+            std::env::var("AGENT_STUDIO_TEST_WSL").unwrap_or_else(|_| "Ubuntu".into());
+        let command = wsl_hook_command(&linux_program(&app).unwrap());
+        let ask = |input: Value| {
+            let (name, distribution, command) =
+                (name.clone(), distribution.clone(), command.clone());
+            async move {
+                let mut child = tokio::process::Command::new("wsl.exe")
+                    .args([
+                        "--distribution",
+                        &distribution,
+                        "--exec",
+                        "sh",
+                        "-c",
+                        &command,
+                    ])
+                    .env(PIPE_ENV, &name)
+                    .env(CHAT_ENV, "ui")
+                    .env(
+                        "WSLENV",
+                        crate::wsl::passing(&format!("{PIPE_ENV}:{CHAT_ENV}")),
+                    )
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .creation_flags(0x08000000)
+                    .spawn()
+                    .unwrap();
+                let mut stdin = child.stdin.take().unwrap();
+                stdin.write_all(input.to_string().as_bytes()).await.unwrap();
+                drop(stdin);
+                let output = child.wait_with_output().await.unwrap();
+                String::from_utf8_lossy(&output.stdout).into_owned()
+            }
+        };
+        let hook = |command: &str| json!({"session_id":"t1","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":command},"tool_use_id":"exec-1"});
+        let refused: Value = serde_json::from_str(ask(hook("cargo build")).await.trim()).unwrap();
+        assert_eq!(refused["hookSpecificOutput"]["permissionDecision"], "deny");
+        let reason = refused["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap();
+        assert!(reason.contains("the chat \"Chunk benchmark\""), "{reason}");
+        // A light command runs, and so does every command once the computer is free.
+        assert_eq!(ask(hook("git status")).await.trim(), "");
+        // One hook asks once: one command waited.
+        let report = broker.release("bench").unwrap();
+        assert_eq!(report.record["held"]["refused"], 1);
+        assert_eq!(ask(hook("cargo build")).await.trim(), "");
+    }
+
     /// Run with `cargo test --lib installed_codex -- --ignored` on a computer with Codex.
     #[cfg(windows)]
     #[tokio::test]
@@ -532,11 +695,15 @@ mod tests {
         let exe = crate::providers::resolve("codex").await.unwrap();
         let data = tempfile::tempdir().unwrap();
         let command = hook_command(Path::new(r"C:\Program Files\Agent Studio\agent-studio.exe"));
-        let trust = probe(&exe, data.path(), &command).await.unwrap();
+        let folder = data.path().to_string_lossy().into_owned();
+        let trust = probe(&exe, data.path(), &folder, &command).await.unwrap();
         assert!(trust.key.contains("session-flags"), "{trust:?}");
         assert!(trust.hash.starts_with("sha256:"), "{trust:?}");
         // The same definition gets the same hash.
-        assert_eq!(probe(&exe, data.path(), &command).await.unwrap(), trust);
+        assert_eq!(
+            probe(&exe, data.path(), &folder, &command).await.unwrap(),
+            trust
+        );
     }
 
     #[cfg(windows)]

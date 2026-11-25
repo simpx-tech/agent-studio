@@ -4,9 +4,11 @@
 //! A chat may stop its own before a measurement, any chat those of a chat that is not replying
 //! (`pc_stop`), and a chat that hands over to a measurement has its own closed
 //! (`Broker::hand_over`). A program with a window is asked to close as its close button asks, so
-//! it may still ask about unsaved work; one without a window is ended. Windows only: elsewhere a
-//! process outlives the CLI that started it without saying whose it was.
-use super::jobs::Members;
+//! it may still ask about unsaved work; one without a window is ended. Inside a WSL distribution
+//! a chat's processes are those carrying its launch's job (`wsl-programs.sh`), ended with TERM
+//! and then KILL (`wsl-stop.sh`); the launch ends the rest with its CLI. Elsewhere a process
+//! outlives the CLI that started it without saying whose it was.
+use super::jobs::{Members, WslJob};
 use super::machine::{Process, Reading};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
@@ -33,6 +35,8 @@ pub struct Program {
     pub cpu: Option<f64>,
     /// Whether one of its processes shows a window.
     pub window: bool,
+    /// The WSL distribution it runs in, whose own ids its processes have; None on Windows.
+    pub place: Option<String>,
 }
 
 /// The programs each chat left running, by conversation, largest first. `cpu` is each process's
@@ -90,6 +94,7 @@ pub fn left_running(
             memory: 0,
             cpu: cpu.map(|_| 0.0),
             window: false,
+            place: None,
         });
         program.processes.push((pid, process.began));
         program.memory += process.memory;
@@ -182,6 +187,14 @@ impl Stopped {
 /// waited for while they work on it; the others are ended. What each program left without a
 /// window ends once its windows closed.
 pub async fn stop(programs: Vec<Program>) -> Vec<Stopped> {
+    let (inside, programs): (Vec<Program>, Vec<Program>) =
+        programs.into_iter().partition(|p| p.place.is_some());
+    let mut ended = stop_wsl(inside).await;
+    ended.extend(stop_windows(programs).await);
+    ended
+}
+
+async fn stop_windows(programs: Vec<Program>) -> Vec<Stopped> {
     let blocking = |f: Box<dyn FnOnce() -> Outcome + Send>| async move {
         tauri::async_runtime::spawn_blocking(f)
             .await
@@ -260,6 +273,278 @@ pub async fn stop(programs: Vec<Program>) -> Vec<Stopped> {
         closing = still;
     }
     stopped
+}
+
+/// What a reading inside a WSL distribution found (`wsl-programs.sh`).
+#[derive(Debug, Default)]
+struct WslReading {
+    /// Clock ticks a second, cores, and bytes a page.
+    tick: f64,
+    cores: f64,
+    page: u64,
+    /// Seconds between its two readings of the CPU.
+    elapsed: f64,
+    /// Each launch's CLI, by job, while it runs.
+    cli: HashMap<String, u32>,
+    processes: Vec<WslProcess>,
+}
+#[derive(Debug)]
+struct WslProcess {
+    job: String,
+    pid: u32,
+    parent: u32,
+    start: u64,
+    /// CPU ticks at the first reading, if it ran then, and at the second.
+    before: Option<u64>,
+    after: u64,
+    pages: u64,
+    name: String,
+}
+
+fn parse_wsl(output: &str) -> WslReading {
+    let mut reading = WslReading {
+        tick: 100.0,
+        cores: 1.0,
+        page: 4096,
+        elapsed: 1.0,
+        ..Default::default()
+    };
+    for line in output.lines() {
+        let mut fields = line.split(' ');
+        match fields.next() {
+            Some("meta") => {
+                let mut number = || fields.next().and_then(|f| f.parse::<f64>().ok());
+                if let (Some(tick), Some(cores), Some(page), Some(elapsed)) =
+                    (number(), number(), number(), number())
+                {
+                    reading.tick = tick.max(1.0);
+                    reading.cores = cores.max(1.0);
+                    reading.page = page as u64;
+                    reading.elapsed = (elapsed / 1e9).max(0.001);
+                }
+            }
+            Some("cli") => {
+                if let (Some(job), Some(pid)) = (fields.next(), fields.next()) {
+                    if let Ok(pid) = pid.parse() {
+                        reading.cli.insert(job.into(), pid);
+                    }
+                }
+            }
+            Some("p") => {
+                let mut parts = line.splitn(9, ' ').skip(1);
+                let job = parts.next().unwrap_or_default().to_string();
+                let mut number = || parts.next().and_then(|f| f.parse::<i64>().ok());
+                let (Some(pid), Some(parent), Some(start), Some(before), Some(after), Some(pages)) =
+                    (number(), number(), number(), number(), number(), number())
+                else {
+                    continue;
+                };
+                reading.processes.push(WslProcess {
+                    job,
+                    pid: pid as u32,
+                    parent: parent as u32,
+                    start: start as u64,
+                    before: (before >= 0).then_some(before as u64),
+                    after: after as u64,
+                    pages: pages.max(0) as u64,
+                    name: parts.next().unwrap_or_default().to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+    reading
+}
+
+/// The programs a launch left running inside its distribution: its processes outside its CLI's
+/// tree, each under the topmost of them, with its share of the whole computer's CPU.
+fn wsl_programs(reading: &WslReading, job: &str, distribution: &str) -> Vec<Program> {
+    let processes: Vec<&WslProcess> = reading.processes.iter().filter(|p| p.job == job).collect();
+    let index: HashMap<u32, &WslProcess> = processes.iter().map(|p| (p.pid, *p)).collect();
+    // A CLI that no longer runs is ending its launch, which ends everything it started.
+    let Some(cli) = reading
+        .cli
+        .get(job)
+        .copied()
+        .filter(|pid| index.contains_key(pid))
+    else {
+        return vec![];
+    };
+    let in_cli = |process: &WslProcess| {
+        let mut current = process;
+        for _ in 0..256 {
+            if current.pid == cli {
+                return true;
+            }
+            match index.get(&current.parent) {
+                Some(next) if next.pid != current.pid => current = next,
+                _ => return false,
+            }
+        }
+        false
+    };
+    let left: HashMap<u32, &WslProcess> = processes
+        .iter()
+        .filter(|p| !in_cli(p))
+        .map(|p| (p.pid, *p))
+        .collect();
+    let mut programs: HashMap<u32, Program> = HashMap::new();
+    for process in left.values() {
+        let mut top = *process;
+        for _ in 0..256 {
+            match left.get(&top.parent) {
+                Some(next) if next.pid != top.pid => top = next,
+                _ => break,
+            }
+        }
+        let cpu = process
+            .before
+            .map(|before| {
+                process.after.saturating_sub(before) as f64
+                    / reading.tick
+                    / reading.elapsed
+                    / reading.cores
+                    * 100.0
+            })
+            .unwrap_or_default();
+        let program = programs.entry(top.pid).or_insert_with(|| Program {
+            pid: top.pid,
+            name: top.name.clone(),
+            processes: vec![],
+            memory: 0,
+            cpu: Some(0.0),
+            window: false,
+            place: Some(distribution.into()),
+        });
+        program.processes.push((process.pid, process.start));
+        program.memory += process.pages * reading.page;
+        if let Some(total) = program.cpu.as_mut() {
+            *total += cpu;
+        }
+    }
+    let mut list: Vec<Program> = programs.into_values().collect();
+    for program in &mut list {
+        program.processes.sort_unstable();
+    }
+    list.sort_by(|a, b| b.memory.cmp(&a.memory).then(a.pid.cmp(&b.pid)));
+    list
+}
+
+/// The programs WSL chats left running, by conversation, from one reading inside each
+/// distribution where one of `jobs` runs. A launch that has not yet written which process is its
+/// CLI, or whose CLI just ended, lists nothing.
+pub async fn wsl_left(jobs: Vec<WslJob>) -> HashMap<String, Vec<Program>> {
+    let mut places: HashMap<(String, String), Vec<WslJob>> = HashMap::new();
+    for job in jobs {
+        places
+            .entry((job.distribution.clone(), job.namespace.clone()))
+            .or_default()
+            .push(job);
+    }
+    let readings = places
+        .into_iter()
+        .map(|((distribution, namespace), jobs)| async move {
+            let mut args = vec![namespace];
+            args.extend(jobs.iter().map(|job| job.job.clone()));
+            let output = in_wsl(&distribution, include_str!("wsl-programs.sh"), &args).await;
+            (distribution, jobs, output)
+        });
+    let mut left = HashMap::<String, Vec<Program>>::new();
+    for (distribution, jobs, output) in futures_util::future::join_all(readings).await {
+        let Some(output) = output else { continue };
+        let reading = parse_wsl(&output);
+        for job in jobs.iter().filter(|job| reading.cli.contains_key(&job.job)) {
+            let programs = wsl_programs(&reading, &job.job, &distribution);
+            if !programs.is_empty() {
+                left.entry(job.conversation.clone())
+                    .or_default()
+                    .extend(programs);
+            }
+        }
+    }
+    left
+}
+
+/// Ends WSL programs inside their distributions: TERM, a grace, then KILL (`wsl-stop.sh`).
+async fn stop_wsl(programs: Vec<Program>) -> Vec<Stopped> {
+    let mut places: HashMap<String, Vec<Program>> = HashMap::new();
+    for program in programs {
+        places
+            .entry(program.place.clone().unwrap_or_default())
+            .or_default()
+            .push(program);
+    }
+    let mut stopped = vec![];
+    for (distribution, programs) in places {
+        let args: Vec<String> = programs
+            .iter()
+            .flat_map(|p| {
+                p.processes
+                    .iter()
+                    .map(|(pid, start)| format!("{pid}:{start}"))
+            })
+            .collect();
+        let output = in_wsl(&distribution, include_str!("wsl-stop.sh"), &args)
+            .await
+            .unwrap_or_default();
+        let outcomes: HashMap<u32, &str> = output
+            .lines()
+            .filter_map(|line| {
+                let (pid, outcome) = line.split_once(' ')?;
+                Some((pid.parse().ok()?, outcome))
+            })
+            .collect();
+        for program in programs {
+            let of: Vec<&str> = program
+                .processes
+                .iter()
+                .map(|(pid, _)| outcomes.get(pid).copied().unwrap_or("failed"))
+                .collect();
+            let outcome = if of.iter().all(|o| *o == "gone") {
+                Outcome::Gone
+            } else if of.contains(&"failed") {
+                Outcome::Failed
+            } else {
+                Outcome::Ended
+            };
+            stopped.push(Stopped { program, outcome });
+        }
+    }
+    stopped
+}
+
+/// Runs one of these fixed scripts inside a WSL distribution, its values as arguments, never in
+/// its text. None when the distribution cannot answer.
+#[cfg(windows)]
+async fn in_wsl(distribution: &str, script: &str, args: &[String]) -> Option<String> {
+    let mut command = tokio::process::Command::new("wsl.exe");
+    command
+        .args([
+            "--distribution",
+            distribution,
+            "--exec",
+            "bash",
+            "-c",
+            &crate::wsl::embedded_script(script),
+            "agent-studio",
+        ])
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .creation_flags(0x08000000)
+        .kill_on_drop(true);
+    // A liveness bound: a reading takes a second, and stopping its grace.
+    let output = tokio::time::timeout(Duration::from_secs(60), command.output())
+        .await
+        .ok()?
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+#[cfg(not(windows))]
+async fn in_wsl(_: &str, _: &str, _: &[String]) -> Option<String> {
+    None
 }
 
 struct Closing {
@@ -533,6 +818,110 @@ mod tests {
     }
 
     #[test]
+    fn what_a_wsl_chat_left_running_is_outside_its_cli_and_grouped_under_its_top() {
+        // Ticks a second, cores, page bytes and the nanoseconds between the two readings.
+        let output = "cli job-a 100\ncli job-b 300\ncli job-c 400\nmeta 100 8 4096 1000000000\n\
+            p job-a 100 50 5000 10 30 25600 claude\n\
+            p job-a 101 100 5100 0 2 2560 bash\n\
+            p job-a 200 1 6000 100 500 262144 Web Content (sandbox)\n\
+            p job-a 201 200 6001 0 50 25600 node\n\
+            p job-a 210 1 7000 -1 20 2560 python3\n\
+            p job-b 300 60 8000 0 0 25600 codex\n\
+            p job-c 410 1 9000 0 0 2560 server\n\
+            p job-a 999 1\n";
+        let reading = parse_wsl(output);
+        assert_eq!(reading.cores, 8.0);
+        assert_eq!(reading.processes.len(), 7);
+        let left = wsl_programs(&reading, "job-a", "Ubuntu");
+        assert_eq!(left.len(), 2, "{left:?}");
+        // A name with spaces and parentheses, its child counted with it.
+        assert_eq!(left[0].name, "Web Content (sandbox)");
+        assert_eq!(left[0].pid, 200);
+        assert_eq!(left[0].processes, vec![(200, 6000), (201, 6001)]);
+        assert_eq!(left[0].memory, (262144 + 25600) * 4096);
+        // 400 ticks over a second on eight cores, and 50 more for its child.
+        assert_eq!(left[0].cpu, Some(56.25));
+        assert_eq!(left[0].place.as_deref(), Some("Ubuntu"));
+        assert!(!left[0].window);
+        // One that began between the readings claims no CPU yet.
+        assert_eq!(left[1].name, "python3");
+        assert_eq!(left[1].cpu, Some(0.0));
+        // A CLI that left nothing, and one that just ended, whose launch ends the rest.
+        assert!(wsl_programs(&reading, "job-b", "Ubuntu").is_empty());
+        assert!(wsl_programs(&reading, "job-c", "Ubuntu").is_empty());
+        assert!(wsl_programs(&reading, "job-d", "Ubuntu").is_empty());
+    }
+
+    /// Run with `cargo test --lib a_program_left_running_inside_wsl_is_found_and_ended --
+    /// --ignored` on a computer with a WSL distribution (AGENT_STUDIO_TEST_WSL, Ubuntu by default).
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "starts processes inside a WSL distribution"]
+    async fn a_program_left_running_inside_wsl_is_found_and_ended() {
+        let distribution =
+            std::env::var("AGENT_STUDIO_TEST_WSL").unwrap_or_else(|_| "Ubuntu".into());
+        let namespace = format!("agent-studio-test-{}", uuid::Uuid::new_v4().simple());
+        let job = uuid::Uuid::new_v4().to_string();
+        // As a launch runs a CLI: a CLI with a command of its own, and a server a command started
+        // and let go, all carrying the launch's job; the launch waits for its CLI.
+        let launch = "set -eu\n\
+            mkdir -p \"$HOME/.local/share/$1/runs\"\n\
+            AGENT_STUDIO_JOB=$2 setsid sh -c 'sleep 300 & exec sleep 301' </dev/null >/dev/null 2>&1 &\n\
+            cli=$!\n\
+            AGENT_STUDIO_JOB=$2 setsid sh -c 'exec sleep 302' </dev/null >/dev/null 2>&1 &\n\
+            printf '%s 0\\n' \"$cli\" > \"$HOME/.local/share/$1/runs/$2\"\n\
+            wait \"$cli\"\n";
+        let mut running = tokio::process::Command::new("wsl.exe")
+            .args([
+                "--distribution",
+                &distribution,
+                "--exec",
+                "bash",
+                "-c",
+                launch,
+            ])
+            .args(["agent-studio", &namespace, &job])
+            .stdin(std::process::Stdio::null())
+            .creation_flags(0x08000000)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let jobs = vec![WslJob {
+            conversation: "ui".into(),
+            distribution: distribution.clone(),
+            namespace: namespace.clone(),
+            job: job.clone(),
+        }];
+        let mut left = HashMap::new();
+        for _ in 0..30 {
+            left = wsl_left(jobs.clone()).await;
+            if left.contains_key("ui") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        let found = left.remove("ui").expect("the server left running");
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].name, "sleep");
+        assert_eq!(found[0].place.as_deref(), Some(distribution.as_str()));
+        assert!(found[0].memory > 0, "{found:?}");
+        let stopped = stop(found.clone()).await;
+        assert_eq!(stopped[0].outcome, Outcome::Ended, "{stopped:?}");
+        assert!(wsl_left(jobs.clone()).await.is_empty());
+        // The CLI and its own command still run; a program already gone is said so.
+        assert_eq!(stop(found).await[0].outcome, Outcome::Gone);
+        let ended = "set -u\n\
+            for environ in /proc/[0-9]*/environ; do\n\
+              if tr '\\0' '\\n' < \"$environ\" 2>/dev/null | grep -qx \"AGENT_STUDIO_JOB=$2\"; then\n\
+                pid=${environ#/proc/}; kill -KILL \"${pid%/environ}\" 2>/dev/null || true\n\
+              fi\n\
+            done\n\
+            case $1 in agent-studio-test-*) rm -rf -- \"$HOME/.local/share/$1\" ;; esac\n";
+        in_wsl(&distribution, ended, &[namespace, job]).await;
+        let _ = running.wait().await;
+    }
+
+    #[test]
     fn a_program_asked_to_close_is_waited_for_while_it_works_on_it() {
         let asked = Instant::now();
         let at = |seconds: f64| asked + Duration::from_secs_f64(seconds);
@@ -543,6 +932,7 @@ mod tests {
             memory: 0,
             cpu: None,
             window: true,
+            place: None,
         };
         let closing = || Closing {
             program: program.clone(),
@@ -618,6 +1008,7 @@ mod tests {
             memory: 0,
             cpu: None,
             window: true,
+            place: None,
         }])
         .await;
         assert_eq!(stopped[0].outcome, Outcome::Closed);
@@ -650,6 +1041,7 @@ mod tests {
             memory: 0,
             cpu: None,
             window: false,
+            place: None,
         };
         let stopped = stop(vec![program.clone()]).await;
         assert_eq!(stopped[0].outcome, Outcome::Ended);

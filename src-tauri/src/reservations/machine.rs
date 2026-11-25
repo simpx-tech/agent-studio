@@ -41,6 +41,8 @@ pub enum Owner {
     Chat(String),
     App,
     System,
+    /// WSL's virtual machine, which runs every process of the WSL distributions.
+    Wsl,
     Yours,
 }
 
@@ -89,11 +91,19 @@ fn owner(process: &Process, index: &HashMap<u32, &Process>, members: &Members, a
             _ => break,
         }
     }
-    if process.system {
+    if wsl_machine(&process.name) {
+        Owner::Wsl
+    } else if process.system {
         Owner::System
     } else {
         Owner::Yours
     }
+}
+
+/// WSL's virtual machine process (`vmmemWSL`, `vmmem` before it), which Windows shows for
+/// everything its distributions run.
+fn wsl_machine(name: &str) -> bool {
+    name.to_ascii_lowercase().starts_with("vmmem")
 }
 
 /// How busy the computer and each process was between two readings, in percent of the whole
@@ -164,11 +174,16 @@ pub struct Window {
     used_peak: u64,
     available_min: Option<u64>,
     groups: HashMap<(Owner, String), Group>,
+    /// The measuring chat runs in WSL, so WSL's virtual machine counted as its own.
+    inside_wsl: bool,
 }
 
 impl Window {
-    /// Adds a reading, whose processes `owners` attributes; `holder` is the chat measuring.
-    pub fn add(&mut self, reading: Reading, owners: &Owners, holder: &str) {
+    /// Adds a reading, whose processes `owners` attributes; `holder` is the chat measuring,
+    /// whose own processes include WSL's virtual machine when it runs in WSL (`inside_wsl`): the
+    /// other chats' commands wait meanwhile, so what the machine does is mostly the measurement.
+    pub fn add(&mut self, reading: Reading, owners: &Owners, holder: &str, inside_wsl: bool) {
+        self.inside_wsl |= inside_wsl;
         self.memory_total = reading.memory_total;
         self.used_peak = self.used_peak.max(
             reading
@@ -191,7 +206,7 @@ impl Window {
                 .collect();
             for (pid, cpu) in &usage.processes {
                 let owner = owners.of(*pid);
-                if owner == Owner::Chat(holder.into()) {
+                if owner == Owner::Chat(holder.into()) || (inside_wsl && owner == Owner::Wsl) {
                     holder_cpu += cpu;
                     continue;
                 }
@@ -252,9 +267,14 @@ impl Window {
         }
         let samples = f64::from(self.samples);
         let mut text = format!(
-            "CPU while it was open: {} on average, {} at most; this chat's processes {} on average; everything else {} on average, {} at most. Memory: at most {} of {} in use, at least {} free.",
+            "CPU while it was open: {} on average, {} at most; this chat's processes{} {} on average; everything else {} on average, {} at most. Memory: at most {} of {} in use, at least {} free.",
             percent(self.cpu_sum / samples),
             percent(self.cpu_peak),
+            if self.inside_wsl {
+                " (WSL's virtual machine with them)"
+            } else {
+                ""
+            },
             percent(self.holder_sum / samples),
             percent(self.others_sum / samples),
             percent(self.others_peak),
@@ -295,6 +315,7 @@ impl Window {
             "cpuAverage": round(self.cpu_sum / samples),
             "cpuPeak": round(self.cpu_peak),
             "holderAverage": round(self.holder_sum / samples),
+            "insideWsl": self.inside_wsl,
             "othersAverage": round(self.others_sum / samples),
             "othersPeak": round(self.others_peak),
             "memoryTotal": self.memory_total,
@@ -417,6 +438,7 @@ fn owner_text(owner: &Owner, chat: &impl Fn(&str) -> String) -> String {
         Owner::Chat(conversation) => chat(conversation),
         Owner::App => "Agent Studio".into(),
         Owner::System => "the system".into(),
+        Owner::Wsl => "WSL".into(),
         Owner::Yours => "yours".into(),
     }
 }
@@ -425,6 +447,7 @@ fn owner_key(owner: &Owner) -> Value {
         Owner::Chat(conversation) => json!({"chat": conversation}),
         Owner::App => json!("app"),
         Owner::System => json!("system"),
+        Owner::Wsl => json!("wsl"),
         Owner::Yours => json!("user"),
     }
 }
@@ -757,7 +780,7 @@ mod tests {
         );
         for r in [first, second] {
             let owners = Owners::new(&r, &members, 10);
-            window.add(r, &owners, "bench");
+            window.add(r, &owners, "bench", false);
         }
         assert_eq!(window.samples, 1);
         assert!((window.cpu_sum - 75.0).abs() < 0.01);
@@ -779,6 +802,59 @@ mod tests {
         assert_eq!(record["cpuAverage"], 75.0);
         assert_eq!(record["programs"][0]["owner"], "user");
         assert_eq!(record["programs"][0]["processes"], 2);
+    }
+
+    #[test]
+    fn wsl_s_machine_is_wsl_s_and_counts_for_a_measurement_made_inside_it() {
+        let start = Instant::now();
+        let members = Members {
+            chats: HashMap::from([(11, "bench".to_string())]),
+            roots: HashMap::from([(11, "bench".to_string())]),
+        };
+        // WSL's machine runs as a system process; the chat's own process is its wsl.exe.
+        let processes = |vm_ms, chrome_ms| {
+            let mut vm = process(40, 4, "vmmemWSL", vm_ms, 6 << 30, 40);
+            vm.system = true;
+            vec![
+                process(11, 1, "wsl.exe", 0, 1 << 20, 11),
+                process(20, 1, "chrome.exe", chrome_ms, 1 << 30, 20),
+                vm,
+            ]
+        };
+        let first = reading(start, 0, 8_000, processes(0, 0));
+        let second = reading(
+            start + Duration::from_secs(2),
+            5_600,
+            16_000,
+            processes(5_200, 400),
+        );
+        let owners = Owners::new(&second, &members, 10);
+        assert_eq!(owners.of(40), Owner::Wsl);
+        let measure = |inside_wsl| {
+            let mut window = Window::default();
+            for r in [first.clone(), second.clone()] {
+                let owners = Owners::new(&r, &members, 10);
+                window.add(r, &owners, "bench", inside_wsl);
+            }
+            window
+        };
+        // A measurement inside WSL: the machine is the measuring chat's.
+        let inside = measure(true);
+        assert!((inside.holder_sum - 65.0).abs() < 0.01);
+        assert!((inside.others_sum - 5.0).abs() < 0.01);
+        let text = inside.text(|c| format!("the chat {c}")).unwrap();
+        assert!(
+            text.contains("this chat's processes (WSL's virtual machine with them) 65% on average"),
+            "{text}"
+        );
+        assert_eq!(inside.record()["insideWsl"], true);
+        // A measurement on Windows: the machine is another program, WSL's.
+        let outside = measure(false);
+        assert!((outside.holder_sum - 0.0).abs() < 0.01);
+        assert!((outside.others_sum - 70.0).abs() < 0.01);
+        let text = outside.text(|c| format!("the chat {c}")).unwrap();
+        assert!(text.contains("vmmemWSL (WSL) 65% CPU on average"), "{text}");
+        assert_eq!(outside.record()["programs"][0]["owner"], "wsl");
     }
 
     #[test]

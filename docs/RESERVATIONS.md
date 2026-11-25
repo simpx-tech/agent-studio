@@ -10,10 +10,11 @@ computer getting quiet by itself, which never happens while several chats work.
 
 The native broker is `src-tauri/src/reservations.rs`, with `reservations/tools.rs` (the agents'
 tools and the gate), `reservations/light.rs` (light commands), `reservations/machine.rs`
-(measuring the computer), `reservations/jobs.rs` (which chat a process belongs to) and
-`reservations/programs.rs` (programs chats left running, and stopping them). Every
-Windows chat and the WSL distributions this computer manages share one broker, since they share
-the computer.
+(measuring the computer), `reservations/jobs.rs` (which chat a process belongs to),
+`reservations/programs.rs` (programs chats left running, and stopping them, with
+`wsl-programs.sh` and `wsl-stop.sh` inside WSL) and `reservations/hold.rs` (processes that wait
+for a window to end). Every Windows chat and the WSL distributions this computer manages share
+one broker, since they share the computer.
 
 ## How a measurement goes
 
@@ -74,14 +75,34 @@ or its reply ends.
   kept in memory and in app data `reservations/codex-gate.json`. Work history shows the gate
   only when it blocks a command. `thread/start`'s `config` does not register hooks, and the
   `untrusted` approval mode, whose requests the app could have held, is gone from Codex 0.172.
-  WSL distributions run their hooks through another shell and have no pipe to this app, so a
-  WSL Codex chat's commands are not held yet: one that runs during a window is in the report.
+- **WSL Codex chats** run the same gate. Their hook command is this app's program at the path
+  the distribution reaches it by (`'/mnt/c/…/agent-studio.exe' --pc-gate`, run by the
+  distribution's shell), which WSL's interop starts on Windows, and `WSLENV` carries the pipe's
+  name and the chat's id into the distribution and back out to the program. Their trust is read
+  as on Windows, from an app-server started in the distribution, and kept in memory for the run.
+  A distribution whose interop is turned off cannot start the program, and Codex then runs the
+  command.
 - **What runs** is what the replies running on this computer report: each command and monitor
   from its start until it ends (`Broker::tool`, fed by every chat run's events), and the
   background work chats' CLIs keep (`background_work`). A command is named, and judged light, as
   its agent wrote it: lines a CLI hook put before it, running a script under a `hooks` folder,
   are left out, as the window's `primaryCommand` leaves them out (a user's Codex `PreToolUse`
   hook may prepend one to every command, which made every Codex command read as that line).
+- **Processes that begin while a window is open** in another chat's job wait, frozen at birth,
+  until the reservation ends (`hold.rs`). A program a chat left running, such as an editor
+  compiling shaders or a server rebuilding after a change, or background work its reply left,
+  starts work that no gate sees. Each chat's job tells the app of every process that begins in
+  it (a completion port, `JOB_OBJECT_MSG_NEW_PROCESS`), and the app suspends it at once, as
+  Task Manager's Suspend does, before it can do much. It lets it go when it is plumbing
+  (consoles, WSL, error reporting, this app's own gate) or light (Git, ripgrep), when its chat
+  measures or was asked to hand over, and when its chat's CLI started it: anything in a replying
+  chat's CLI tree, whose commands the gate looks after, and, in a chat that no longer replies,
+  what its CLI started itself since the window opened, such as an MCP server it connects again.
+  What a program or background work begun before then starts waits. Only processes born while
+  a window is open wait, so work in progress always finishes, and they run again when the
+  reservation ends, before a program of theirs is stopped, and when the app quits. Those
+  waiting are kept in app data `reservations/frozen.json`, so a start after a crash resumes
+  them. Windows only: WSL's processes are not Windows processes.
 
 `pc_wait` waits as long as the computer stays reserved. Its answer, like every answer of these
 tools, goes back to the CLI through the run's own channel (`Session::rx`), so a long wait never
@@ -118,15 +139,19 @@ Agents coordinate by themselves, so the user is asked only about the user's own 
   the background work its CLI keeps, by releasing that CLI as History does (its next reply starts
   it again). A replying chat is asked to hand over instead.
 
-A **program** a chat left running is a process in its job outside its CLI's own process tree,
-such as an editor or a server a command started and let go, grouped with the processes it started
-under the topmost of them. Windows only: elsewhere a process that outlives its parent says nothing
-of whose it was. A program with a window is asked to close as its close button asks
-(`WM_CLOSE` to its shown top-level windows, a window another shown window owns closing with it),
-so it may still ask about unsaved work, and it is waited for while it works on closing: one that
-sits idle for 15 seconds may be asking something, and one still busy after two minutes is left to
-finish, both reported so that the agent asks the user. What it leaves running without a window
-then ends. A program without a window is ended. Every process is checked by when it began before
+A **program** a chat left running is a process in its job outside its CLI's own process tree, such
+as an editor or a server a command started and let go, grouped with the processes it started under
+the topmost of them. Inside a WSL distribution a chat's processes are those that carry its launch's
+job in their environment (`AGENT_STUDIO_JOB`, which every process its CLI starts inherits):
+`wsl-programs.sh` lists them, with their CPU over a second and their memory, and the CLI from its
+launch's marker. They are ended with TERM, then KILL after up to ten seconds (`wsl-stop.sh`), and a
+launch ends what is left of them when its CLI ends. Elsewhere a process that outlives its parent
+says nothing of whose it was. A program with a window is asked to close as its close button asks
+(`WM_CLOSE` to its shown top-level windows, a window another shown window owns closing with it), so
+it may still ask about unsaved work, and it is waited for while it works on closing: one that sits
+idle for 15 seconds may be asking something, and one still busy after two minutes is left to
+finish, both reported so that the agent asks the user. What it leaves running without a window then
+ends. A program without a window is ended. Every process is checked by when it began before
 anything is sent to it, so a process that took another's id is never touched.
 
 ## Whose a process is
@@ -136,8 +161,11 @@ joins, an editor left open included, so a process is the chat's however it was s
 nothing: they let a process break away when it asks, never end their processes, and are dropped
 once none of their processes runs. A process outside every job is Agent Studio's when the app
 started it, the system's when it runs outside the signed-in session (Windows' services), and the
-user's otherwise. WSL processes run inside the distribution's virtual machine and count as one
-program on Windows. Linux server hosts tell processes apart by their parent chain.
+user's otherwise. WSL's processes run inside its virtual machine, which Windows shows as one
+process (`vmmemWSL`): it is WSL's, and when the chat measuring runs in WSL it counts as that
+chat's own processes, since other chats' commands wait meanwhile. A WSL chat's own process on
+Windows is the `wsl.exe` that runs its CLI, whose job keeps its launch followed while it runs.
+Linux server hosts tell processes apart by their parent chain.
 
 ## The report
 
@@ -150,7 +178,8 @@ reservation:
 - what was stopped for it, and by which chat: a chat's stops go to the reservation it holds,
   or to the one it makes next in the same reply, since a chat clears the computer before it
   reserves as often as after;
-- other chats' work that ran while it was open anyway (Codex commands, work left running);
+- other chats' work that ran while it was open anyway (work left running, commands of a chat
+  whose gate could not run), and the processes that waited for it to end, by chat and program;
 - the computer while it was open, read every two seconds: CPU on average and at most, the
   measuring chat's processes apart from everything else, memory in use and free, and the busiest
   and largest other programs with whose they are;
@@ -168,18 +197,18 @@ over, measuring, chats waiting, reservations in line). It is in the warning colo
 chats' work finishes and in the accent while the measurement runs. The window follows
 reservations through `studio-pc` events and `pc_state`; nothing about them is saved or synced.
 
-The gauge opens the Reservations window (`ReservationsDialog.svelte`), which `/reservations`
-also opens at any time. It shows the reservations now, each with what its window waits for and
-the chats waiting, then every reservation this computer's history kept (`pc_history`, read
-whole, newest first): together, how many measurements, how long they waited to start and how
-long other chats waited; and each one with how long it waited and measured, what kept its window
-closed, the chats it asked to hand over, what was stopped for it, the computer while it was open
-(CPU, this chat apart, memory and the busiest other programs with whose they were) and why other
-chats waited. A reservation that ends joins it while the window is open. Its chat opens from it.
-Each computer's desktop app keeps its own history, so the Viewer shows none.
+The gauge opens the Reservations window (`ReservationsDialog.svelte`), which `/reservations` also
+opens at any time. It shows the reservations now, each with what its window waits for and the chats
+waiting, then every reservation this computer's history kept (`pc_history`, read whole, newest
+first): together, how many measurements, how long they waited to start and how long other chats
+waited; and each one with how long it waited and measured, what kept its window closed, the chats
+it asked to hand over, what was stopped for it, the processes held until it ended, the computer
+while it was open (CPU, this chat apart, with WSL when it measured there, memory and the busiest
+other programs with whose they were) and why other chats waited. A reservation that ends joins it
+while the window is open. Its chat opens from it. Each computer's desktop app keeps its own
+history, so the Viewer shows none.
 
 ## Not yet
 
-- Holding WSL Codex chats' commands (see above), and freezing a process a chat starts during a
-  window when nothing else can hold it.
-- Programs a WSL chat left running, which run inside the distribution's virtual machine.
+- Holding processes that begin inside a WSL distribution while a window is open: a WSL chat's
+  program that starts work then is in the report, under WSL's virtual machine.

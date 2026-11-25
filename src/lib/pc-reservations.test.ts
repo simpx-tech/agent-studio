@@ -51,7 +51,9 @@ describe('reservations of this computer', () => {
         [reservation({ waitingFor: [{ conversationId: 'ui', label: '`Build.bat`' }] })],
         title,
       ),
-    ).toBe('Computer reserved: Benchmark of chunk meshing · Chunk benchmark · Waiting for 1 command');
+    ).toBe(
+      'Computer reserved: Benchmark of chunk meshing · Chunk benchmark · Waiting for 1 command',
+    );
     // A chat asked to hand over what it holds is no command.
     expect(
       pcReservationTitle(
@@ -132,6 +134,7 @@ describe('the history of reservations', () => {
     expect(pcOwner({ chat: 'art' }, title)).toBe('Level art');
     expect(pcOwner('app', title)).toBe('Agent Studio');
     expect(pcOwner('system', title)).toBe('System');
+    expect(pcOwner('wsl', title)).toBe('WSL');
     expect(pcOwner('user', title)).toBe('Yours');
     expect(pcOutcome('asking')).toBe('still open');
     expect(pcOutcome('something new')).toBe('something new');

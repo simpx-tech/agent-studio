@@ -684,14 +684,13 @@ pub(crate) async fn execute(
             let child = command
                 .spawn()
                 .map_err(|_| "Could not launch the provider CLI. Check Connections.")?;
-            // What a chat's CLI starts on Windows belongs to the chat (reservations/jobs.rs).
-            if let (Some(conversation), None, true) = (
-                request.conversation_id.as_deref(),
-                &exe.wsl,
-                request.tools_enabled(),
-            ) {
+            // What a chat's CLI starts belongs to the chat, on Windows and inside WSL
+            // (reservations/jobs.rs).
+            if let (Some(conversation), true) =
+                (request.conversation_id.as_deref(), request.tools_enabled())
+            {
                 if let Some(broker) = app.try_state::<Arc<crate::reservations::Broker>>() {
-                    broker.jobs.adopt(conversation, &child);
+                    broker.jobs.adopt(conversation, &child, exe.wsl.as_ref());
                 }
             }
             let session_id = request

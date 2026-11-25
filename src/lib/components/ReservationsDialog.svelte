@@ -7,6 +7,7 @@
     Cpu,
     Gauge,
     Handshake,
+    Snowflake,
     History,
     Hourglass,
     MessageSquare,
@@ -319,6 +320,24 @@
           </section>
         {/if}
 
+        {#if record.frozen.length}
+          <section class="card" aria-labelledby="pc-frozen">
+            <h3 id="pc-frozen"><Snowflake size={14} aria-hidden="true" />Held until it ended</h3>
+            <ul class="facts">
+              {#each record.frozen as held, index (index)}
+                <li>
+                  <span class="fact-name">{title(held.conversationId)}</span>
+                  <span
+                    >{held.name}{#if held.processes > 1}<span class="muted"
+                        >{' ×'}{held.processes}</span
+                      >{/if}</span
+                  >
+                </li>
+              {/each}
+            </ul>
+          </section>
+        {/if}
+
         {#if machine}
           {@const busiest = longest(machine.programs.map((p) => p.cpuAverage * 10))}
           <section class="card" aria-labelledby="pc-machine">
@@ -334,7 +353,11 @@
               </div>
               <div>
                 <dt>This chat</dt>
-                <dd>{percent(machine.holderAverage)}</dd>
+                <dd>
+                  {percent(machine.holderAverage)}{#if machine.insideWsl}<span class="muted"
+                      >{' · with WSL'}</span
+                    >{/if}
+                </dd>
               </div>
               <div>
                 <dt>Everything else</dt>

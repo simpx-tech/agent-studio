@@ -66,11 +66,13 @@ test('the reservations window shows the computer now and each past measurement w
         programs: [{ name: 'node.exe', outcome: 'ended' }],
       },
     ],
+    frozen: [{ conversationId: art, name: 'ShaderCompileWorker.exe', processes: 3 }],
     machine: {
       samples: 10,
       cpuAverage: 42.3,
       cpuPeak: 55,
       holderAverage: 2.8,
+      insideWsl: true,
       othersAverage: 39.5,
       othersPeak: 52,
       memoryTotal: 64 * gb,
@@ -92,6 +94,14 @@ test('the reservations window shows the computer now and each past measurement w
           cpuAverage: 2,
           cpuPeak: 4,
           memoryPeak: 14 * gb,
+        },
+        {
+          name: 'vmmemWSL',
+          owner: 'wsl',
+          processes: 1,
+          cpuAverage: 1,
+          cpuPeak: 3,
+          memoryPeak: 6 * gb,
         },
       ],
     },
@@ -215,10 +225,15 @@ test('the reservations window shows the computer now and each past measurement w
   await expect(dialog.getByLabel('Stopped').locator('li')).toHaveText(
     /Another chat\s*node\.exe ended, background work stopped/,
   );
+  await expect(dialog.getByLabel('Held until it ended').locator('li')).toHaveText(
+    /Level art\s*ShaderCompileWorker\.exe\s*×3/,
+  );
   await expect(dialog.locator('.stats')).toContainText(/CPU\s*42%\s*· 55% at most/);
+  await expect(dialog.locator('.stats')).toContainText(/This chat\s*2\.8%\s*· with WSL/);
   await expect(dialog.getByLabel('Other programs').locator('.row')).toHaveText([
     /cl\.exe\s*×2\s*· Yours\s*5\.1%\s*· 21%\s*2\.0 GB/,
     /UnrealEditor\.exe\s*· Level art\s*2\.0%\s*· 4\.0%\s*14 GB/,
+    /vmmemWSL\s*· WSL\s*1\.0%\s*· 3\.0%\s*6\.0 GB/,
   ]);
   await expect(dialog.getByLabel('Why other chats waited').locator('.row')).toHaveText(
     /Level art\s*· handing over\s*5\.0s/,

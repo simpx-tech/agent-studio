@@ -294,6 +294,10 @@ async fn a_command_the_gate_refused_never_counts_as_run() {
     assert!(broker
         .gate("ui", "cargo build", Some(&build.id), "pc_wait")
         .is_some());
+    // A call that asks again is still one command that waited.
+    assert!(broker
+        .gate("ui", "cargo build", Some(&build.id), "pc_wait")
+        .is_some());
     broker.tool("run-ui", &build);
     broker.tool("run-ui", &built);
     let report = broker.release("bench").unwrap();
@@ -336,6 +340,7 @@ fn held_time_goes_to_what_kept_the_window_closed() {
         refused_calls: HashSet::new(),
         asks: vec![],
         stopped: vec![],
+        frozen: vec![],
         measure: machine::Window::default(),
     };
     let waits = vec![
@@ -624,7 +629,7 @@ async fn handing_over_ends_the_programs_a_chat_left_running() {
         .stdout(std::process::Stdio::null())
         .creation_flags(0x08000000);
     let mut cli = tokio::process::Command::from(cli).spawn().unwrap();
-    broker.jobs.adopt("ui", &cli);
+    broker.jobs.adopt("ui", &cli, None);
     broker.run_started("run-bench", "bench");
     broker.run_started("run-ui", "ui");
     let mut left = vec![];
@@ -670,4 +675,79 @@ async fn handing_over_ends_the_programs_a_chat_left_running() {
     let report = broker.release("bench").unwrap();
     assert_eq!(report.record["asks"][0]["programs"][0]["outcome"], "ended");
     crate::runner::kill_tree(&mut cli).await;
+}
+
+/// A chat's CLI running `command` through a command of its own.
+#[cfg(windows)]
+fn cli_running(command: &str) -> tokio::process::Child {
+    use std::os::windows::process::CommandExt;
+    let mut cli = std::process::Command::new("cmd.exe");
+    cli.raw_arg(format!("/C cmd /C \"{command}\""))
+        .stdout(std::process::Stdio::null())
+        .creation_flags(0x08000000);
+    tokio::process::Command::from(cli).spawn().unwrap()
+}
+
+/// Background work a chat started that pings for two seconds, then starts another ping.
+const BACKGROUND: &str = "ping -n 3 127.0.0.1 >NUL & ping -n 2 127.0.0.2 >NUL";
+
+#[cfg(windows)]
+async fn ends_within(child: &mut tokio::process::Child, time: Duration) -> bool {
+    tokio::time::timeout(time, child.wait()).await.is_ok()
+}
+
+/// What work a chat that no longer replies began before the window opened starts while another
+/// chat measures waits, frozen at birth, until the measurement ends.
+#[cfg(windows)]
+#[tokio::test]
+async fn a_process_a_chat_s_work_starts_while_another_measures_waits_for_the_measurement() {
+    let broker = broker_with(vec![], None);
+    let mut cli = cli_running(BACKGROUND);
+    broker.jobs.adopt("ui", &cli, None);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    broker.run_started("run-bench", "bench");
+    broker.reserve("run-bench", "bench", "Benchmark", None);
+    assert_eq!(broker.snapshot().reservations[0].phase, "open");
+    // Three seconds of pings, held past six.
+    assert!(!ends_within(&mut cli, Duration::from_secs(6)).await);
+    let status = broker.status("bench", None);
+    assert!(
+        status.to_lowercase().contains(
+            "processes other chats' programs started while your window is open wait for it to end: ping.exe (the chat \"fix inventory ui\")"
+        ),
+        "{status}"
+    );
+    let report = broker.release("bench").unwrap();
+    assert!(
+        report.text.to_lowercase().contains(
+            "processes other chats' programs started while the window was open waited for it to end: ping.exe (the chat \"fix inventory ui\")."
+        ),
+        "{}",
+        report.text
+    );
+    assert_eq!(report.record["frozen"][0]["conversationId"], "ui");
+    assert_eq!(report.record["frozen"][0]["processes"], 1);
+    // Released, the ping finishes.
+    assert!(ends_within(&mut cli, Duration::from_secs(10)).await);
+}
+
+/// A replying chat's commands are its gate's to hold, and what a chat's CLI starts itself while
+/// another measures, such as an MCP server, is its own: both run.
+#[cfg(windows)]
+#[tokio::test]
+async fn what_a_chat_s_cli_starts_runs_while_another_measures() {
+    let broker = broker_with(vec![], None);
+    let mut replying = cli_running(BACKGROUND);
+    broker.jobs.adopt("ui", &replying, None);
+    broker.run_started("run-ui", "ui");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    broker.run_started("run-bench", "bench");
+    broker.reserve("run-bench", "bench", "Benchmark", None);
+    assert_eq!(broker.snapshot().reservations[0].phase, "open");
+    let mut started = cli_running("ping -n 2 127.0.0.1 >NUL");
+    broker.jobs.adopt("srv", &started, None);
+    assert!(ends_within(&mut replying, Duration::from_secs(10)).await);
+    assert!(ends_within(&mut started, Duration::from_secs(10)).await);
+    let report = broker.release("bench").unwrap();
+    assert_eq!(report.record["frozen"].as_array().map(Vec::len), Some(0));
 }

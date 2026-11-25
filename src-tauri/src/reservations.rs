@@ -21,8 +21,10 @@
 //! holds, such as an editor it still works with: that chat's commands then run again while it
 //! finishes, the window waits for it, and once it hands over (`pc_release`) Agent Studio closes
 //! the programs it left running (`programs`) and holds its commands like the others'. Programs a
-//! chat that no longer replies left running are stopped with `pc_stop`.
+//! chat that no longer replies left running are stopped with `pc_stop`. A process such a program
+//! starts while the window is open waits, frozen at birth, until the reservation ends (`hold`).
 pub mod codex_gate;
+mod hold;
 pub mod jobs;
 mod light;
 pub mod machine;
@@ -219,7 +221,16 @@ struct Reservation {
     asks: Vec<Ask>,
     /// Programs chats stopped while it held the computer.
     stopped: Vec<Stopping>,
+    /// Processes other chats' programs started while its window was open, held until it ends.
+    frozen: Vec<Frozen>,
     measure: machine::Window,
+}
+/// A process another chat's program started while a window was open (`hold`).
+struct Frozen {
+    conversation: String,
+    name: String,
+    /// Suspended until the reservation ends, or until its program is stopped.
+    held: Option<hold::Held>,
 }
 #[derive(Clone, Debug)]
 struct Span {
@@ -249,7 +260,11 @@ impl Broker {
         background: Background,
         history: Option<PathBuf>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        // Processes a run that ended without resuming them held wait no longer.
+        if let Some(history) = &history {
+            hold::resume_saved(&history.with_file_name(FROZEN));
+        }
+        let broker = Arc::new(Self {
             state: Mutex::new(State::default()),
             version: watch::channel(0).0,
             emit,
@@ -258,7 +273,120 @@ impl Broker {
             history,
             release: std::sync::OnceLock::new(),
             jobs: jobs::Jobs::default(),
-        })
+        });
+        let weak = Arc::downgrade(&broker);
+        broker.jobs.watch(move |key, pid| {
+            if let Some(broker) = weak.upgrade() {
+                broker.born(key, pid);
+            }
+        });
+        broker
+    }
+
+    /// A process began in a chat's job. While another chat's window is open it waits, frozen,
+    /// until that reservation ends (`hold`), unless it is plumbing or its chat's CLI's own:
+    /// anything a replying chat's CLI started, which its gate looks after, or what the CLI of a
+    /// chat that no longer replies started itself since the window opened, such as an MCP server
+    /// it connects again. What a program or background work begun before then starts waits. A
+    /// chat asked to hand over works on.
+    fn born(&self, key: usize, pid: u32) {
+        let Some((conversation, cli)) = self.jobs.job(key) else {
+            return;
+        };
+        if pid == cli {
+            return;
+        }
+        let (replying, opened_at) = {
+            let state = self.lock();
+            let Some(first) = state.queue.first() else {
+                return;
+            };
+            if first.opened.is_none()
+                || first.conversation == conversation
+                || first
+                    .asks
+                    .iter()
+                    .any(|a| a.conversation == conversation && a.ended.is_none())
+            {
+                return;
+            }
+            (
+                state.runs.values().any(|r| r.conversation == conversation),
+                first.opened_at.unwrap_or_default(),
+            )
+        };
+        // At once, before it does much; let go below when it may run.
+        let Some(held) = hold::suspend(pid) else {
+            return;
+        };
+        let parents = hold::ancestry(pid);
+        let own = match parents.iter().position(|(parent, _)| *parent == cli) {
+            None => false,
+            Some(_) if replying => true,
+            Some(0) => true,
+            // The process the CLI started on the way to this one.
+            Some(at) => hold::epoch_ms(parents[at - 1].1) >= opened_at,
+        };
+        if own || hold::plumbing(&held.name) {
+            return;
+        }
+        let mut state = self.lock();
+        // The window may have closed meanwhile: then it runs.
+        if let Some(first) = state
+            .queue
+            .first_mut()
+            .filter(|r| r.opened.is_some() && r.conversation != conversation)
+        {
+            first.frozen.push(Frozen {
+                conversation,
+                name: held.name.clone(),
+                held: Some(held),
+            });
+            self.save_frozen(&state);
+        }
+    }
+
+    /// Keeps which processes wait (`hold::save`).
+    fn save_frozen(&self, state: &State) {
+        let Some(history) = &self.history else {
+            return;
+        };
+        let held: Vec<(u32, u64)> = state
+            .queue
+            .iter()
+            .flat_map(|r| r.frozen.iter())
+            .filter_map(|f| f.held.as_ref().map(|h| (h.pid, h.began)))
+            .collect();
+        hold::save(&history.with_file_name(FROZEN), &held);
+    }
+
+    /// Lets the processes held among `processes` run again, so that their programs can be
+    /// stopped.
+    fn thaw(&self, processes: &[(u32, u64)]) {
+        let mut state = self.lock();
+        let mut thawed = false;
+        for frozen in state.queue.iter_mut().flat_map(|r| r.frozen.iter_mut()) {
+            if frozen
+                .held
+                .as_ref()
+                .is_some_and(|h| processes.contains(&(h.pid, h.began)))
+            {
+                frozen.held.take();
+                thawed = true;
+            }
+        }
+        if thawed {
+            self.save_frozen(&state);
+        }
+    }
+
+    /// Lets every process held run again: the app quits.
+    pub fn thaw_all(&self) {
+        let mut state = self.lock();
+        for frozen in state.queue.iter_mut().flat_map(|r| r.frozen.iter_mut()) {
+            frozen.held.take();
+        }
+        self.save_frozen(&state);
     }
 
     /// How `pc_stop` releases a chat's CLI with its background work.
@@ -677,10 +805,17 @@ impl Broker {
             ask.read.get_or_insert(Instant::now());
             (holder, purpose)
         };
-        let left = programs::now(self.jobs.members())
+        let left = self
+            .left_running()
             .await
             .remove(conversation)
             .unwrap_or_default();
+        self.thaw(
+            &left
+                .iter()
+                .flat_map(|p| p.processes.clone())
+                .collect::<Vec<_>>(),
+        );
         let closed = programs::stop(left).await;
         let snapshot = {
             let mut state = self.lock();
@@ -758,7 +893,7 @@ impl Broker {
         let left = if pids.is_empty() {
             vec![]
         } else {
-            programs::now(self.jobs.members())
+            self.left_running()
                 .await
                 .remove(&conversation)
                 .unwrap_or_default()
@@ -786,6 +921,13 @@ impl Broker {
                 }
             }
         }
+        // A program closes, or ends, with its processes running.
+        self.thaw(
+            &chosen
+                .iter()
+                .flat_map(|p| p.processes.clone())
+                .collect::<Vec<_>>(),
+        );
         let outcomes = programs::stop(chosen).await;
         let has_background = background
             && (self.background)()
@@ -900,6 +1042,7 @@ impl Broker {
                     refused_calls: HashSet::new(),
                     asks: vec![],
                     stopped: prepared,
+                    frozen: vec![],
                     measure: machine::Window::default(),
                 });
             }
@@ -944,17 +1087,22 @@ impl Broker {
             None
         };
         let members = reading.as_ref().map(|_| self.jobs.members());
+        let inside_wsl = reading.as_ref().map(|_| self.jobs.wsl());
         let update = {
             let mut state = self.lock();
             if state.queue.is_empty() {
                 state.ticking = false;
                 return false;
             }
-            if let (Some(reading), Some(members)) = (reading, members) {
+            if let (Some(reading), Some(members), Some(inside_wsl)) = (reading, members, inside_wsl)
+            {
                 let holder = state.queue[0].conversation.clone();
                 if state.queue[0].opened.is_some() {
                     let owners = machine::Owners::new(&reading, &members, std::process::id());
-                    state.queue[0].measure.add(reading, &owners, &holder);
+                    let inside_wsl = inside_wsl.iter().any(|j| j.conversation == holder);
+                    state.queue[0]
+                        .measure
+                        .add(reading, &owners, &holder, inside_wsl);
                 }
             }
             self.settled(&mut state, Instant::now())
@@ -994,6 +1142,9 @@ impl Broker {
             span.until = Some(now);
         }
         let report = self.report(&reservation, &state.waits, now, by);
+        // What waited for its window runs again.
+        drop(std::mem::take(&mut reservation.frozen));
+        self.save_frozen(state);
         // What it asked others to hand over ends with it.
         let holder = reservation.conversation.as_str();
         state
@@ -1044,9 +1195,11 @@ impl Broker {
             {
                 return None;
             }
-            first.refused += 1;
+            // A command waited once however often its call asks.
+            if call.is_none_or(|call| first.refused_calls.insert(call.into())) {
+                first.refused += 1;
+            }
             if let Some(call) = call {
-                first.refused_calls.insert(call.into());
                 state.refused.insert(call.into());
                 for run in state.runs.values_mut() {
                     run.calls.remove(call);
@@ -1167,7 +1320,7 @@ impl Broker {
             };
             match step {
                 Step::Opened(text) => {
-                    let left = programs::now(self.jobs.members()).await;
+                    let left = self.left_running().await;
                     return Ok(format!("{text}{}", self.left_text(conversation, &left)));
                 }
                 Step::Done(text) => {
@@ -1386,6 +1539,13 @@ impl Broker {
                     text.push_str(" It asked this chat to hand over what it holds: your commands run until you do, so finish what you need, then call pc_release.");
                 }
                 if first.conversation == conversation {
+                    let frozen = frozen_groups(&first.frozen);
+                    if !frozen.is_empty() {
+                        text.push_str(&format!(
+                            "\nProcesses other chats' programs started while your window is open wait for it to end: {}.",
+                            self.frozen_text(&frozen)
+                        ));
+                    }
                     for ask in first.asks.iter().filter(|a| a.ended.is_none()) {
                         text.push_str(&format!(
                             "\nAsked {} to hand over: {}.",
@@ -1438,6 +1598,28 @@ impl Broker {
             text.push_str(&now.text(|conversation| self.chat(conversation)));
         }
         text
+    }
+
+    /// The programs chats left running now, by conversation: on Windows from one reading of the
+    /// computer, and inside each WSL distribution a chat's CLI runs in from one reading there.
+    async fn left_running(&self) -> HashMap<String, Vec<programs::Program>> {
+        let (mut left, inside) = tokio::join!(
+            programs::now(self.jobs.members()),
+            programs::wsl_left(self.jobs.wsl())
+        );
+        add_left(&mut left, inside);
+        left
+    }
+
+    /// The computer over the last second, with what chats left running inside WSL too.
+    pub async fn now(&self) -> Option<machine::Now> {
+        let (now, inside) = tokio::join!(
+            machine::now(self.jobs.members()),
+            programs::wsl_left(self.jobs.wsl())
+        );
+        let mut now = now?;
+        add_left(&mut now.left, inside);
+        Some(now)
     }
 
     /// A chat as tools name it: its title and the start of its id.
@@ -1493,7 +1675,7 @@ impl Broker {
                 list.iter()
                     .map(|p| {
                         format!(
-                            "{}{} (program {}{}), {}{}",
+                            "{}{} (program {}{}{}), {}{}",
                             p.name,
                             if p.processes.len() > 1 {
                                 format!(" ×{}", p.processes.len())
@@ -1502,6 +1684,10 @@ impl Broker {
                             },
                             p.pid,
                             if p.window { ", a window" } else { "" },
+                            p.place
+                                .as_ref()
+                                .map(|place| format!(", in WSL {place}"))
+                                .unwrap_or_default(),
                             machine::bytes(p.memory),
                             p.cpu
                                 .map(|cpu| format!(", {} CPU", machine::percent(cpu)))
@@ -1645,6 +1831,13 @@ impl Broker {
                 }
             ));
         }
+        let frozen = frozen_groups(&r.frozen);
+        if !frozen.is_empty() {
+            lines.push(format!(
+                "Processes other chats' programs started while the window was open waited for it to end: {}.",
+                self.frozen_text(&frozen)
+            ));
+        }
         let held = held(r, waits, now);
         if held.chats > 0 || r.refused > 0 {
             let mut line = format!(
@@ -1714,12 +1907,32 @@ impl Broker {
                 "background": s.background,
                 "programs": s.outcomes.iter().map(|o| json!({"name": o.program.name, "outcome": o.key()})).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
+            "frozen": frozen.iter().map(|(conversation, name, count)| json!({"conversationId": conversation, "name": name, "processes": count})).collect::<Vec<_>>(),
             "machine": r.measure.record(),
         });
         Report {
             text: lines.join("\n"),
             record,
         }
+    }
+
+    /// Processes held, by chat and program, as text.
+    fn frozen_text(&self, frozen: &[(String, String, usize)]) -> String {
+        frozen
+            .iter()
+            .map(|(conversation, name, count)| {
+                format!(
+                    "{name}{} ({})",
+                    if *count > 1 {
+                        format!(" ×{count}")
+                    } else {
+                        String::new()
+                    },
+                    self.chat(conversation)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
     /// The reservations this computer kept, oldest first, as its history records them.
@@ -2024,6 +2237,36 @@ fn shortened(text: &str, chars: usize) -> String {
     match text.char_indices().nth(chars) {
         Some((at, _)) => format!("{}…", &text[..at]),
         None => text.into(),
+    }
+}
+
+/// The file beside the history that keeps which processes wait (`hold::save`).
+const FROZEN: &str = "frozen.json";
+
+/// Processes held, by chat and program name, in the order they began.
+fn frozen_groups(frozen: &[Frozen]) -> Vec<(String, String, usize)> {
+    let mut groups: Vec<(String, String, usize)> = vec![];
+    for f in frozen {
+        match groups
+            .iter_mut()
+            .find(|(conversation, name, _)| *conversation == f.conversation && *name == f.name)
+        {
+            Some(group) => group.2 += 1,
+            None => groups.push((f.conversation.clone(), f.name.clone(), 1)),
+        }
+    }
+    groups
+}
+
+/// Adds the programs chats left running inside WSL to those found on Windows, largest first.
+fn add_left(
+    left: &mut HashMap<String, Vec<programs::Program>>,
+    inside: HashMap<String, Vec<programs::Program>>,
+) {
+    for (conversation, programs) in inside {
+        let list = left.entry(conversation).or_default();
+        list.extend(programs);
+        list.sort_by(|a, b| b.memory.cmp(&a.memory).then(a.pid.cmp(&b.pid)));
     }
 }
 
