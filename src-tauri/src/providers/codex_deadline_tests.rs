@@ -413,7 +413,7 @@ async fn a_parked_process_serves_the_next_reply_without_restarting_the_thread() 
     assert_eq!(process.reported_model.as_deref(), Some("fixture-model"));
     process.turns += 1;
     process.park();
-    process.claim();
+    process.claim().await;
     let mut second_request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture","instructions":""},"messages":[{"role":"user","text":"First"},{"role":"assistant","text":"READY1"},{"role":"user","text":"Second"}]})).unwrap();
     second_request.native_session = None;
     let mut questions = Questions::default()
@@ -493,7 +493,7 @@ async fn default_reasoning_runs_every_reply_at_the_level_the_profile_configures(
     for (text, reasoning) in [("Second", ""), ("Third", "high")] {
         process.turns += 1;
         process.park();
-        process.claim();
+        process.claim().await;
         let next = reply(text, reasoning);
         let mut questions = Questions::default()
             .open(&next.run_id, None, channel.clone())
@@ -551,7 +551,7 @@ async fn a_usage_limit_keeps_the_thread_for_the_reply_after_the_reset() {
     process.limited = false;
     process.turns += 1;
     process.park();
-    process.claim();
+    process.claim().await;
     let next: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"codex","model":"fixture","instructions":""},"messages":[{"role":"user","text":"First"},{"role":"assistant","text":""},{"role":"user","text":"Continue where you left off."}]})).unwrap();
     let mut questions = Questions::default()
         .open(&next.run_id, None, channel.clone())

@@ -595,7 +595,7 @@ pub(crate) async fn execute(
             }
         } else if let Some(mut parked) = pool.take(conversation) {
             if parked.serves(&fingerprint, session) {
-                parked.claim();
+                parked.claim().await;
                 reused = Some(parked);
             } else if parked.healthy {
                 // Changed launch identity or session: start over. Claude model and

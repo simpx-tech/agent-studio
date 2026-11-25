@@ -788,7 +788,7 @@ async fn perform(
                     process.kill().await;
                 }
             } else {
-                process.claim();
+                process.claim().await;
                 pending.pooled = true;
                 pending.process = Some(process);
             }

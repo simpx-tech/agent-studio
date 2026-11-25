@@ -20,9 +20,9 @@ use std::{
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWrite, BufReader},
+    io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin},
-    sync::mpsc,
+    sync::{mpsc, Notify},
 };
 
 /// How long an in-band interrupt may take before the process tree is killed instead.
@@ -65,12 +65,103 @@ impl AsyncWrite for Input {
     }
 }
 
+/// The CLI's input while its process is parked, lent to its output reader. Between replies
+/// the CLI can start a turn of its own, for a background task's notification or a message from
+/// another session, and Claude Code refuses a call whose `PreToolUse` callback does not answer
+/// in time ("PreToolUse hook did not respond before its timeout"), which kept such a turn from
+/// running any command once chats had the reservation gate (`reservations::tools`). So the
+/// reader answers every hook callback asked while no reply listens with no opinion
+/// (`parked_answer`), and the reply that claims the process takes the input back once an
+/// answer being written is complete.
+#[derive(Default)]
+struct Lent {
+    state: Mutex<Lending>,
+    returned: Notify,
+}
+#[derive(Default)]
+enum Lending {
+    /// Not lent: a reply holds the input, or it is closed.
+    #[default]
+    None,
+    Here(ChildStdin),
+    /// The output reader writes an answer with it.
+    Out,
+}
+impl Lent {
+    fn state(&self) -> std::sync::MutexGuard<'_, Lending> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    fn lend(&self, input: ChildStdin) {
+        *self.state() = Lending::Here(input);
+    }
+    /// The input back, once an answer being written with it is complete; None when it was
+    /// not lent.
+    async fn reclaim(&self) -> Option<ChildStdin> {
+        loop {
+            // Looked at and put back under one lock, so an answer finishing in between can
+            // never be overwritten, which would close the CLI's input.
+            {
+                let mut state = self.state();
+                match std::mem::take(&mut *state) {
+                    Lending::Here(input) => return Some(input),
+                    Lending::None => return None,
+                    Lending::Out => *state = Lending::Out,
+                }
+            }
+            self.returned.notified().await;
+        }
+    }
+    /// Writes `line` with the lent input. False when it is not lent: a reply claimed it.
+    async fn write(&self, line: &str) -> bool {
+        let mut input = {
+            let mut state = self.state();
+            match std::mem::take(&mut *state) {
+                Lending::Here(input) => {
+                    *state = Lending::Out;
+                    input
+                }
+                other => {
+                    *state = other;
+                    return false;
+                }
+            }
+        };
+        // A pipe the CLI closed is its own end; the answer goes nowhere either way.
+        let _ = input.write_all(line.as_bytes()).await;
+        let _ = input.flush().await;
+        *self.state() = Lending::Here(input);
+        self.returned.notify_one();
+        true
+    }
+}
+
+/// The answer to a hook callback Claude Code asks while no reply listens: no opinion, so the call
+/// runs as it would without the hook, a command during a measurement included.
+fn parked_answer(line: &str) -> Option<String> {
+    if !line.contains("\"hook_callback\"") {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    (value["type"] == "control_request" && value["request"]["subtype"] == "hook_callback").then(
+        || {
+            format!(
+                "{}\n",
+                serde_json::json!({"type":"control_response","response":{
+                    "subtype":"success","request_id":value["request_id"],"response":{}
+                }})
+            )
+        },
+    )
+}
+
 pub struct Process {
     pub exe: Executable,
     pub child: Child,
     pub stdin: Input,
     pub lines: mpsc::Receiver<Line>,
     idle: Arc<AtomicBool>,
+    /// The input while parked (`Lent`).
+    lent: Arc<Lent>,
     /// Launch identity: provider, account/profile, computer, folder, executable,
     /// reasoning, and (except for Claude's in-band selection) model.
     pub fingerprint: String,
@@ -131,9 +222,11 @@ impl Process {
         let stderr = child.stderr.take().ok_or("CLI stderr is unavailable")?;
         let (tx, lines) = mpsc::channel(256);
         let idle = Arc::new(AtomicBool::new(false));
+        let lent = Arc::new(Lent::default());
         // Readers live as long as the process. While parked, output is dropped so an idle
-        // CLI can never fill its pipe or accumulate unbounded memory.
-        let (out_tx, out_idle) = (tx.clone(), idle.clone());
+        // CLI can never fill its pipe or accumulate unbounded memory, and a hook callback is
+        // answered here, since no reply is there to answer it (`Lent`).
+        let (out_tx, out_idle, out_lent) = (tx.clone(), idle.clone(), lent.clone());
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -141,7 +234,12 @@ impl Process {
                     observer(&line);
                 }
                 if out_idle.load(Ordering::Relaxed) {
-                    continue;
+                    match parked_answer(&line) {
+                        Some(answer) if out_lent.write(&answer).await => continue,
+                        // A reply claimed the process meanwhile: it answers.
+                        Some(_) if !out_idle.load(Ordering::Relaxed) => {}
+                        _ => continue,
+                    }
                 }
                 if out_tx.send(Line::Out(line)).await.is_err() {
                     break;
@@ -167,6 +265,7 @@ impl Process {
             stdin: Input(Some(stdin)),
             lines,
             idle,
+            lent,
             fingerprint,
             claude_settings: None,
             session_id,
@@ -204,18 +303,26 @@ impl Process {
     fn drain(&mut self) {
         while self.lines.try_recv().is_ok() {}
     }
-    /// Stop forwarding output between replies.
+    /// Stop forwarding output between replies, and lend the input to the output reader,
+    /// before it drops output, so that no hook callback goes unanswered.
     pub fn park(&mut self) {
+        if let Some(input) = self.stdin.0.take() {
+            self.lent.lend(input);
+        }
         self.idle.store(true, Ordering::Relaxed);
         self.drain();
         // Parked output is dropped, so the next reply could not tell when handed-over work
         // reports and must not wait for it.
         self.carried = None;
     }
-    /// Resume forwarding output for the next reply.
-    pub fn claim(&mut self) {
+    /// Resume forwarding output for the next reply, and take the input back once an answer
+    /// the output reader is writing is complete.
+    pub async fn claim(&mut self) {
         self.drain();
         self.idle.store(false, Ordering::Relaxed);
+        if self.stdin.0.is_none() {
+            self.stdin.0 = self.lent.reclaim().await;
+        }
     }
     pub async fn kill(&mut self) {
         self.exe.kill(&mut self.child).await;
@@ -230,7 +337,10 @@ impl Process {
     pub async fn finish(mut self) {
         // Output is dropped from now on, so the CLI never fills its pipe while it ends.
         self.idle.store(true, Ordering::Relaxed);
-        let input = self.stdin.0.take();
+        let input = match self.stdin.0.take() {
+            Some(input) => Some(input),
+            None => self.lent.reclaim().await,
+        };
         self.exe.end(self.child, input, None, self.renewal).await;
         if let Some(watch) = self.background.take() {
             watch.ended();
@@ -409,18 +519,19 @@ mod tests {
         )
         .unwrap();
         process.park();
-        process
-            .stdin
-            .write_all(b"{\"method\":\"account/updated\"}\n")
-            .await
-            .unwrap();
+        assert!(
+            process
+                .lent
+                .write("{\"method\":\"account/updated\"}\n")
+                .await
+        );
         let observed = tokio::time::timeout(Duration::from_secs(10), rx.recv())
             .await
             .unwrap()
             .unwrap();
         assert!(observed.contains("account/updated"));
         assert!(process.lines.try_recv().is_err());
-        process.claim();
+        process.claim().await;
         process.stdin.write_all(b"active\n").await.unwrap();
         assert!(
             matches!(tokio::time::timeout(Duration::from_secs(10),process.lines.recv()).await.unwrap(),Some(Line::Out(line)) if line == "active")
@@ -438,9 +549,9 @@ mod tests {
             .unwrap();
         assert!(matches!(line, Some(Line::Out(text)) if text == "live"));
         process.park();
-        process.stdin.write_all(b"idle\n").await.unwrap();
+        assert!(process.lent.write("idle\n").await);
         tokio::time::sleep(Duration::from_millis(300)).await;
-        process.claim();
+        process.claim().await;
         process.stdin.write_all(b"again\n").await.unwrap();
         let line = tokio::time::timeout(Duration::from_secs(10), process.lines.recv())
             .await
@@ -449,6 +560,104 @@ mod tests {
         assert!(process.alive());
         process.kill().await;
         assert!(!process.alive());
+    }
+
+    #[tokio::test]
+    async fn hook_callbacks_asked_while_parked_get_no_opinion_and_a_claimed_process_gets_its_own() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut process = Process::new_observed(
+            exe(),
+            idle_child(),
+            "live".into(),
+            "session".into(),
+            Some(Arc::new(move |line| {
+                tx.send(line.to_owned()).unwrap();
+            })),
+        )
+        .unwrap();
+        let hook = |id: &str| {
+            format!(
+                "{}\n",
+                serde_json::json!({"type":"control_request","request_id":id,"request":{
+                    "subtype":"hook_callback","callback_id":"studio-pc-gate",
+                    "input":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cargo build"}}
+                }})
+            )
+        };
+        // Between replies the echoing child asks a hook, as a turn of the CLI's own does, and the
+        // reader answers it with no opinion, which the child echoes back.
+        process.park();
+        assert!(process.lent.write(&hook("hook-1")).await);
+        let mut answered = None;
+        while answered.is_none() {
+            let line = tokio::time::timeout(Duration::from_secs(10), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if line.contains("control_response") {
+                answered = Some(line);
+            }
+        }
+        let answer: serde_json::Value = serde_json::from_str(&answered.unwrap()).unwrap();
+        assert_eq!(answer["response"]["request_id"], "hook-1");
+        assert_eq!(answer["response"]["subtype"], "success");
+        assert_eq!(answer["response"]["response"], serde_json::json!({}));
+        assert!(process.lines.try_recv().is_err());
+        // Claimed, the input is the reply's again, and a hook goes to the reply to answer.
+        process.claim().await;
+        process
+            .stdin
+            .write_all(hook("hook-2").as_bytes())
+            .await
+            .unwrap();
+        let line = tokio::time::timeout(Duration::from_secs(10), process.lines.recv())
+            .await
+            .unwrap();
+        assert!(matches!(line, Some(Line::Out(text)) if text.contains("hook-2")));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        while let Ok(seen) = rx.try_recv() {
+            assert!(!seen.contains("control_response"), "{seen}");
+        }
+        // Lines that are not hooks are dropped while parked, as before.
+        assert_eq!(parked_answer("{\"type\":\"assistant\"}"), None);
+        assert_eq!(parked_answer("not json \"hook_callback\""), None);
+        process.kill().await;
+    }
+
+    #[tokio::test]
+    async fn reclaiming_waits_for_an_answer_being_written() {
+        let mut child = idle_child();
+        let input = child.stdin.take().unwrap();
+        let lent = Arc::new(Lent::default());
+        *lent.state() = Lending::Out;
+        let waiting = tokio::spawn({
+            let lent = lent.clone();
+            async move { lent.reclaim().await.is_some() }
+        });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!waiting.is_finished());
+        // The answer is written: its input comes back, and the reply waiting for it takes it.
+        *lent.state() = Lending::Here(input);
+        lent.returned.notify_one();
+        assert!(tokio::time::timeout(Duration::from_secs(10), waiting)
+            .await
+            .unwrap()
+            .unwrap());
+        // Taken back, nothing is lent: no answer is written and nothing more comes back.
+        assert!(!lent.write("late\n").await);
+        assert!(lent.reclaim().await.is_none());
+        let _ = child.kill().await;
+    }
+
+    #[tokio::test]
+    async fn a_parked_process_finishes_with_its_lent_input() {
+        let mut process = process("finish");
+        process.park();
+        assert!(process.stdin.0.is_none());
+        // finish closes the input it takes back, so the echoing child ends by itself.
+        tokio::time::timeout(Duration::from_secs(30), process.finish())
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -1,5 +1,13 @@
 # Verification — 2026-09-08
 
+## A turn a parked Claude process starts by itself runs its commands — 2026-11-25
+
+Found in a chat of this computer. Between replies its idle process started a turn of its own for another session's notice, and both commands that turn ran were refused with "PreToolUse hook did not respond before its timeout (host client may be unreachable). The tool call was not executed". Every Claude chat process has had the reservation gate since 1.4.0, and nothing answered it while no reply ran. docs/RESERVATIONS.md said such a command went ahead after the 30 seconds, but Claude Code (2.1.332) refuses a call whose hook does not answer in time. Now `pool::Process::park` lends the CLI's input to the process's output reader (`Lent`). The reader answers every hook callback it reads while parked with no opinion (`parked_answer`), and `claim` takes the input back once an answer being written is complete. The state is looked at and put back under one lock, so a claim racing an answer never drops the input.
+
+- Real CLI (opt-in `installed_claude_runs_the_commands_of_a_turn_it_starts_between_replies`, Claude Code 2.1.332, Sonnet). The reply started `sleep 45 && echo noticed > token.txt` in the background and ended in 4.4 s. Parked, the CLI started a turn of its own when the job reported, asked the gate, and its `cp` of the token ran: the turn wrote 59 lines, none about a hook timeout. Two runs with the answer turned off were inconclusive, since the model awaited the job with await_background_tasks in its first reply although told not to, so no parked turn ran. The refusal itself is the one this chat met.
+- Fixture (`a_turn_a_parked_process_starts_by_itself_gets_its_gate_answered`): a stand-in CLI asks the gate after its reply ended and the process was parked. It reads `{"subtype":"success","response":{}}` for its request, and the next reply goes on in the same process. With the answer turned off it waits 20 seconds and fails.
+- Unit: hooks asked while parked are answered, and a claimed process's go to its reply. A parked process finishes with its lent input, and a claim waits for an answer being written.
+
 ## Reservations wait for a lull, mark measurements that ran beside other work, and hand out build slots and named turns — 2026-11-25
 
 From `artifacts/time-backfill/agent-time-follow-up.md`, written from the rebuilt history of every chat: §1 (tune the reservations), §6 (the command time limit and background work), §7 (the socket drains) and §8 (build slots, named reservations and a landing turn). docs/RESERVATIONS.md describes the result.

@@ -83,9 +83,15 @@ or its reply ends.
   answers it: with no opinion when the computer is free, the call is light, or the chat holds the
   reservation itself (its sub-agents included); otherwise with a refusal that names the chat
   measuring and its purpose and tells the agent to call `pc_wait` and run the command, or make the
-  call, again. A refusal rather than a held answer: a process parked between replies has nobody
-  to answer its hooks, so the hook's timeout is 30 seconds, and a command an unobserved turn of a
-  parked process starts goes ahead after it. Claude Code names an SDK callback
+  call, again. A refusal rather than a held answer, since Claude Code (2.1.332) refuses a call
+  whose hook does not answer within its timeout, 30 seconds here ("PreToolUse hook did not respond
+  before its timeout"). A turn a parked process starts by itself between replies, for a
+  background task's report or another session's message, has no reply to answer it: the
+  process's output reader answers its hook callbacks, the gate's and the others', with no opinion
+  (`pool::Lent`, which lends it the CLI's input until the next reply claims the process), so its
+  commands run as they would without the gate, and the hold below lets what they start run too,
+  as what that chat's CLI started itself. From 1.4.0 until this was found (2026-11-25), every
+  command of such a turn was refused at the timeout. Claude Code names an SDK callback
   `PreToolUse:Callback`, which Work history leaves out. It also reports a call as started before
   it asks the gate, so a call the gate refused counts for nothing: it never keeps a window closed
   nor shows in a report as work that ran.
@@ -215,7 +221,8 @@ Agents coordinate by themselves, so the user is asked only about the user's own 
 - **Messages.** `chat_message` writes to another chat that is replying on this computer. It reads
   the message with its next tool call: in a Claude chat, a `PostToolUse` hook callback that every
   chat process registers beside the gate answers with the message as `additionalContext` (10
-  seconds' timeout, for the same reason as the gate's); in a Codex chat, the gate before its
+  seconds' timeout, answered with no opinion while the process is parked, as the gate is); in a
+  Codex chat, the gate before its
   next command does (`codex_gate`, `additionalContext` beside a command it lets run, which
   Codex 0.172 hands the model); and in either, the answer of any of these tools, a message
   ending a `pc_wait` early. Only the chat's own agent reads it, never a sub-agent: Claude names a

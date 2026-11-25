@@ -186,7 +186,7 @@ async fn installed_codex_runs_default_reasoning_at_the_profiles_level_with_tools
             // The next reply, as the parked process serves it.
             process.turns += 1;
             process.park();
-            process.claim();
+            process.claim().await;
             request.native_session = None;
             request.native_session =
                 crate::providers::sessions::Session::prepare(root.path(), &request).unwrap();

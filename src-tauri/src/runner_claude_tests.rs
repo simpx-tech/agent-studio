@@ -148,6 +148,22 @@ while ($null -ne ($line = [Console]::ReadLine())) {
             [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"Built after the benchmark.","usage":{"input_tokens":1,"output_tokens":1}}')
             continue
         }
+        if ($mode -eq 'Parked gate') {
+            # The reply ends; then, its process parked, a background task reports and the CLI starts
+            # a turn of its own, whose command asks the gate while no reply listens.
+            [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"started","model":"fixture-model","content":[{"type":"text","text":"The tests run in the background."}],"usage":{"input_tokens":1,"output_tokens":1}}}')
+            [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"The tests run in the background.","usage":{"input_tokens":1,"output_tokens":1}}')
+            $parked = Join-Path (Split-Path $PSCommandPath) 'parked'
+            while (-not (Test-Path -LiteralPath $parked)) { Start-Sleep -Milliseconds 20 }
+            [Console]::WriteLine('{"type":"system","subtype":"task_notification","task_id":"tests","status":"completed"}')
+            [Console]::WriteLine('{"type":"system","subtype":"init","session_id":"' + $env:STUDIO_TEST_SESSION + '","parent_tool_use_id":null}')
+            foreach ($id in $gateHooks) {
+                [Console]::WriteLine('{"type":"control_request","request_id":"parked-gate","request":{"subtype":"hook_callback","callback_id":"' + $id + '","input":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"cargo build"},"tool_use_id":"call-2"},"tool_use_id":"call-2"}}')
+                Add-Content -LiteralPath $settingsLog -Value ([Console]::ReadLine())
+            }
+            [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"Built after the tests.","origin":{"kind":"task-notification"}}')
+            continue
+        }
         if ($mode -eq 'Agents') {
             # A background agent works on after the turn ends.
             [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"launch","content":[{"type":"tool_use","id":"agent-call","name":"Agent","input":{"description":"Researcher","prompt":"Research","run_in_background":true}}]}}')
@@ -314,7 +330,7 @@ async fn a_usage_limit_ends_the_reply_with_claude_codes_own_line() {
     );
     let fingerprint = crate::pool::fingerprint(&next, &process.exe).unwrap();
     assert!(process.serves(&fingerprint, next.native_session.as_ref().unwrap()));
-    process.claim();
+    process.claim().await;
     let (result, _) = turn(&mut process, &next, CancellationToken::new(), true, false).await;
     assert_eq!(result.unwrap(), ("complete".into(), "Turn 2".into()));
     assert_eq!(process.child.id(), pid);
@@ -474,6 +490,96 @@ async fn the_gate_refuses_commands_while_another_chat_measures_and_pc_wait_answe
         text.starts_with("The computer is free again after"),
         "{text}"
     );
+}
+
+#[tokio::test]
+async fn a_turn_a_parked_process_starts_by_itself_gets_its_gate_answered() {
+    let root = tempfile::tempdir().unwrap();
+    let conversation = uuid::Uuid::new_v4().to_string();
+    let first = request(
+        root.path(),
+        &conversation,
+        serde_json::json!([{"role":"user","text":"Parked gate"}]),
+    );
+    let session = first.native_session.as_ref().unwrap().id().to_string();
+    let mut process = fixture(root.path(), &session, false, false);
+    process.fingerprint = crate::pool::fingerprint(&first, &process.exe).unwrap();
+    let broker = crate::reservations::Broker::new(
+        Box::new(|_| {}),
+        Box::new(|_| None),
+        Box::new(Vec::new),
+        None,
+    );
+    let channel = EventSink::new(|_| Ok(()));
+    let mut questions = Questions::default()
+        .open(&first.run_id, None, channel.clone())
+        .unwrap();
+    questions.pc = Some(crate::reservations::tools::Session::new(
+        broker,
+        &conversation,
+        &first.run_id,
+    ));
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        stream_turn(
+            &mut process,
+            &first,
+            Some(&channel),
+            CancellationToken::new(),
+            Some(&mut questions),
+            false,
+        ),
+    )
+    .await
+    .expect("the turn must finish");
+    assert_eq!(result.unwrap().0, "complete");
+    drop((questions, channel));
+    // Parked, the CLI starts a turn of its own, whose command asks the gate. No reply runs, so
+    // the process's output reader answers with no opinion and the command goes ahead, where
+    // Claude Code would refuse it once the hook's timeout passed.
+    process.turns += 1;
+    process.park();
+    std::fs::write(root.path().join("parked"), "").unwrap();
+    let answered = || {
+        std::fs::read_to_string(root.path().join("settings.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| {
+                serde_json::from_str::<serde_json::Value>(line.trim_start_matches('\u{feff}')).ok()
+            })
+            .find(|line| line["response"]["request_id"] == "parked-gate")
+    };
+    let answer = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Some(answer) = answered() {
+                break answer;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("The gate asked while the process was parked was never answered");
+    assert_eq!(answer["type"], "control_response");
+    assert_eq!(answer["response"]["subtype"], "success");
+    assert_eq!(answer["response"]["response"], serde_json::json!({}));
+    // The next reply takes the input back and goes on in the same CLI.
+    let pid = process.child.id();
+    drop(first);
+    let next = request(
+        root.path(),
+        &conversation,
+        serde_json::json!([
+            {"role":"user","text":"Parked gate"},
+            {"role":"assistant","text":"The tests run in the background."},
+            {"role":"user","text":"After"}
+        ]),
+    );
+    process.claim().await;
+    let (result, _) = turn(&mut process, &next, CancellationToken::new(), true, false).await;
+    assert_eq!(result.unwrap(), ("complete".into(), "Turn 2".into()));
+    assert_eq!(process.child.id(), pid);
+    assert!(process.healthy && process.alive());
+    process.kill().await;
 }
 
 /// The guidance a compaction's hooks gave, their pieces in order, from what the fixture read.
@@ -729,7 +835,7 @@ async fn declared_background_tests_hold_the_reply_until_the_model_reports_them()
         drop(first);
         process.turns += 1;
         process.park();
-        process.claim();
+        process.claim().await;
         let next = request(
             root.path(),
             &conversation,
@@ -1121,7 +1227,7 @@ async fn claude_settings_acknowledged_before_prompt_and_reused_without_restart()
                 &crate::pool::fingerprint(&r, &p.exe).unwrap(),
                 r.native_session.as_ref().unwrap()
             ));
-            p.claim();
+            p.claim().await;
         }
         let (result, _) = turn(p, &r, CancellationToken::new(), index > 0, false).await;
         assert_eq!(
@@ -1386,7 +1492,7 @@ async fn interrupt_keeps_the_process_and_the_next_reply_reuses_it() {
     drop(first);
     process.turns += 1;
     process.park();
-    process.claim();
+    process.claim().await;
     let second = request(
         root.path(),
         &conversation,

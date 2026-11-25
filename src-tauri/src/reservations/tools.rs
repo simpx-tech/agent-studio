@@ -24,8 +24,9 @@ pub const NAMES: [&str; 6] = [STATUS, RESERVE, WAIT, RELEASE, STOP, MESSAGE];
 const GATE: &str = "studio-pc-gate";
 /// The hook callback that hands a chat the messages other chats sent it.
 const MESSAGES: &str = "studio-pc-messages";
-/// How long the CLI waits for the gate. A running reply answers at once. A process parked between
-/// replies has nobody to answer, so a command a turn of its own starts goes ahead after this.
+/// How long the CLI waits for the gate, which a running reply answers at once. Claude Code refuses
+/// the call once this passes, so a process parked between replies answers a turn of its own with
+/// no opinion from its output reader (`pool::Lent`), and the turn's commands go ahead.
 const GATE_TIMEOUT_SECONDS: u64 = 30;
 /// How long the CLI waits for messages after a call, which a running reply also answers at once.
 const MESSAGES_TIMEOUT_SECONDS: u64 = 10;

@@ -487,6 +487,147 @@ async fn installed_claude_background_work_outlives_its_reply() {
 
 #[tokio::test]
 #[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
+async fn installed_claude_runs_the_commands_of_a_turn_it_starts_between_replies() {
+    use std::sync::{atomic::AtomicBool, Arc, Mutex};
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    // Git Bash reads the paths with forward slashes. The job writes the token the later command
+    // copies, so that command can only succeed once the job has reported.
+    let slashed = |path: &std::path::Path| path.to_string_lossy().replace('\\', "/");
+    let (token, marker) = (
+        root.path().join("token.txt"),
+        root.path().join("noticed.txt"),
+    );
+    let (token_path, marker_path) = (slashed(&token), slashed(&marker));
+    let text = format!("This is an Agent Studio integration test in a disposable folder. With your Bash tool, start this command in the background (run_in_background) and end this reply right after, saying only that it started: sleep 45 && echo noticed > '{token_path}' . Do not wait for it in this reply: do not call await_background_tasks, sleep, poll or read its output. Later, once you are told that the job finished, run exactly this command with your Bash tool: cp '{token_path}' '{marker_path}'");
+    let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"claude","model":"sonnet","instructions":""},"messages":[{"role":"user","text":text}]})).unwrap();
+    let conversation = uuid::Uuid::new_v4().to_string();
+    request.conversation_id = Some(conversation.clone());
+    request.native_session =
+        crate::providers::sessions::Session::prepare(root.path(), &request).unwrap();
+    let exe = crate::providers::resolve("claude").await.unwrap();
+    let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+        .await
+        .unwrap();
+    // What the CLI writes once its process is parked, which nobody else reads.
+    let parked = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+    let observer: crate::pool::OutputObserver = {
+        let (parked, seen) = (parked.clone(), seen.clone());
+        Arc::new(move |line: &str| {
+            if parked.load(Ordering::Relaxed) {
+                seen.lock().unwrap().push(line.to_owned());
+            }
+        })
+    };
+    let mut process = crate::pool::Process::new_observed(
+        exe,
+        command.spawn().unwrap(),
+        "real-parked-gate-test".into(),
+        request.native_session.as_ref().unwrap().id().to_string(),
+        Some(observer),
+    )
+    .unwrap();
+    // A chat that can reserve this computer, so its process has the gate.
+    let broker = crate::reservations::Broker::new(
+        Box::new(|_| {}),
+        Box::new(|_| None),
+        Box::new(Vec::new),
+        None,
+    );
+    let (tx, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let channel = EventSink::new(move |event| {
+        let _ = tx.send(event);
+        Ok(())
+    });
+    let mut questions = Questions::default()
+        .open(&request.run_id, None, channel.clone())
+        .unwrap();
+    questions.pc = Some(crate::reservations::tools::Session::new(
+        broker,
+        &conversation,
+        &request.run_id,
+    ));
+    let began = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(180),
+        stream_turn(
+            &mut process,
+            &request,
+            Some(&channel),
+            CancellationToken::new(),
+            Some(&mut questions),
+            false,
+        ),
+    )
+    .await
+    .expect("Installed CLI test timed out");
+    let replied = began.elapsed();
+    drop((questions, channel));
+    // The reply's calls, as their latest records tell them, for a failure to show.
+    let mut calls = std::collections::BTreeMap::new();
+    while let Ok(event) = received.try_recv() {
+        if let RunEvent::Tool { tool } = event {
+            let tool = serde_json::to_value(&tool).unwrap();
+            let id = tool["id"].as_str().unwrap_or_default().to_owned();
+            calls.insert(id, tool);
+        }
+    }
+    let early = marker.exists();
+    parked.store(true, Ordering::Relaxed);
+    process.park();
+    // The job reports about 45 seconds after it started, and the CLI starts a turn of its own.
+    let ended = tokio::time::timeout(Duration::from_secs(240), async {
+        while !seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|line| line.contains("\"type\":\"result\""))
+        {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .is_ok();
+    process.kill().await;
+    let seen = seen.lock().unwrap().clone();
+    let calls: Vec<String> = calls
+        .values()
+        .map(|tool| {
+            format!(
+                "{} {} background={} {}",
+                tool["name"], tool["status"], tool["background"], tool["input"]
+            )
+        })
+        .collect();
+    eprintln!("The reply took {replied:?} with these calls: {calls:#?}");
+    assert_eq!(result.expect("Installed CLI failed").0, "complete");
+    assert!(!early, "The model ran the command before its reply ended");
+    assert!(ended, "No turn of its own ended: {seen:#?}");
+    assert!(
+        seen.iter()
+            .any(|line| line.contains("\"hook_callback\"") && line.contains("studio-pc-gate")),
+        "The turn asked no gate: {seen:#?}"
+    );
+    assert!(
+        !seen.iter().any(|line| line.contains("did not respond")),
+        "{seen:#?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&marker)
+            .expect("The command of the turn the CLI started by itself never ran")
+            .trim(),
+        "noticed"
+    );
+    eprintln!(
+        "The parked turn wrote {} lines and ran its command.",
+        seen.len()
+    );
+}
+
+#[tokio::test]
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
 async fn installed_claude_message_takes_over_a_reply_waiting_for_a_background_agent() {
     let root = tempfile::tempdir().unwrap();
     let runtime = root.path().join("chat-runtime");
@@ -784,7 +925,7 @@ async fn installed_claude_a_later_reply_records_the_sub_agent_it_resumes() {
             let parked = process.as_mut().unwrap();
             parked.turns += 1;
             parked.park();
-            parked.claim();
+            parked.claim().await;
         } else {
             if let Some(mut previous) = process.take() {
                 previous.kill().await;
@@ -867,7 +1008,7 @@ async fn installed_claude_reply_costs_follow_each_process_running_total() {
             let parked = process.as_mut().unwrap();
             parked.turns += 1;
             parked.park();
-            parked.claim();
+            parked.claim().await;
         } else {
             if let Some(mut previous) = process.take() {
                 previous.kill().await;
