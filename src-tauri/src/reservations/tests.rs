@@ -1246,6 +1246,78 @@ async fn a_wsl_chat_s_work_is_idle_only_by_fresh_readings_inside_wsl() {
 }
 
 #[tokio::test]
+async fn an_open_window_reads_inside_wsl_only_the_idle_work_it_opened_beside_and_rarely() {
+    let broker = broker_with(vec![], None);
+    broker.run_started("run-ui", "ui");
+    let (watch, _) = command("watch", "python3 watch.py");
+    broker.tool("run-ui", &watch);
+    broker.run_started("run-api", "api");
+    let (test, tested) = command("test", "npm test");
+    broker.tool("run-api", &test);
+    broker.run_started("run-bench", "bench");
+    let (own, _) = command("own", "cargo build");
+    broker.tool("run-bench", &own);
+    broker.reserve("run-bench", "bench", "Frame timing", None);
+    broker.lock().in_wsl.insert("ui".into());
+    let t0 = Instant::now();
+    let at = |s: u64| t0 + Duration::from_secs(s);
+    let wanted = |now: Instant| {
+        let state = broker.lock();
+        let items = items(&state, &[], now);
+        let mut wanted: Vec<String> = wanted_inside(&state, &items, now).into_iter().collect();
+        wanted.sort();
+        wanted
+    };
+    // While the window waits: every other chat with work in progress, never the holder.
+    assert_eq!(wanted(at(0)), ["api", "ui"]);
+    broker.lock().reading_wsl = true;
+    assert!(wanted(at(0)).is_empty(), "one reading at a time");
+    broker.lock().reading_wsl = false;
+    // The tests end and the watcher stays idle: the window opens beside it.
+    broker.tool("run-api", &tested);
+    for second in (2..=12).step_by(2) {
+        read_work(&broker, "ui", 0.0, at(second - 2), at(second));
+        let mut state = broker.lock();
+        let idle = HashMap::from([("ui".to_string(), 0.02)]);
+        heard_work(
+            &mut state,
+            true,
+            ["ui".to_string()],
+            &idle,
+            at(second - 2),
+            at(second),
+        );
+    }
+    settle_at(&broker, at(12));
+    assert_eq!(broker.snapshot().reservations[0].phase, "open");
+    // While it is open: the chat whose idle work it opened beside, every ten seconds.
+    assert_eq!(wanted(at(12)), ["ui"]);
+    broker.lock().read_wsl_at = Some(at(12));
+    assert!(wanted(at(15)).is_empty());
+    assert_eq!(wanted(at(22)), ["ui"]);
+    // A reading inside WSL finds it working: it ran beside the measurement.
+    {
+        let mut state = broker.lock();
+        let busy = HashMap::from([("ui".to_string(), 1.0)]);
+        heard_work(&mut state, true, ["ui".to_string()], &busy, at(22), at(23));
+    }
+    settle_at(&broker, at(23));
+    assert!(
+        wanted(at(40)).is_empty(),
+        "work that woke is no longer idle"
+    );
+    let report = release_at(&broker, at(25));
+    assert!(
+        report.text.contains(
+            "Measurement: ran beside other heavy work, so its numbers may be off: the chat \"Fix inventory UI\" ran `python3 watch.py`"
+        ),
+        "{}",
+        report.text
+    );
+    assert_eq!(report.record["contaminated"], true);
+}
+
+#[tokio::test]
 async fn a_build_waits_for_a_slot_and_takes_the_one_its_turn_brings() {
     let broker = broker_with(vec![], None);
     broker.read_with(eight_cores);

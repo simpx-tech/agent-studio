@@ -67,6 +67,10 @@ const GRANT: Duration = Duration::from_secs(120);
 const IDLE_FOR: Duration = Duration::from_secs(10);
 /// A reading of a chat's work older than this no longer tells whether it is idle.
 const STALE: Duration = Duration::from_secs(15);
+/// How often an open window reads inside WSL the idle work of WSL chats it opened beside, to
+/// notice when that work wakes: a reading costs a launch of a script and a second of sampling
+/// there, so an open window reads only the chats it has to, and no more often than this.
+const WSL_DURING: Duration = Duration::from_secs(10);
 /// The file beside the history that keeps this computer's settings of reservations.
 const SETTINGS: &str = "settings.json";
 
@@ -242,8 +246,9 @@ struct State {
     last: Option<(machine::Reading, jobs::Members)>,
     /// The chats whose CLIs run inside a WSL distribution, whose work a reading there tells.
     in_wsl: HashSet<String>,
-    /// A reading inside WSL is under way (`programs::wsl_work`).
+    /// A reading inside WSL is under way (`programs::wsl_work`), and when the last began.
     reading_wsl: bool,
+    read_wsl_at: Option<Instant>,
     next: u64,
     ticking: bool,
 }
@@ -1485,27 +1490,27 @@ impl Broker {
                     first.measure.add(reading, &owners, &holder, inside_wsl);
                 }
             }
-            // Inside WSL, one reading at a time, of the chats there whose work in progress the
-            // window waits for.
-            let inside: Vec<jobs::WslJob> = match (&launches, state.queue.first()) {
-                (Some(launches), Some(first)) if waiting && !state.reading_wsl => {
-                    let items = items(&state, &(self.background)(), now);
-                    let wanted: HashSet<&str> = items
-                        .iter()
-                        .filter(|i| {
-                            i.in_progress && !i.light && i.conversation != first.conversation
-                        })
-                        .map(|i| i.conversation.as_str())
-                        .collect();
+            // Inside WSL, one reading at a time, of the chats there it has to tell of.
+            let inside: Vec<jobs::WslJob> = match &launches {
+                Some(launches) => {
+                    let items = if waiting {
+                        items(&state, &(self.background)(), now)
+                    } else {
+                        vec![]
+                    };
+                    let wanted = wanted_inside(&state, &items, now);
                     launches
                         .iter()
-                        .filter(|j| wanted.contains(j.conversation.as_str()))
+                        .filter(|j| wanted.contains(&j.conversation))
                         .cloned()
                         .collect()
                 }
-                _ => vec![],
+                None => vec![],
             };
-            state.reading_wsl |= !inside.is_empty();
+            if !inside.is_empty() {
+                state.reading_wsl = true;
+                state.read_wsl_at = Some(now);
+            }
             let update = match self.settled(&mut state, now) {
                 Some(snapshot) => Some(snapshot),
                 None if changed => Some(self.view(&state)),
@@ -3277,6 +3282,36 @@ fn idle_now(state: &State, conversation: &str, now: Instant) -> bool {
     };
     idle.here.is_some_and(|s| s.idle(now))
         && (!state.in_wsl.contains(conversation) || idle.wsl.is_some_and(|s| s.idle(now)))
+}
+
+/// The chats a reading inside WSL should tell of now, of those whose CLIs run there (the caller
+/// keeps those): while the first reservation's window waits, every other chat with work in progress
+/// (`items`), at once; while it is open, every `WSL_DURING`, the chats whose idle work it opened
+/// beside, so that such work is named when it wakes, as a chat's on this computer is. One reading
+/// at a time.
+fn wanted_inside(state: &State, items: &[Item], now: Instant) -> HashSet<String> {
+    let Some(first) = state.queue.first().filter(|_| !state.reading_wsl) else {
+        return HashSet::new();
+    };
+    if first.opened.is_none() {
+        return items
+            .iter()
+            .filter(|i| i.in_progress && !i.light && i.conversation != first.conversation)
+            .map(|i| i.conversation.clone())
+            .collect();
+    }
+    if state
+        .read_wsl_at
+        .is_some_and(|at| now.saturating_duration_since(at) < WSL_DURING)
+    {
+        return HashSet::new();
+    }
+    first
+        .others
+        .iter()
+        .filter(|s| s.idle && !s.woke && s.until.is_none())
+        .map(|s| s.conversation.clone())
+        .collect()
 }
 
 /// Takes what readings found of chats' work between `from` and `now`, in cores, on this computer

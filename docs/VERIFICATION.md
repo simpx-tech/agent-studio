@@ -1,5 +1,11 @@
 # Verification — 2026-09-08
 
+## An open window reads WSL chats' idle work inside WSL — 2026-11-25
+
+The second of the two gaps left by the change below, fixed at the user's request ("Go with your suggested fixes"). A window that opened beside a WSL chat's idle work noticed that work waking only when all of WSL got heavy, a whole core and 5% of the computer, and named only "WSL", or nothing when the measuring chat itself ran in WSL, since nothing read inside WSL during a measurement. Now such a window reads those chats inside WSL every ten seconds (`WSL_DURING`, chosen by `wanted_inside`), one reading at a time and only those chats, so their waking is named like a Windows chat's. A window that opened beside no idle WSL work reads nothing inside WSL.
+
+- Rust: while a window waits, every other chat with work in progress is to be read inside WSL, never the holder, and one reading at a time. While it is open, only the chat whose idle work it opened beside, and not again within ten seconds. A reading there that finds that work busy marks the measurement as having run beside it, by the chat's name.
+
 ## A parked chat's own turn hears what only a reply could give, refused — 2026-11-25
 
 The first gap, which could freeze a chat. A parked Claude process's own turn could ask Agent Studio for more than its hooks: one of Agent Studio's tools, a permission, or an MCP server's form. Only a reply answers those, so they went unanswered. Now `providers::parked` answers what such a turn asks as a reply would refuse it, through the input the process lends its output reader (`pool::Lent`). Agent Studio's tools get an error saying that no reply runs, permission prompts are denied (a removal the safety check stopped as a reply refuses it), an MCP server's form is cancelled, and pings and notifications are acknowledged. The list of the SDK server's tools and its start stay the reply's.

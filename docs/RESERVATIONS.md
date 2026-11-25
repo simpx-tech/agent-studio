@@ -89,8 +89,11 @@ waits for that work again. `pc_status` marks idle work, the holder's answers lis
 the window that opens says it goes on beside it. Idle work that a reading then finds busy counts
 as work that ran beside the measurement; work that stayed idle shows in the report on a line of its
 own (`idle` in the history, Other chats' idle work in the Reservations window) and never marks the
-measurement. Inside WSL only the virtual machine's load tells whether such work woke while the
-window was open, since nothing reads there during a measurement.
+measurement. While the window is open, a WSL chat whose idle work it opened beside is read inside
+WSL every ten seconds (`WSL_DURING`, `wanted_inside`), so that such work is named when it wakes,
+as a chat's on this computer is; a reading costs a launch of the script and a second of sampling
+there, so an open window reads only those chats, and one that opened beside no idle WSL work
+reads nothing inside WSL.
 
 Reservations take turns, first come first served: the first holds the computer, the others wait
 in line, and their own chats' commands wait for the first like everyone else's. A chat that
