@@ -1,5 +1,11 @@
 # Verification — 2026-09-08
 
+## Release 1.4.1 — 2026-11-25
+
+Released at the user's request ("A new release 1.4.1 should everything we worked + composer-model + screen groups"). It carries development's seven commits since 1.4.0, then the four commits of `composer-model` and the one of `screen-groups`, cherry-picked in their order (fc804f5, 059a760, ffe9cc4, 229762b, d308124). `composer-model`'s own unpublished 1.4.1 bump was left out, since the bump is made here, with its notes reused in the changelog. Only this log conflicted, where both sides had added entries at its top; the resolution keeps both. Neither branch had finished its own pipeline on its last commits: `composer-model`'s sidebar mark at 18px, panels as wide as the reply and finished dot at 8px, and `screen-groups` after its rebase. They ran in the pipeline below with everything else.
+
+Validation on the bump: `cargo fmt --check`, Clippy with warnings denied, and `cargo test` at 8 threads (744 passed, 61 opt-in ignored); `npm run check` (0 errors and 0 warnings in 5,524 files), 1,082 Vitest tests in 125 files, the production build, and the whole browser suite in one run of 7.3 minutes. 524 of 525 passed, and `about.spec.ts:65` passed when run again with `--last-failed`; it had failed at its start, the Viewer's sign-in page not shown within 5 s, the first page loads after the lockfile changed. The release notes are 1,559 characters.
+
 ## An open window reads WSL chats' idle work inside WSL — 2026-11-25
 
 The second of the two gaps left by the change below, fixed at the user's request ("Go with your suggested fixes"). A window that opened beside a WSL chat's idle work noticed that work waking only when all of WSL got heavy, a whole core and 5% of the computer, and named only "WSL", or nothing when the measuring chat itself ran in WSL, since nothing read inside WSL during a measurement. Now such a window reads those chats inside WSL every ten seconds (`WSL_DURING`, chosen by `wanted_inside`), one reading at a time and only those chats, so their waking is named like a Windows chat's. A window that opened beside no idle WSL work reads nothing inside WSL.

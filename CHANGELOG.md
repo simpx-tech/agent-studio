@@ -5,6 +5,37 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 1.4.1 - 2026-11-25
+
+### Added
+
+- See which model your next message goes to while you write: its print and version sit beside the
+  send button, as tall as it, and the Model picker above still chooses it
+- Group your screens: the Screens tab files them in groups, and groups inside groups, as a tree
+  under each computer, and you move them by dragging or from their menu
+- Chats' builds take turns when the computer runs short of memory or many already run, and chats
+  merge and push a repository's main branch one at a time
+- A measurement waits a few minutes for a quiet moment before it holds other chats (Settings →
+  Reservations sets how long), also holds their MCP tool calls, such as an editor driven through
+  MCP, and its report says whether anything else heavy ran beside it, and whose
+- Claude chats may run a command for up to 30 minutes in the foreground, and start longer work in
+  the background while they go on with other things
+
+### Changed
+
+- A chat's model and account mark in the sidebar is slightly smaller, and the green dot of a chat
+  whose reply finished is slightly bigger
+- The panels under a reply, its time, usage, Files edited and the rest, are as wide as the reply
+  and line up
+
+### Fixed
+
+- A measurement no longer waits for other chats' work that sits idle, such as a watcher between
+  its checks, which could keep every chat waiting for hours; idle work that wakes while it
+  measures is reported, in WSL too
+- A chat acting on its own between replies, as when a background job it started finishes, no
+  longer has its commands refused or its tool calls left waiting for good
+
 ## 1.4.0 - 2026-11-25
 
 ### Added
