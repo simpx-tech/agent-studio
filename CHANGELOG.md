@@ -5,6 +5,33 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 1.4.0 - 2026-11-25
+
+### Added
+
+- Reserve the computer for a performance measurement: a chat that benchmarks, profiles or times
+  something reserves it, and other chats' commands wait until it releases it, except light ones
+  such as git status, ls and rg. The measurement starts once the work in progress finishes, and
+  its report tells what kept it waiting, what ran meanwhile, how busy the computer was and how
+  long other chats waited. Claude chats, and Codex chats on Windows and in WSL, take part
+- Chats coordinate a measurement by themselves: they message each other, the measuring chat asks
+  a chat to hand over what it still holds, such as an editor, and stops what idle chats left
+  running, and on Windows the processes those programs start while it measures wait until it
+  ends. You are asked only about programs you started yourself
+- See the computer's reservations in the Reservations window, from the gauge in the sidebar's
+  footer or /reservations: the ones now, and every measurement this computer kept, with what
+  each waited for
+- Compare models on one task: Compare, beside a new chat's Build/Plan, sends the task as several
+  runs side by side, with different models, reasoning levels or the same one repeated, each in a
+  git worktree of its own. Pick a run and apply its changes to your folder
+- See where a reply's time went: its timing panel splits the time between the model, commands,
+  tools, sub-agents and waiting, and Time report, in the chat's toolbar or /time, opens a window
+  with a timeline, the plan's steps, the sub-agents and the longest calls, for one response or
+  the whole chat
+- See each chat's model and account at a glance: its row in the sidebar starts with the model's
+  print framed in the account's color, and the green dot of a reply that finished out of sight
+  ends the row
+
 ## 1.3.5 - 2026-11-23
 
 ### Fixed
