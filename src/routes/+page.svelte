@@ -250,6 +250,7 @@
   import { forkConversation, forkPoint } from '$lib/forks';
   import ModelContext from '$lib/components/ModelContext.svelte';
   import TimeReportDialog from '$lib/components/TimeReportDialog.svelte';
+  import ReservationsDialog from '$lib/components/ReservationsDialog.svelte';
   import ModelMark from '$lib/components/ModelMark.svelte';
   import { applyRunEvent, savesAtOnce, toolElapsed } from '$lib/activity';
   import { planCountText, runningPlanProgress } from '$lib/plans';
@@ -946,6 +947,8 @@
   let contextOpen = $state(false);
   // The time report of a chat, opened on one of its replies or on the whole of it.
   let timeReportOpen = $state<{ chat: string; reply?: string } | null>(null);
+  // This computer's reservations, now and past (src/lib/components/ReservationsDialog.svelte).
+  let reservationsOpen = $state(false);
   let deletion = $state<{
     type: 'conversation' | 'draft';
     id: string;
@@ -2095,16 +2098,9 @@
   let hostBackground = $state<Record<string, HostBackgroundWork>>({});
   // Reservations of this computer for performance measurements (src/lib/pc-reservations.ts).
   let pcReservations = $state<PcReservation[]>([]);
-  const pcHolder = $derived(
-    pcReservations[0] &&
-      workspace.conversations.find((c) => c.id === pcReservations[0].conversationId),
-  );
-  const pcTitle = $derived(
-    pcReservationTitle(
-      pcReservations,
-      (id) => workspace.conversations.find((c) => c.id === id)?.title ?? 'Another chat',
-    ),
-  );
+  const pcChatTitle = (id: string) =>
+    workspace.conversations.find((c) => c.id === id)?.title || 'Another chat';
+  const pcTitle = $derived(pcReservationTitle(pcReservations, pcChatTitle));
   function applyBackgroundWork(event: BackgroundWorkEvent) {
     if (event.kind === 'snapshot') {
       if (event.runs.length)
@@ -5880,6 +5876,13 @@
   }
   // Chats the Claude Code and Codex CLIs saved on this computer, imported into History.
   let importOpen = $state(false);
+  function openReservations() {
+    if (!desktop()) {
+      notice = 'Each computer keeps its reservations in its desktop app.';
+      return;
+    }
+    reservationsOpen = true;
+  }
   function openImport() {
     if (!desktop()) {
       notice = 'Import chats in the desktop app on the computer that has them.';
@@ -8525,8 +8528,7 @@
           class:measuring={pcReservations[0].phase === 'open'}
           aria-label={pcTitle}
           title={pcTitle}
-          disabled={!pcHolder}
-          onclick={() => pcHolder && openConversation(pcHolder)}
+          onclick={() => (reservationsOpen = true)}
           ><Gauge size={17} aria-hidden="true" /></button
         >{/if}
       <button
@@ -9298,6 +9300,7 @@
                     if (mobile) void toggleSidebar(true);
                   } else if (name === 'settings') view = 'settings';
                   else if (name === 'import') openImport();
+                  else if (name === 'reservations') openReservations();
                   else if (name === 'new') {
                     const remaining = composerContent(),
                       from = composerDraftKey;
@@ -9626,6 +9629,17 @@
     folder={active.location?.path}
     initial={timeReportOpen.reply}
     close={() => (timeReportOpen = null)}
+  />{/if}
+{#if reservationsOpen}<ReservationsDialog
+    reservations={pcReservations}
+    title={pcChatTitle}
+    opens={(id) => workspace.conversations.some((c) => c.id === id)}
+    open={(id) => {
+      const conversation = workspace.conversations.find((c) => c.id === id);
+      reservationsOpen = false;
+      if (conversation) openConversation(conversation);
+    }}
+    close={() => (reservationsOpen = false)}
   />{/if}
 {#if contextOpen}<ModelContext
     running={activeRunning}

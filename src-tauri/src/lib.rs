@@ -402,6 +402,20 @@ async fn pc_state(app: tauri::AppHandle) -> Result<reservations::Snapshot, Strin
         .unwrap_or_default())
 }
 
+/// The reservations this computer kept, oldest first, as its history records them.
+#[tauri::command]
+async fn pc_history(app: tauri::AppHandle) -> Result<Vec<serde_json::Value>, String> {
+    let Some(broker) = app
+        .try_state::<std::sync::Arc<reservations::Broker>>()
+        .map(|broker| broker.inner().clone())
+    else {
+        return Ok(vec![]);
+    };
+    tauri::async_runtime::spawn_blocking(move || broker.history())
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Reservations of this computer, which name chats by the titles of the workspace this app last
 /// saved and follow the background work chats' CLIs keep.
 fn reservations_broker(app: &tauri::AppHandle) -> std::sync::Arc<reservations::Broker> {
@@ -2484,6 +2498,7 @@ pub fn run() {
             live_account_updates,
             background_work,
             pc_state,
+            pc_history,
             manage_account,
             read_context,
             search_mentions,

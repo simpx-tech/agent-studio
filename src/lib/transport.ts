@@ -76,7 +76,7 @@ import {
 } from './tool-output';
 import { renderModelViews, type ModelFormat } from './model-scene';
 import { backgroundWorkEventSchema, type BackgroundWorkEvent } from './background-work';
-import { pcSnapshotSchema, type PcSnapshot } from './pc-reservations';
+import { pcRecords, pcSnapshotSchema, type PcRecord, type PcSnapshot } from './pc-reservations';
 import { answerSchema, type QuestionAnswer } from './questions';
 import { elicitationInputSchema, type ElicitationInput } from './elicitations';
 import { steeringInputSchema, type SteeringInput } from './steering';
@@ -962,6 +962,12 @@ export function watchPcReservations(listener: (snapshot: PcSnapshot) => void) {
     stopped = true;
     unlisten();
   };
+}
+
+/** This computer's past reservations, newest first; the desktop app keeps them. */
+export async function readPcHistory(): Promise<PcRecord[]> {
+  if (!desktop()) return [];
+  return pcRecords(await invoke<unknown>('pc_history'));
 }
 let accountUpdatesStarted = false;
 export const accountUsageRevision = (connection?: string) =>

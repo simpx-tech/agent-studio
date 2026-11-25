@@ -1722,6 +1722,14 @@ impl Broker {
         }
     }
 
+    /// The reservations this computer kept, oldest first, as its history records them.
+    pub fn history(&self) -> Vec<Value> {
+        self.history
+            .as_deref()
+            .map(read_history)
+            .unwrap_or_default()
+    }
+
     /// Appends a report to this computer's history of reservations.
     fn keep(&self, report: &Report) {
         let Some(path) = &self.history else { return };
@@ -1737,6 +1745,19 @@ impl Broker {
             let _ = writeln!(file, "{}", report.record);
         }
     }
+}
+
+/// The reservations a history file holds, one JSON object a line; a line that is not one, such
+/// as the end of a write the app did not finish, is left out.
+fn read_history(path: &std::path::Path) -> Vec<Value> {
+    std::fs::read_to_string(path)
+        .map(|text| {
+            text.lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(Value::is_object)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Ends a chat's wait when `pc_wait` returns, is stopped or its reply goes.

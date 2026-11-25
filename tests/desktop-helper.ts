@@ -137,6 +137,11 @@ export async function mockDesktop(page: Page, mode = 'success') {
           if (held.heldCommands?.includes(command))
             await new Promise<void>((resolve) => (held.releases ??= []).push(resolve));
           if (command === 'window_heartbeat') return;
+          // This computer's reservations for measurements, now and past.
+          if (command === 'pc_state')
+            return JSON.parse(localStorage.getItem('test-pc-state') ?? '{"reservations":[]}');
+          if (command === 'pc_history')
+            return JSON.parse(localStorage.getItem('test-pc-history') ?? '[]');
           if (command === 'record_window_stall') {
             (held.windowStalls ??= []).push(args.stall);
             return;

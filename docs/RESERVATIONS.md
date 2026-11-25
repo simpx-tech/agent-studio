@@ -164,14 +164,22 @@ A reply waiting in `pc_wait` counts that time as **Waiting for the computer** in
 
 While the computer is reserved, a gauge in the sidebar's footer, beside Connections, names the
 chat and its purpose on hover with where it stands (waiting for commands or for chats to hand
-over, measuring, chats waiting, reservations in line) and opens that chat. It is in the warning colour while other
+over, measuring, chats waiting, reservations in line). It is in the warning colour while other
 chats' work finishes and in the accent while the measurement runs. The window follows
 reservations through `studio-pc` events and `pc_state`; nothing about them is saved or synced.
-The Viewer shows none.
+
+The gauge opens the Reservations window (`ReservationsDialog.svelte`), which `/reservations`
+also opens at any time. It shows the reservations now, each with what its window waits for and
+the chats waiting, then every reservation this computer's history kept (`pc_history`, read
+whole, newest first): together, how many measurements, how long they waited to start and how
+long other chats waited; and each one with how long it waited and measured, what kept its window
+closed, the chats it asked to hand over, what was stopped for it, the computer while it was open
+(CPU, this chat apart, memory and the busiest other programs with whose they were) and why other
+chats waited. A reservation that ends joins it while the window is open. Its chat opens from it.
+Each computer's desktop app keeps its own history, so the Viewer shows none.
 
 ## Not yet
 
 - Holding WSL Codex chats' commands (see above), and freezing a process a chat starts during a
   window when nothing else can hold it.
 - Programs a WSL chat left running, which run inside the distribution's virtual machine.
-- The history of reservations in the window.

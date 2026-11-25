@@ -216,6 +216,19 @@ async fn reservations_take_turns_and_a_reply_that_ends_releases_its_own() {
     assert_eq!(lines[0]["purpose"], "First");
     assert_eq!(lines[0]["endedBy"], "reply");
     assert_eq!(lines[1]["purpose"], "Second, again");
+    // The window reads them back, leaving out a line the app did not finish writing.
+    {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&history)
+            .unwrap();
+        write!(file, "{{\"id\":\"pc-9\",\"purp").unwrap();
+    }
+    let kept = broker.history();
+    assert_eq!(kept.len(), 2);
+    assert_eq!(kept[0]["purpose"], "First");
+    assert!(broker_with(vec![], None).history().is_empty());
 }
 
 #[tokio::test]
