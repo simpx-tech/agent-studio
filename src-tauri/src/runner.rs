@@ -1287,7 +1287,9 @@ async fn stream_turn(
                                     if stopping.remove(id) && id.starts_with("studio-stop-") && value["response"]["subtype"] != "success" { process.healthy = false; }
                                     if stopping.is_empty() && !input_lifetime.awaited.turn_active() { turn_ended = true; stopped_idle = true; }
                                 }
-                            } else if result && !turn_ended && (prompt_replayed || took_over) {
+                            } else if result && !turn_ended && (prompt_replayed || took_over) && !input_lifetime.awaited.folded() {
+                                // An empty result whose report goes on in the turn the CLI starts
+                                // next waits for nothing.
                                 if let Some(channel) = channel { let _ = channel.send(RunEvent::Activity { text: "Waiting for background work to finish".into() }); }
                                 // The CLI is idle until the work reports: the next message may
                                 // take over this reply from here.

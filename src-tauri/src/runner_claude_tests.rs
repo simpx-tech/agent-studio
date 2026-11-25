@@ -197,6 +197,39 @@ while ($null -ne ($line = [Console]::ReadLine())) {
             [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"The plan is ready.","usage":{"input_tokens":5,"output_tokens":1},"total_cost_usd":' + (Cost 0.001d) + ',"origin":{"kind":"task-notification"}}')
             continue
         }
+        if ($mode -in @('Batched', 'Behind monitor')) {
+            # Two runs go to the background and are declared. As in Claude Code 2.1.332, each
+            # task's lines name its run, and so does the result of the turn reporting it.
+            foreach ($task in @('left', 'right')) {
+                [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"' + $task + '","content":[{"type":"tool_use","id":"' + $task + '-call","name":"Bash","input":{"run_in_background":true}}]}}')
+                [Console]::WriteLine('{"type":"system","subtype":"task_started","task_id":"' + $task + '","run_id":"run-' + $task + '","tool_use_id":"' + $task + '-call","task_type":"local_bash"}')
+                [Console]::WriteLine('{"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"' + $task + '-call","content":"Running in background"}]},"tool_use_result":{"backgroundTaskId":"' + $task + '"}}')
+            }
+            [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"await","content":[{"type":"tool_use","id":"await-call","name":"mcp__agent_studio__await_background_tasks","input":{"task_ids":["left","right"]}}]}}')
+            [Console]::WriteLine('{"type":"control_request","request_id":"await-request","request":{"subtype":"mcp_message","server_name":"agent_studio","message":{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"await_background_tasks","arguments":{"task_ids":["left","right"]}}}}}')
+            Add-Content -LiteralPath $settingsLog -Value ([Console]::ReadLine())
+            [Console]::WriteLine('{"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":"await-call","content":"Registered"}]}}')
+            [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"waiting","content":[{"type":"text","text":"Waiting on both runs"}]}}')
+            [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"Waiting on both runs","origin":{"kind":"human"},"usage":{"input_tokens":10,"output_tokens":2},"total_cost_usd":' + (Cost 0.001d) + '}')
+            Start-Sleep -Milliseconds 300
+            foreach ($task in @('left', 'right')) {
+                [Console]::WriteLine('{"type":"system","subtype":"task_updated","task_id":"' + $task + '","run_id":"run-' + $task + '","patch":{"status":"completed"}}')
+                [Console]::WriteLine('{"type":"system","subtype":"task_notification","task_id":"' + $task + '","run_id":"run-' + $task + '","status":"completed"}')
+            }
+            if ($mode -eq 'Behind monitor') {
+                # A log watch's event, queued before the reports, takes the next turn first.
+                [Console]::WriteLine('{"type":"system","subtype":"init","session_id":"' + $env:STUDIO_TEST_SESSION + '","parent_tool_use_id":null}')
+                [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"tick","content":[{"type":"text","text":"Still archiving"}]}}')
+                [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"Still archiving","origin":{"kind":"task-notification","producer":"session-task"},"usage":{"input_tokens":5,"output_tokens":1},"total_cost_usd":' + (Cost 0.001d) + '}')
+            }
+            # The reports share one turn: the CLI ends the first one's command with an empty result.
+            [Console]::WriteLine('{"type":"system","subtype":"init","session_id":"' + $env:STUDIO_TEST_SESSION + '","parent_tool_use_id":null}')
+            [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":"","origin":{"kind":"task-notification","producer":"session-task","runId":"run-left"},"total_cost_usd":' + (Cost 0d) + '}')
+            [Console]::WriteLine('{"type":"system","subtype":"init","session_id":"' + $env:STUDIO_TEST_SESSION + '","parent_tool_use_id":null}')
+            [Console]::WriteLine('{"type":"assistant","parent_tool_use_id":null,"message":{"id":"report","content":[{"type":"text","text":"Both runs passed"}]}}')
+            [Console]::WriteLine('{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"Both runs passed","origin":{"kind":"task-notification","producer":"session-task","runId":"run-right"},"usage":{"input_tokens":20,"output_tokens":3},"total_cost_usd":' + (Cost 0.002d) + '}')
+            continue
+        }
         if ($mode -like 'Await*') {
             # A dev server and a test run go to the background; only the tests are declared.
             foreach ($task in @('server', 'tests')) {
@@ -878,6 +911,72 @@ async fn declared_background_tests_hold_the_reply_until_the_model_reports_them()
         assert!(result.is_ok(), "{mode}");
         assert!(cost(&events, 0.001), "{mode}");
         process.kill().await;
+    }
+}
+
+#[tokio::test]
+async fn a_reply_waits_for_reports_behind_a_monitor_event_or_sharing_a_turn() {
+    // Both ended the reply early on 2026-11-24 and 11-25: the turn a log watch's event took, and
+    // the empty result before the turn two reports shared. Their work went on unseen.
+    for (mode, expected, waits) in [
+        (
+            "Batched",
+            vec!["Waiting on both runs", "", "Both runs passed"],
+            1,
+        ),
+        (
+            "Behind monitor",
+            vec![
+                "Waiting on both runs",
+                "",
+                "Still archiving",
+                "",
+                "Both runs passed",
+            ],
+            2,
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let conversation = uuid::Uuid::new_v4().to_string();
+        let request = request(
+            root.path(),
+            &conversation,
+            serde_json::json!([{"role":"user","text":mode}]),
+        );
+        let session = request.native_session.as_ref().unwrap().id().to_string();
+        let mut process = fixture(root.path(), &session, false, false);
+        let (result, events) = turn(
+            &mut process,
+            &request,
+            CancellationToken::new(),
+            false,
+            false,
+        )
+        .await;
+        let parked = process.alive() && process.healthy;
+        process.kill().await;
+        assert_eq!(
+            result.unwrap(),
+            ("complete".into(), "Both runs passed".into()),
+            "{mode}"
+        );
+        assert!(parked, "{mode}");
+        let answers: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                RunEvent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(answers, expected, "{mode}");
+        // The empty result before the shared turn announces no wait of its own.
+        let waiting = events
+            .iter()
+            .filter(|e| {
+                matches!(e, RunEvent::Activity { text } if text == "Waiting for background work to finish")
+            })
+            .count();
+        assert_eq!(waiting, waits, "{mode}");
     }
 }
 

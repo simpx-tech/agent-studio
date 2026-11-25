@@ -487,6 +487,96 @@ async fn installed_claude_background_work_outlives_its_reply() {
 
 #[tokio::test]
 #[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
+async fn installed_claude_a_reply_waits_for_declared_runs_that_finish_together() {
+    // Claude Code 2.1.332 gives reports that arrive together one turn, ending the first one's
+    // command with an empty result before it. Until 2026-11-25 the reply ended at that result,
+    // and the turn reading the runs went on unseen in the parked process.
+    let root = tempfile::tempdir().unwrap();
+    let runtime = root.path().join("chat-runtime");
+    std::fs::create_dir_all(&runtime).unwrap();
+    // Both runs end at the same millisecond, wherever their starts fall, so their reports
+    // arrive together.
+    let at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+        + 40_000;
+    let run = |word: &str| {
+        format!("node -e \"setTimeout(function(){{console.log('{word}')}}, {at} - Date.now())\"")
+    };
+    let text = format!("This is an Agent Studio integration test in a disposable folder. With your Bash tool, start these two commands exactly as written, each in its own call with run_in_background set to true: {} , then {} . Then call mcp__agent_studio__await_background_tasks with both task IDs and end your turn at once, saying only that both started. Do not sleep, poll or read their output before they report. Once both have finished, read their output and reply with the two words they printed.", run("PICTURE_LEFT"), run("PICTURE_RIGHT"));
+    let mut request: RunRequest = serde_json::from_value(json!({"runId":uuid::Uuid::new_v4(),"agent":{"provider":"claude","model":"haiku","instructions":""},"messages":[{"role":"user","text":text}]})).unwrap();
+    request.conversation_id = Some(uuid::Uuid::new_v4().to_string());
+    request.native_session =
+        crate::providers::sessions::Session::prepare(root.path(), &request).unwrap();
+    let exe = crate::providers::resolve("claude").await.unwrap();
+    let mut command = crate::providers::chat_command(&request, &runtime, &exe)
+        .await
+        .unwrap();
+    let mut process = crate::pool::Process::new(
+        exe,
+        command.spawn().unwrap(),
+        "real-shared-report-test".into(),
+        request.native_session.as_ref().unwrap().id().to_string(),
+    )
+    .unwrap();
+    let (tx, mut received) = tokio::sync::mpsc::unbounded_channel();
+    let channel = EventSink::new(move |event| {
+        let _ = tx.send(event);
+        Ok(())
+    });
+    let mut questions = Questions::default()
+        .open(&request.run_id, None, channel.clone())
+        .unwrap();
+    let began = std::time::Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(240),
+        stream_turn(
+            &mut process,
+            &request,
+            Some(&channel),
+            CancellationToken::new(),
+            Some(&mut questions),
+            false,
+        ),
+    )
+    .await
+    .expect("Installed CLI test timed out");
+    let replied = began.elapsed();
+    drop((questions, channel));
+    process.kill().await;
+    let (mut waits, mut calls) = (0, std::collections::BTreeMap::new());
+    while let Ok(event) = received.try_recv() {
+        match event {
+            RunEvent::Activity { text } if text == "Waiting for background work to finish" => {
+                waits += 1
+            }
+            RunEvent::Tool { tool } => {
+                let tool = serde_json::to_value(&tool).unwrap();
+                let id = tool["id"].as_str().unwrap_or_default().to_owned();
+                calls.insert(
+                    id,
+                    format!("{} {} {}", tool["name"], tool["status"], tool["input"]),
+                );
+            }
+            _ => {}
+        }
+    }
+    let (status, answer) = result.expect("Installed CLI failed");
+    eprintln!("The reply took {replied:?}, waited {waits} time(s) and answered {answer:?}; calls: {calls:#?}");
+    assert_eq!(status, "complete");
+    assert!(
+        replied >= Duration::from_secs(30),
+        "The reply ended before the runs did"
+    );
+    assert!(
+        answer.contains("PICTURE_LEFT") && answer.contains("PICTURE_RIGHT"),
+        "The reply ended before the turn that read the runs: {answer:?}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "Opt-in installed Claude CLI test; uses subscription capacity and a model's tool choice."]
 async fn installed_claude_runs_the_commands_of_a_turn_it_starts_between_replies() {
     use std::sync::{atomic::AtomicBool, Arc, Mutex};
     let root = tempfile::tempdir().unwrap();

@@ -3,6 +3,14 @@
 //! Background agents and workflows hold a reply implicitly, but a background shell may be
 //! a server left running for the user. The model therefore declares the tasks it waits
 //! for, and the reply ends only after the model has received each declared outcome.
+//!
+//! Claude Code names each task's run (`run_id`) and the run whose report a turn it starts
+//! answers (the result's `origin.runId`). A turn it starts is not always the report of a
+//! finished task: a monitor's event takes its own turn, even with that report already
+//! queued, and reports that arrive together share one turn, each but the last ending first
+//! with an empty result. So a declared task counts as reported only by the result naming its
+//! run, or by its notification replayed inside a turn (requested 2026-11-25, after replies
+//! ended at a monitor's event and at such an empty result while their work went on unseen).
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
@@ -27,6 +35,8 @@ struct Task {
     /// The parent's launching call returned while the task kept running.
     background: bool,
     running: bool,
+    /// The CLI's run of the task, which the turn reporting it names (`origin.runId`).
+    run: Option<String>,
 }
 
 /// Declared background tasks of one reply, and whether a model turn is in progress.
@@ -38,6 +48,9 @@ pub struct AwaitedTasks {
     /// Parent calls of this tool, matched to their MCP request by input.
     requests: HashMap<String, Value>,
     idle: bool,
+    /// The last result was an empty one for a notification, which the CLI carries into the
+    /// turn it starts next.
+    folded: bool,
 }
 
 impl AwaitedTasks {
@@ -45,7 +58,7 @@ impl AwaitedTasks {
         let parent = value["parent_tool_use_id"].is_null();
         let blocks = value["message"]["content"].as_array().into_iter().flatten();
         match value["type"].as_str().unwrap_or_default() {
-            "result" if parent => self.idle = true,
+            "result" if parent => self.turn_ended(value),
             "stream_event" if parent => self.turn_started(),
             "assistant" if parent => {
                 self.turn_started();
@@ -59,6 +72,10 @@ impl AwaitedTasks {
             }
             "user" if parent => {
                 self.turn_started();
+                // A notification injected into the running turn, replayed with its run.
+                if let Some(run) = notified_run(&value["origin"]) {
+                    self.reported(run);
+                }
                 if let Some(text) = value["message"]["content"].as_str() {
                     self.delivered(text);
                 }
@@ -96,9 +113,31 @@ impl AwaitedTasks {
     }
     fn turn_started(&mut self) {
         if std::mem::take(&mut self.idle) {
-            // A turn the CLI starts receives every queued notification of a finished task.
-            self.awaited.retain(|_, finished| !*finished);
+            // A CLI that names no runs gives a turn it starts every queued notification of a
+            // finished task. The others report each run in the result naming it.
+            let tasks = &self.tasks;
+            self.awaited.retain(|id, finished| {
+                !*finished || tasks.get(id).is_some_and(|task| task.run.is_some())
+            });
         }
+    }
+    fn turn_ended(&mut self, value: &Value) {
+        self.idle = true;
+        let run = notified_run(&value["origin"]);
+        if let Some(run) = run {
+            self.reported(run);
+        }
+        // Reports queued together share the turn of the last: the CLI ends each one before it
+        // with an empty result, and the turn they share follows at once.
+        self.folded = value["origin"]["kind"] == "task-notification"
+            && value["num_turns"] == 0
+            && value["is_error"] != true;
+    }
+    /// The turn naming this run reported its task to the model.
+    fn reported(&mut self, run: &str) {
+        let tasks = &self.tasks;
+        self.awaited
+            .retain(|id, _| tasks.get(id).and_then(|task| task.run.as_deref()) != Some(run));
     }
     fn started(&mut self, value: &Value) {
         let (Some(id), Some(call)) = (filled(&value["task_id"]), filled(&value["tool_use_id"]))
@@ -109,6 +148,7 @@ impl AwaitedTasks {
             call,
             background: false,
             running: true,
+            run: filled(&value["run_id"]),
         };
         self.tasks.insert(id, task);
     }
@@ -118,6 +158,9 @@ impl AwaitedTasks {
         };
         if let Some(task) = self.tasks.get_mut(id) {
             task.running = false;
+            if let Some(run) = filled(&value["run_id"]) {
+                task.run = Some(run);
+            }
         }
         match self.awaited.get_mut(id) {
             // The CLI re-invokes the model with the outcome; a stopped task wakes nobody.
@@ -139,20 +182,29 @@ impl AwaitedTasks {
             }
         }
     }
-    /// Declared tasks hold the reply until the model has received their outcome.
+    /// Declared tasks hold the reply until the model has received their outcome, and so does
+    /// a report the CLI carries into the turn it starts next.
     pub fn holds_reply(&self) -> bool {
-        !self.awaited.is_empty()
+        !self.awaited.is_empty() || self.folded
     }
     pub fn turn_active(&self) -> bool {
         !self.idle
     }
-    /// Only finished declared tasks remain, and no turn has started to deliver them.
+    /// The last result left its report to the turn the CLI starts next.
+    pub fn folded(&self) -> bool {
+        self.folded
+    }
+    /// Only finished declared tasks remain, or a report the CLI carries on, and no turn has
+    /// started to deliver them.
     pub fn expects_follow_up(&self) -> bool {
-        self.idle && !self.awaited.is_empty() && self.awaited.values().all(|finished| *finished)
+        self.idle
+            && (self.folded || !self.awaited.is_empty())
+            && self.awaited.values().all(|finished| *finished)
     }
     /// The CLI started no turn for the finished tasks, so the model already has them.
     pub fn release(&mut self) {
         self.awaited.clear();
+        self.folded = false;
     }
     pub fn running(&self) -> impl Iterator<Item = &str> {
         self.awaited
@@ -240,6 +292,15 @@ fn filled(value: &Value) -> Option<String> {
     value.as_str().filter(|s| !s.is_empty()).map(String::from)
 }
 
+/// The run a line reports, when it reports a finished task's notification: a monitor's event
+/// names none.
+fn notified_run(origin: &Value) -> Option<&str> {
+    if origin["kind"] != "task-notification" {
+        return None;
+    }
+    origin["runId"].as_str().filter(|run| !run.is_empty())
+}
+
 fn task_ids(arguments: &Value) -> Option<Vec<String>> {
     let object = arguments.as_object().filter(|o| o.len() == 1)?;
     let ids = object
@@ -283,6 +344,105 @@ mod tests {
     }
     fn notification(task: &str, status: &str) -> Value {
         json!({"type":"system","subtype":"task_notification","task_id":task,"status":status})
+    }
+    /// As Claude Code 2.1.332 reports a task: its lines name the task's run.
+    fn launch_run(state: &mut AwaitedTasks, task: &str, run: &str) {
+        let call = format!("{task}-call");
+        state.observe(&json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":call,"name":"Bash","input":{"command":"x","run_in_background":true}}]}}));
+        state.observe(&json!({"type":"system","subtype":"task_started","task_id":task,"run_id":run,"tool_use_id":call,"task_type":"local_bash"}));
+        state.observe(&json!({"type":"user","parent_tool_use_id":null,"message":{"content":[{"type":"tool_result","tool_use_id":call,"content":"Command running in background"}]},"tool_use_result":{"backgroundTaskId":task}}));
+    }
+    fn finished_run(task: &str, run: &str) -> Value {
+        json!({"type":"system","subtype":"task_notification","task_id":task,"run_id":run,"status":"completed"})
+    }
+    fn init() -> Value {
+        json!({"type":"system","subtype":"init","parent_tool_use_id":null})
+    }
+    /// The result of a turn the CLI started for a notification: a task's names its run, a
+    /// monitor's event none.
+    fn reported(run: Option<&str>, turns: u64) -> Value {
+        let mut origin = json!({"kind":"task-notification","producer":"session-task"});
+        if let Some(run) = run {
+            origin["runId"] = run.into();
+        }
+        json!({"type":"result","subtype":"success","parent_tool_use_id":null,"is_error":false,"num_turns":turns,"result":"","origin":origin})
+    }
+
+    #[test]
+    fn a_monitor_event_taking_the_next_turn_does_not_report_a_finished_task() {
+        let mut state = AwaitedTasks::default();
+        launch_run(&mut state, "build", "run-build");
+        declare(&mut state, "await", json!({"task_ids":["build"]}));
+        state.observe(&result());
+        state.observe(&finished_run("build", "run-build"));
+        assert!(state.holds_reply() && state.expects_follow_up());
+        // A log watch's event was queued first: its turn starts and ends, the build's report
+        // still waits in the queue.
+        state.observe(&init());
+        assert!(state.holds_reply() && !state.expects_follow_up());
+        state.observe(&reported(None, 1));
+        assert!(state.holds_reply(), "a monitor's event reports no task");
+        assert!(state.expects_follow_up() && !state.folded());
+        state.observe(&init());
+        state.observe(&reported(Some("run-build"), 3));
+        assert!(!state.holds_reply());
+    }
+
+    #[test]
+    fn reports_that_share_a_turn_hold_the_reply_until_that_turn_ends() {
+        let mut state = AwaitedTasks::default();
+        launch_run(&mut state, "left", "run-left");
+        launch_run(&mut state, "right", "run-right");
+        declare(&mut state, "await", json!({"task_ids":["left","right"]}));
+        state.observe(&result());
+        state.observe(&finished_run("left", "run-left"));
+        state.observe(&finished_run("right", "run-right"));
+        // The CLI ends the first report's command with an empty result and carries it into the
+        // turn of the last.
+        state.observe(&init());
+        state.observe(&reported(Some("run-left"), 0));
+        assert!(state.holds_reply() && state.folded());
+        assert_eq!(state.running().count(), 0);
+        assert!(state.expects_follow_up(), "that turn follows at once");
+        state.observe(&init());
+        assert!(state.holds_reply() && !state.expects_follow_up());
+        state.observe(&reported(Some("run-right"), 1));
+        assert!(!state.holds_reply() && !state.folded());
+        // A monitor's event folded ahead of a report holds the reply the same way.
+        let mut state = AwaitedTasks::default();
+        launch_run(&mut state, "tests", "run-tests");
+        declare(&mut state, "await", json!({"task_ids":["tests"]}));
+        state.observe(&result());
+        state.observe(&finished_run("tests", "run-tests"));
+        state.observe(&init());
+        state.observe(&reported(None, 0));
+        assert!(state.holds_reply() && state.folded());
+        state.observe(&init());
+        state.observe(&reported(Some("run-tests"), 1));
+        assert!(!state.holds_reply());
+    }
+
+    #[test]
+    fn a_report_replayed_inside_a_turn_or_left_without_one_ends_the_wait() {
+        let mut state = AwaitedTasks::default();
+        launch_run(&mut state, "tests", "run-tests");
+        declare(&mut state, "await", json!({"task_ids":["tests"]}));
+        state.observe(&finished_run("tests", "run-tests"));
+        // Injected after a call of the running turn, it replays with its run.
+        state.observe(&json!({"type":"user","parent_tool_use_id":null,"isReplay":true,"origin":{"kind":"task-notification","producer":"session-task","runId":"run-tests"},"message":{"role":"user","content":[{"type":"text","text":"Tests done"}]}}));
+        state.observe(&result());
+        assert!(!state.holds_reply());
+        // An empty result whose turn never comes is released after the grace.
+        let mut state = AwaitedTasks::default();
+        state.observe(&reported(None, 0));
+        assert!(state.holds_reply() && state.expects_follow_up());
+        state.release();
+        assert!(!state.holds_reply() && !state.folded());
+        // An error ends a turn without carrying anything on.
+        let mut failed = reported(Some("run-x"), 0);
+        failed["is_error"] = true.into();
+        state.observe(&failed);
+        assert!(!state.holds_reply());
     }
 
     #[test]
