@@ -458,8 +458,9 @@
     text-overflow: ellipsis;
     color: var(--text-faint);
   }
+  /* Every panel of the footer, Files edited's included, is as wide as the reply, so whichever
+     opens lines up with the others. */
   .progress-panel {
-    max-width: 640px;
     max-height: 300px;
     overflow: auto;
     margin-top: 6px;
@@ -499,7 +500,6 @@
     color: var(--text-faint);
   }
   .usage-breakdown {
-    max-width: 460px;
     margin-top: 6px;
     padding: 10px 14px;
     border: 1px solid var(--border);

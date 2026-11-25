@@ -54,8 +54,8 @@
 </div>
 
 <style>
+  /* As wide as the reply, like the footer's other panels, so their edges line up. */
   .time-report {
-    max-width: 640px;
     margin-top: 6px;
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);

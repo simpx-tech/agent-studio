@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Locator } from '@playwright/test';
 import { mockDesktop } from './desktop-helper';
 import { initialWorkspace, type Message } from '../src/lib/domain';
 
@@ -162,6 +162,18 @@ test('a reply’s time opens as a report of its steps, sub-agents and calls, and
   expect(new Set(bars.map(([x, width]) => `${Math.round(x)}/${Math.round(width)}`)).size).toBe(1);
   expect(bars[0][2]).toBeCloseTo(0.6, 2);
   expect(bars[1][2]).toBeCloseTo(0.25, 2);
+  // The footer's cards are as wide as the reply, so the time summary, the usage table and Files
+  // edited line up.
+  const edges = async (card: Locator) => {
+    const box = (await card.boundingBox())!;
+    return [Math.round(box.x), Math.round(box.x + box.width)];
+  };
+  const reply = await edges(footer);
+  expect(await edges(summary)).toEqual(reply);
+  expect(await edges(footer.locator('.usage-breakdown'))).toEqual(reply);
+  await footer.getByRole('button', { name: /^Files edited/ }).click();
+  expect(await edges(footer.locator('.changes-body'))).toEqual(reply);
+  await toggle.click();
 
   // The report opens on this reply.
   const open = summary.getByRole('button', { name: 'Open report' });
