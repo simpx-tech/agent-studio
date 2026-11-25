@@ -5,8 +5,12 @@
 //! never comes while several chats work.
 //!
 //! A chat reserves the computer (`pc_reserve`). First in line, it waits for a lull: its window
-//! opens at the first moment no other chat runs a command, or background work a running reply of
-//! its own still waits on, while other chats work on. Only once that has not come within a set
+//! opens at the first moment no other chat runs busy work, a command, an MCP tool call or
+//! background work a running reply of its own still waits on, while other chats work on. Work that
+//! has kept less than a quarter of a core busy for ten seconds is idle and never keeps the window
+//! closed (`machine::IDLE_CORE`, read from each chat job's CPU time, inside WSL by a reading
+//! there), so a watcher between its polls or a server waiting for requests does not; the report
+//! says whether such work woke while the window was open. Only once that has not come within a set
 //! wait (`Settings::lull_minutes`, a few minutes; requested 2026-11-24, since holding everyone at
 //! once cost other chats hours) does it hold their new work: from then on, and once its window
 //! opens, no other chat starts a command other than a light one (`light`): Claude chats'
@@ -58,6 +62,11 @@ pub const EVENT: &str = "studio-pc";
 const TICK: Duration = Duration::from_secs(2);
 /// How long a build slot a chat was given waits for its build to start.
 const GRANT: Duration = Duration::from_secs(120);
+/// How long other chats' work in progress must stay idle (`machine::IDLE_CORE`) before a window
+/// stops waiting for it.
+const IDLE_FOR: Duration = Duration::from_secs(10);
+/// A reading of a chat's work older than this no longer tells whether it is idle.
+const STALE: Duration = Duration::from_secs(15);
 /// The file beside the history that keeps this computer's settings of reservations.
 const SETTINGS: &str = "settings.json";
 
@@ -226,8 +235,57 @@ struct State {
     last_build: Option<Instant>,
     /// When each chat last released the computer, and in which reply.
     released: HashMap<String, (String, Instant)>,
+    /// What readings found of each chat's work, which a window does not wait for while idle.
+    idle: HashMap<String, Idle>,
+    /// The last reading of the computer, with the chats' jobs then, from which the next measures
+    /// each chat's work (`machine::work`).
+    last: Option<(machine::Reading, jobs::Members)>,
+    /// The chats whose CLIs run inside a WSL distribution, whose work a reading there tells.
+    in_wsl: HashSet<String>,
+    /// A reading inside WSL is under way (`programs::wsl_work`).
+    reading_wsl: bool,
     next: u64,
     ticking: bool,
+}
+/// What readings found of a chat's work: on this computer (`machine::work`), and inside WSL for a
+/// chat whose CLI runs there (`programs::wsl_work`), whose processes this computer sees only as
+/// WSL's virtual machine.
+#[derive(Default)]
+struct Idle {
+    here: Option<Streak>,
+    wsl: Option<Streak>,
+}
+#[derive(Clone, Copy, Debug)]
+struct Streak {
+    /// Since when its readings found it idle; None while the last found it busy.
+    since: Option<Instant>,
+    /// When it was last read.
+    read: Instant,
+    /// When a reading last found it busy.
+    busy: Option<Instant>,
+}
+impl Streak {
+    /// After `previous`, a reading of the time between `from` and `now` that found the work busy or
+    /// idle. A reading too old to tell starts afresh.
+    fn heard(previous: Option<Streak>, busy: bool, from: Instant, now: Instant) -> Streak {
+        let previous = previous.filter(|s| now.saturating_duration_since(s.read) <= STALE);
+        Streak {
+            since: (!busy).then(|| previous.and_then(|s| s.since).unwrap_or(from)),
+            read: now,
+            busy: if busy {
+                Some(now)
+            } else {
+                previous.and_then(|s| s.busy)
+            },
+        }
+    }
+    /// Idle for `IDLE_FOR`, by a reading recent enough to tell.
+    fn idle(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.read) <= STALE
+            && self
+                .since
+                .is_some_and(|since| now.saturating_duration_since(since) >= IDLE_FOR)
+    }
 }
 /// A chat's turn at a named reservation (`named`).
 struct Turn {
@@ -362,6 +420,10 @@ struct Span {
     label: String,
     /// Background work its CLI keeps, rather than a call a reply runs.
     background: bool,
+    /// Its chat's work was idle as it began: work the window opened beside.
+    idle: bool,
+    /// A reading found its chat's work busy after it began idle.
+    woke: bool,
     from: Instant,
     until: Option<Instant>,
 }
@@ -376,6 +438,8 @@ struct Item {
     in_progress: bool,
     /// Background work its CLI keeps.
     background: bool,
+    /// Its chat's work has stayed idle (`Idle`), so a window does not wait for it.
+    idle: bool,
 }
 
 impl Broker {
@@ -1247,7 +1311,7 @@ impl Broker {
         if state.queue.is_empty() {
             return None;
         }
-        let items = items(state, &(self.background)());
+        let items = items(state, &(self.background)(), now);
         settle(state, &items, now, self.settings().lull()).then(|| self.view(state))
     }
 
@@ -1330,7 +1394,7 @@ impl Broker {
                     measure: machine::Window::default(),
                 });
             }
-            let items = items(&state, &(self.background)());
+            let items = items(&state, &(self.background)(), now);
             settle(&mut state, &items, now, self.settings().lull());
             let mut text = self.standing(&state, conversation, &items);
             if let Some(since) = again {
@@ -1346,22 +1410,26 @@ impl Broker {
         text
     }
 
-    /// Looks at the computer: settles the first reservation and measures an open window.
-    /// Returns whether any reservation is left to look after.
+    /// Looks at the computer: tells which of other chats' work is idle while a window waits,
+    /// settles the first reservation and measures an open window. Returns whether any
+    /// reservation is left to look after.
     async fn tick(self: &Arc<Self>) -> bool {
-        let idle = |state: &State| state.queue.is_empty() && state.slots.is_empty();
-        let (measuring, slots) = {
+        let done = |state: &State| state.queue.is_empty() && state.slots.is_empty();
+        let (measuring, waiting, slots) = {
             let mut state = self.lock();
-            if idle(&state) {
+            if done(&state) {
                 state.ticking = false;
+                state.last = None;
                 return false;
             }
+            let first = state.queue.first();
             (
-                state.queue.first().is_some_and(|r| r.opened.is_some()),
+                first.is_some_and(|r| r.opened.is_some()),
+                first.is_some_and(|r| r.opened.is_none()),
                 !state.slots.is_empty(),
             )
         };
-        let reading = if measuring || slots {
+        let reading = if measuring || waiting || slots {
             let read = *self.read.lock().unwrap_or_else(|e| e.into_inner());
             tauri::async_runtime::spawn_blocking(read)
                 .await
@@ -1371,37 +1439,108 @@ impl Broker {
             None
         };
         let members = reading.as_ref().map(|_| self.jobs.members());
-        let inside_wsl = (measuring && reading.is_some()).then(|| self.jobs.wsl());
-        let update = {
+        let launches = reading.as_ref().map(|_| self.jobs.wsl());
+        let (update, inside) = {
             let mut state = self.lock();
-            if idle(&state) {
+            if done(&state) {
                 state.ticking = false;
+                state.last = None;
                 return false;
             }
             let now = Instant::now();
+            let replying: HashSet<String> = state
+                .runs
+                .values()
+                .map(|r| r.conversation.clone())
+                .collect();
+            state
+                .idle
+                .retain(|conversation, _| replying.contains(conversation));
+            if let Some(launches) = &launches {
+                state.in_wsl = launches.iter().map(|j| j.conversation.clone()).collect();
+            }
+            // How busy each chat's work was since the last reading, unless that is too long ago
+            // to tell of now.
+            if let (Some(reading), Some(members)) = (&reading, &members) {
+                if let Some((before, then)) = state
+                    .last
+                    .take()
+                    .filter(|(before, _)| reading.at.saturating_duration_since(before.at) <= STALE)
+                {
+                    let work = machine::work((&before, &then), (reading, members));
+                    heard_work(&mut state, false, replying, &work, before.at, reading.at);
+                }
+                state.last = Some((reading.clone(), members.clone()));
+            }
             let owners = reading
                 .as_ref()
                 .zip(members.as_ref())
                 .map(|(r, m)| machine::Owners::new(r, m, std::process::id()));
             // Builds waiting for a slot, beside what builds now.
             let changed = self.grant(&mut state, reading.as_ref(), owners.as_ref(), now);
-            if let (Some(reading), Some(owners), Some(inside_wsl)) = (reading, owners, inside_wsl) {
+            if let (Some(reading), Some(owners), Some(launches)) = (reading, owners, &launches) {
                 if let Some(first) = state.queue.first_mut().filter(|r| r.opened.is_some()) {
                     let holder = first.conversation.clone();
-                    let inside_wsl = inside_wsl.iter().any(|j| j.conversation == holder);
+                    let inside_wsl = launches.iter().any(|j| j.conversation == holder);
                     first.measure.add(reading, &owners, &holder, inside_wsl);
                 }
             }
-            match self.settled(&mut state, now) {
+            // Inside WSL, one reading at a time, of the chats there whose work in progress the
+            // window waits for.
+            let inside: Vec<jobs::WslJob> = match (&launches, state.queue.first()) {
+                (Some(launches), Some(first)) if waiting && !state.reading_wsl => {
+                    let items = items(&state, &(self.background)(), now);
+                    let wanted: HashSet<&str> = items
+                        .iter()
+                        .filter(|i| {
+                            i.in_progress && !i.light && i.conversation != first.conversation
+                        })
+                        .map(|i| i.conversation.as_str())
+                        .collect();
+                    launches
+                        .iter()
+                        .filter(|j| wanted.contains(j.conversation.as_str()))
+                        .cloned()
+                        .collect()
+                }
+                _ => vec![],
+            };
+            state.reading_wsl |= !inside.is_empty();
+            let update = match self.settled(&mut state, now) {
                 Some(snapshot) => Some(snapshot),
                 None if changed => Some(self.view(&state)),
                 None => None,
-            }
+            };
+            (update, inside)
         };
         if let Some(snapshot) = update {
             self.publish(snapshot);
         }
+        if !inside.is_empty() {
+            self.read_wsl(inside);
+        }
         true
+    }
+
+    /// Reads inside WSL how busy the work of `launches`' chats is (`programs::wsl_work`), then
+    /// settles the first reservation with it.
+    fn read_wsl(self: &Arc<Self>, launches: Vec<jobs::WslJob>) {
+        let broker = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            let from = Instant::now();
+            let read: HashSet<String> = launches.iter().map(|j| j.conversation.clone()).collect();
+            let work = programs::wsl_work(launches).await;
+            let update = {
+                let mut state = broker.lock();
+                state.reading_wsl = false;
+                let now = Instant::now();
+                heard_work(&mut state, true, read, &work, from, now);
+                broker.settled(&mut state, now)
+            };
+            if let Some(snapshot) = update {
+                broker.publish(snapshot);
+            }
+        });
     }
 
     /// Ends `conversation`'s reservation and reports on it.
@@ -2162,7 +2301,7 @@ impl Broker {
 
     fn opened_text(&self, reservation: &Reservation, waited: Duration) -> String {
         let mut text = format!(
-            "The window is open: no other chat runs a command or an MCP tool call now, and their new ones wait until you call pc_release. Run every measured run of the series now, then release at once, before reading logs or writing up: other chats wait until you do. You waited {}.",
+            "The window is open: no other chat runs busy work now, and their new commands and MCP tool calls wait until you call pc_release. Run every measured run of the series now, then release at once, before reading logs or writing up: other chats wait until you do. You waited {}.",
             duration(waited)
         );
         let blockers = summed(
@@ -2173,6 +2312,18 @@ impl Broker {
             text.push_str(" Before it opened: ");
             text.push_str(&self.spans_text(&blockers));
             text.push('.');
+        }
+        let idle: Vec<String> = reservation
+            .others
+            .iter()
+            .filter(|s| s.idle && !s.woke && s.until.is_none())
+            .map(|s| format!("{} {}", self.chat(&s.conversation), s.label))
+            .collect();
+        if !idle.is_empty() {
+            text.push_str(&format!(
+                " Idle work of other chats goes on beside it: {}; the report says whether it woke while you measured.",
+                idle.join("; ")
+            ));
         }
         text
     }
@@ -2283,14 +2434,14 @@ impl Broker {
                 if index > 1 { format!(", and {} more before you", index - 1) } else { String::new() }
             )
         } else if mine.opened.is_some() {
-            "Reserved, and the window is open: no other chat runs a command or an MCP tool call now. Measure, then call pc_release.".into()
+            "Reserved, and the window is open: no other chat runs busy work now. Measure, then call pc_release.".into()
         } else if mine.holding.is_none() {
             format!(
-                "Reserved: your window opens at the first moment no other chat runs a command, an MCP tool call or background work its reply waits on. Until then other chats work on, and if no such moment comes within {}, their new commands and MCP tool calls wait from then on, except light ones such as git status. Call pc_wait: it returns once the window opens.",
+                "Reserved: your window opens at the first moment no other chat runs busy work: a command, an MCP tool call or background work its reply waits on, unless it has stayed idle, as a watcher between its checks does. Until then other chats work on, and if no such moment comes within {}, their new commands and MCP tool calls wait from then on, except light ones such as git status. Call pc_wait: it returns once the window opens.",
                 duration(self.settings().lull())
             )
         } else {
-            "Reserved: from now on other chats' commands and MCP tool calls wait, except light commands such as git status. Call pc_wait: it returns once the work below has finished and the window opens.".into()
+            "Reserved: from now on other chats' commands and MCP tool calls wait, except light commands such as git status. Call pc_wait: it returns once the work below has finished or gone idle and the window opens.".into()
         };
         let others: Vec<&Item> = items
             .iter()
@@ -2298,9 +2449,23 @@ impl Broker {
             .collect();
         let (progress, left): (Vec<&&Item>, Vec<&&Item>) =
             others.iter().partition(|i| i.in_progress);
+        let (idle, progress): (Vec<&&Item>, Vec<&&Item>) =
+            progress.into_iter().partition(|i| i.idle);
         if !progress.is_empty() {
             text.push_str("\nStill running in other chats (the window waits for these):");
             for item in progress {
+                text.push_str(&format!(
+                    "\n- {}: {}",
+                    self.chat(&item.conversation),
+                    item.label
+                ));
+            }
+        }
+        if !idle.is_empty() {
+            text.push_str(
+                "\nIdle in other chats (the window does not wait for these while they stay idle):",
+            );
+            for item in idle {
                 text.push_str(&format!(
                     "\n- {}: {}",
                     self.chat(&item.conversation),
@@ -2325,7 +2490,7 @@ impl Broker {
     pub fn status(&self, conversation: &str, now: Option<&machine::Now>) -> String {
         let mut text = {
             let state = self.lock();
-            let items = items(&state, &(self.background)());
+            let items = items(&state, &(self.background)(), Instant::now());
             let lull_left = |first: &Reservation| {
                 let first_at = first.first.unwrap_or(first.asked);
                 duration(self.settings().lull().saturating_sub(first_at.elapsed()))
@@ -2354,7 +2519,7 @@ impl Broker {
                     "{} holds the computer ({}); {}. Other chats' commands and MCP tool calls wait until it ends: call pc_wait before running one.",
                     capitalized(&self.named(&first.conversation)),
                     first.purpose,
-                    if first.opened.is_some() { "its window is open" } else { "it waits for other chats' commands and tool calls to finish" }
+                    if first.opened.is_some() { "its window is open" } else { "it waits for other chats' busy commands and tool calls to finish or go idle" }
                 ),
             };
             if let Some(index) = state
@@ -2459,10 +2624,12 @@ impl Broker {
                         "\n- {}: {}{}",
                         self.named(&item.conversation),
                         item.label,
-                        match (item.in_progress, item.light) {
-                            (_, true) => " (light)",
-                            (true, false) => "",
-                            (false, false) => " (left running after its reply ended)",
+                        match (item.in_progress, item.light, item.idle) {
+                            (_, true, _) => " (light)",
+                            (true, false, false) => "",
+                            (true, false, true) =>
+                                " (idle, so a reservation's window does not wait for it)",
+                            (false, false, _) => " (left running after its reply ended)",
                         }
                     ));
                 }
@@ -2682,15 +2849,22 @@ impl Broker {
         } else {
             lines.push(format!("Before it opened: {}.", self.spans_text(&blockers)));
         }
+        let (idle, busy) = beside_spans(r, now);
         if r.opened.is_some() {
-            let others = summed(&ran(&r.others), now);
-            if others.is_empty() {
-                lines.push("During it, no other chat ran a command or an MCP tool call.".into());
-            } else {
+            if !busy.is_empty() {
                 lines.push(format!(
                     "Other chats' work that ran during it anyway: {}.",
-                    self.spans_text(&others)
+                    self.spans_text(&busy)
                 ));
+            }
+            if !idle.is_empty() {
+                lines.push(format!(
+                    "It opened beside other chats' work that stayed idle: {}.",
+                    self.spans_text(&idle)
+                ));
+            }
+            if busy.is_empty() && idle.is_empty() {
+                lines.push("During it, no other chat ran a command or an MCP tool call.".into());
             }
             if let Some(text) = r.measure.text(|conversation| self.chat(conversation)) {
                 lines.push(text);
@@ -2840,7 +3014,9 @@ impl Broker {
             "contaminated": beside.as_ref().map(|beside| !beside.is_empty()),
             "ranBeside": beside.iter().flatten().map(|(_, record)| record.clone()).collect::<Vec<_>>(),
             "blockers": blockers.iter().map(|(conversation, label, time)| json!({"conversationId": conversation, "label": label, "ms": ms(*time)})).collect::<Vec<_>>(),
-            "others": summed(&ran(&r.others), now).iter().map(|(conversation, label, time)| json!({"conversationId": conversation, "label": label, "ms": ms(*time)})).collect::<Vec<_>>(),
+            "others": busy.iter().map(|(conversation, label, time)| json!({"conversationId": conversation, "label": label, "ms": ms(*time)})).collect::<Vec<_>>(),
+            // Other chats' work in progress the window opened beside, which stayed idle.
+            "idle": idle.iter().map(|(conversation, label, time)| json!({"conversationId": conversation, "label": label, "ms": ms(*time)})).collect::<Vec<_>>(),
             "held": {
                 "chats": held.chats,
                 "ms": ms(held.total),
@@ -2870,15 +3046,16 @@ impl Broker {
     }
 
     /// Heavy work that ran beside a reservation's measurement, each as text and as a record:
-    /// other chats' commands and MCP tool calls that ran while its window was open, then what
-    /// the computer's readings show used it heavily (`machine::Window::beside`), whoever's it
-    /// was: a chat's programs, a Claude or Codex session outside Agent Studio, Agent Studio, the
-    /// system or the user's own.
+    /// other chats' commands and MCP tool calls that ran while its window was open, unless they
+    /// stayed idle, then what the computer's readings show used it heavily
+    /// (`machine::Window::beside`), whoever's it was: a chat's programs, a Claude or Codex
+    /// session outside Agent Studio, Agent Studio, the system or the user's own.
     fn beside(&self, r: &Reservation, now: Instant) -> Vec<(String, Value)> {
         let calls: Vec<Span> = r
             .others
             .iter()
             .filter(|s| !s.background && !s.key.starts_with("ask:"))
+            .filter(|s| !s.idle || s.woke)
             .filter(|s| !r.refused_calls.contains(&s.key))
             .cloned()
             .collect();
@@ -3092,19 +3269,51 @@ fn command_label(command: &str) -> String {
         .unwrap_or_else(|| "a build".into())
 }
 
+/// Whether `conversation`'s work has stayed idle by every reading that can tell (`Idle`): on this
+/// computer, and inside WSL for a chat whose CLI runs there.
+fn idle_now(state: &State, conversation: &str, now: Instant) -> bool {
+    let Some(idle) = state.idle.get(conversation) else {
+        return false;
+    };
+    idle.here.is_some_and(|s| s.idle(now))
+        && (!state.in_wsl.contains(conversation) || idle.wsl.is_some_and(|s| s.idle(now)))
+}
+
+/// Takes what readings found of chats' work between `from` and `now`, in cores, on this computer
+/// or inside WSL: each chat of `read` that `work` lacks could not be read, and counts as busy.
+fn heard_work(
+    state: &mut State,
+    wsl: bool,
+    read: impl IntoIterator<Item = String>,
+    work: &HashMap<String, f64>,
+    from: Instant,
+    now: Instant,
+) {
+    for conversation in read {
+        let busy = work
+            .get(&conversation)
+            .is_none_or(|cores| *cores >= machine::IDLE_CORE);
+        let idle = state.idle.entry(conversation).or_default();
+        let streak = if wsl { &mut idle.wsl } else { &mut idle.here };
+        *streak = Some(Streak::heard(*streak, busy, from, now));
+    }
+}
+
 /// The work other chats run now: their commands, and the background work their CLIs keep.
-fn items(state: &State, background: &[BackgroundWork]) -> Vec<Item> {
+fn items(state: &State, background: &[BackgroundWork], now: Instant) -> Vec<Item> {
     let mut items: Vec<Item> = state
         .runs
         .values()
         .flat_map(|run| {
-            run.calls.iter().map(|(id, call)| Item {
+            let idle = idle_now(state, &run.conversation, now);
+            run.calls.iter().map(move |(id, call)| Item {
                 key: id.clone(),
                 conversation: run.conversation.clone(),
                 label: call.label.clone(),
                 light: call.light,
                 in_progress: true,
                 background: false,
+                idle,
             })
         })
         .collect();
@@ -3124,6 +3333,7 @@ fn items(state: &State, background: &[BackgroundWork]) -> Vec<Item> {
             light: false,
             in_progress: running.contains(work.conversation.as_str()),
             background: true,
+            idle: idle_now(state, &work.conversation, now),
         });
     }
     items.sort_by(|a, b| a.conversation.cmp(&b.conversation).then(a.key.cmp(&b.key)));
@@ -3131,8 +3341,21 @@ fn items(state: &State, background: &[BackgroundWork]) -> Vec<Item> {
 }
 
 /// Brings the first reservation up to date with `items`: what keeps its window closed, whether
-/// it opens, and what else runs once it is open. Returns whether anything changed.
+/// it opens, and what else runs once it is open. Work in progress that has stayed idle never keeps
+/// it closed. Returns whether anything changed.
 fn settle(state: &mut State, items: &[Item], now: Instant, lull: Duration) -> bool {
+    // When a reading last found each chat's work busy.
+    let busy: HashMap<String, Instant> = state
+        .idle
+        .iter()
+        .filter_map(|(conversation, idle)| {
+            let at = idle
+                .here
+                .and_then(|s| s.busy)
+                .max(idle.wsl.and_then(|s| s.busy))?;
+            Some((conversation.clone(), at))
+        })
+        .collect();
     let Some(first) = state.queue.first_mut() else {
         return false;
     };
@@ -3170,11 +3393,16 @@ fn settle(state: &mut State, items: &[Item], now: Instant, lull: Duration) -> bo
                 light: false,
                 in_progress: true,
                 background: false,
+                idle: false,
             }),
     );
     let others: Vec<&Item> = work.iter().collect();
     if first.opened.is_none() {
-        let blocking: Vec<&Item> = others.iter().copied().filter(|i| i.in_progress).collect();
+        let blocking: Vec<&Item> = others
+            .iter()
+            .copied()
+            .filter(|i| i.in_progress && !i.idle)
+            .collect();
         changed |= track(&mut first.blockers, &blocking, now);
         if blocking.is_empty() {
             first.opened = Some(now);
@@ -3193,6 +3421,17 @@ fn settle(state: &mut State, items: &[Item], now: Instant, lull: Duration) -> bo
     }
     if first.opened.is_some() {
         changed |= track(&mut first.others, &others, now);
+        // Idle work the window opened beside that a reading then found busy ran beside it.
+        for span in first.others.iter_mut().filter(|s| s.idle && !s.woke) {
+            let until = span.until.unwrap_or(now);
+            if busy
+                .get(&span.conversation)
+                .is_some_and(|at| *at > span.from && *at <= until)
+            {
+                span.woke = true;
+                changed = true;
+            }
+        }
     }
     changed
 }
@@ -3222,6 +3461,8 @@ fn track(spans: &mut Vec<Span>, items: &[&Item], now: Instant) -> bool {
                 conversation: item.conversation.clone(),
                 label: item.label.clone(),
                 background: item.background,
+                idle: item.idle,
+                woke: false,
                 from: now,
                 until: None,
             });
@@ -3229,6 +3470,19 @@ fn track(spans: &mut Vec<Span>, items: &[&Item], now: Instant) -> bool {
         }
     }
     changed
+}
+
+/// Other chats' work during `r`'s window, by chat and label: what stayed idle, then what ran,
+/// busy from the start or once a reading found it so. Calls the gate refused never ran.
+type Summed = Vec<(String, String, Duration)>;
+fn beside_spans(r: &Reservation, now: Instant) -> (Summed, Summed) {
+    let (idle, busy): (Vec<Span>, Vec<Span>) = r
+        .others
+        .iter()
+        .filter(|s| !r.refused_calls.contains(&s.key))
+        .cloned()
+        .partition(|s| s.idle && !s.woke);
+    (summed(&idle, now), summed(&busy, now))
 }
 
 /// Spans by chat and label, each with the time they ran up to `end`, longest first.

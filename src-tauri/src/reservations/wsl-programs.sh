@@ -3,12 +3,14 @@
 # which a launch gives its CLI and its commands inherit), and each launch's CLI from its marker.
 # Reads /proc twice, a second apart, so the app can tell each process's share of the CPU.
 # Prints `meta <ticks a second> <cores> <page bytes> <elapsed ns>`, `cli <job> <pid>` for each
-# launch still running, and `p <job> <pid> <parent> <start> <ticks before> <ticks after> <rss
-# pages> <name>` for each process, ticks before being -1 for one that began between readings.
+# launch still running, `p <job> <pid> <parent> <start> <ticks before> <ticks after> <rss
+# pages> <name>` for each process, ticks before being -1 for one that began between readings,
+# and after each `c <job> <pid> <start> <ticks before> <ticks after>` with the ticks of its
+# children that ended and it waited for, which tell the work of short processes.
 set -u
 namespace=$1
 shift
-declare -A asked=() before=()
+declare -A asked=() before=() children=()
 for job in "$@"; do
   asked[$job]=1
   if read -r pid _ 2>/dev/null < "$HOME/.local/share/$namespace/runs/$job"; then
@@ -42,11 +44,15 @@ sample() {
     name=${name%)*}
     if [ "$1" = first ]; then
       before[$pid]="${fields[19]} $((fields[11] + fields[12]))"
+      children[$pid]="${fields[19]} $((fields[13] + fields[14]))"
     else
-      local earlier=-1 prior=${before[$pid]-}
+      local earlier=-1 prior=${before[$pid]-} waited=-1 reaped=${children[$pid]-}
       if [ -n "$prior" ] && [ "${prior%% *}" = "${fields[19]}" ]; then earlier=${prior#* }; fi
+      if [ -n "$reaped" ] && [ "${reaped%% *}" = "${fields[19]}" ]; then waited=${reaped#* }; fi
       printf 'p %s %s %s %s %s %s %s %s\n' "$job" "$pid" "${fields[1]}" "${fields[19]}" \
         "$earlier" "$((fields[11] + fields[12]))" "${fields[21]}" "$name"
+      printf 'c %s %s %s %s %s\n' "$job" "$pid" "${fields[19]}" "$waited" \
+        "$((fields[13] + fields[14]))"
     fi
   done
 }

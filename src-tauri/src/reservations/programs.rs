@@ -287,6 +287,9 @@ struct WslReading {
     /// Each launch's CLI, by job, while it runs.
     cli: HashMap<String, u32>,
     processes: Vec<WslProcess>,
+    /// The CPU ticks of each process's children that ended and it waited for, by its id and
+    /// start: at the first reading, if it ran then, and at the second.
+    children: HashMap<(u32, u64), (Option<u64>, u64)>,
 }
 #[derive(Debug)]
 struct WslProcess {
@@ -349,6 +352,18 @@ fn parse_wsl(output: &str) -> WslReading {
                     pages: pages.max(0) as u64,
                     name: parts.next().unwrap_or_default().to_string(),
                 });
+            }
+            Some("c") => {
+                let _job = fields.next();
+                let mut number = || fields.next().and_then(|f| f.parse::<i64>().ok());
+                if let (Some(pid), Some(start), Some(before), Some(after)) =
+                    (number(), number(), number(), number())
+                {
+                    reading.children.insert(
+                        (pid as u32, start as u64),
+                        ((before >= 0).then_some(before as u64), after.max(0) as u64),
+                    );
+                }
             }
             _ => {}
         }
@@ -428,6 +443,76 @@ fn wsl_programs(reading: &WslReading, job: &str, distribution: &str) -> Vec<Prog
     }
     list.sort_by(|a, b| b.memory.cmp(&a.memory).then(a.pid.cmp(&b.pid)));
     list
+}
+
+/// How much of a core a launch's work kept busy over a reading: its CLI's tree inside its
+/// distribution, the CLI's own time left out but not that of its children that ended, so a
+/// command's short processes count, and what began between the two readings in full. None when
+/// the launch has not yet written which process is its CLI, or its CLI just ended.
+fn wsl_work_of(reading: &WslReading, job: &str) -> Option<f64> {
+    let processes: Vec<&WslProcess> = reading.processes.iter().filter(|p| p.job == job).collect();
+    let index: HashMap<u32, &WslProcess> = processes.iter().map(|p| (p.pid, *p)).collect();
+    let cli = reading
+        .cli
+        .get(job)
+        .copied()
+        .filter(|pid| index.contains_key(pid))?;
+    let in_cli = |process: &WslProcess| {
+        let mut current = process;
+        for _ in 0..256 {
+            if current.pid == cli {
+                return true;
+            }
+            match index.get(&current.parent) {
+                Some(next) if next.pid != current.pid => current = next,
+                _ => return false,
+            }
+        }
+        false
+    };
+    let since = |before: Option<u64>, after: u64| before.map_or(after, |b| after.saturating_sub(b));
+    let mut ticks = 0;
+    for process in processes.into_iter().filter(|p| in_cli(p)) {
+        if let Some((before, after)) = reading.children.get(&(process.pid, process.start)) {
+            ticks += since(*before, *after);
+        }
+        if process.pid != cli {
+            ticks += since(process.before, process.after);
+        }
+    }
+    Some(ticks as f64 / reading.tick / reading.elapsed)
+}
+
+/// How much of a core each WSL chat's work kept busy over a second (`wsl_work_of`), by
+/// conversation, from one reading inside each distribution where one of `jobs` runs. A chat
+/// missing from the answer could not be read.
+pub async fn wsl_work(jobs: Vec<WslJob>) -> HashMap<String, f64> {
+    let mut places: HashMap<(String, String), Vec<WslJob>> = HashMap::new();
+    for job in jobs {
+        places
+            .entry((job.distribution.clone(), job.namespace.clone()))
+            .or_default()
+            .push(job);
+    }
+    let readings = places
+        .into_iter()
+        .map(|((distribution, namespace), jobs)| async move {
+            let mut args = vec![namespace];
+            args.extend(jobs.iter().map(|job| job.job.clone()));
+            let output = in_wsl(&distribution, include_str!("wsl-programs.sh"), &args).await;
+            (jobs, output)
+        });
+    let mut work = HashMap::<String, f64>::new();
+    for (jobs, output) in futures_util::future::join_all(readings).await {
+        let Some(output) = output else { continue };
+        let reading = parse_wsl(&output);
+        for job in jobs {
+            if let Some(cores) = wsl_work_of(&reading, &job.job) {
+                *work.entry(job.conversation).or_default() += cores;
+            }
+        }
+    }
+    work
 }
 
 /// The programs WSL chats left running, by conversation, from one reading inside each
@@ -797,6 +882,7 @@ mod tests {
                 (50, "b".to_string()),
             ]),
             roots: HashMap::from([(11, "a".to_string()), (77, "b".to_string())]),
+            ..Default::default()
         };
         let cpu = HashMap::from([(20, 3.0), (21, 1.5), (30, 0.2)]);
         let left = left_running(&reading, &members, Some(&cpu), &HashSet::from([20, 60]));
@@ -853,6 +939,30 @@ mod tests {
         assert!(wsl_programs(&reading, "job-d", "Ubuntu").is_empty());
     }
 
+    #[test]
+    fn a_wsl_chat_s_work_is_its_cli_s_tree_with_what_ended_in_it() {
+        let output = "cli job-a 100\ncli job-c 400\nmeta 100 8 4096 1000000000\n\
+            p job-a 100 50 5000 10 30 25600 claude\n\
+            c job-a 100 5000 400 450\n\
+            p job-a 101 100 5100 0 2 2560 bash\n\
+            c job-a 101 5100 0 0\n\
+            p job-a 102 101 5200 -1 7 2560 python3\n\
+            c job-a 102 5200 -1 0\n\
+            p job-a 200 1 6000 100 500 262144 Web Content (sandbox)\n\
+            c job-a 200 6000 0 999\n\
+            p job-c 410 1 9000 0 0 2560 server\n";
+        let reading = parse_wsl(output);
+        // The CLI's children that ended (50 ticks), its command (2) and what began between the
+        // readings (7), but neither the CLI's own time nor a program left running: 59 ticks of a
+        // hundred a second, over a second.
+        let cores = wsl_work_of(&reading, "job-a").unwrap();
+        assert!((cores - 0.59).abs() < 1e-9, "{cores}");
+        assert!(cores >= super::super::machine::IDLE_CORE);
+        // A CLI that just ended, and a launch that has not named its CLI yet.
+        assert_eq!(wsl_work_of(&reading, "job-c"), None);
+        assert_eq!(wsl_work_of(&reading, "job-d"), None);
+    }
+
     /// Run with `cargo test --lib a_program_left_running_inside_wsl_is_found_and_ended --
     /// --ignored` on a computer with a WSL distribution (AGENT_STUDIO_TEST_WSL, Ubuntu by default).
     #[cfg(windows)]
@@ -863,14 +973,18 @@ mod tests {
             std::env::var("AGENT_STUDIO_TEST_WSL").unwrap_or_else(|_| "Ubuntu".into());
         let namespace = format!("agent-studio-test-{}", uuid::Uuid::new_v4().simple());
         let job = uuid::Uuid::new_v4().to_string();
+        let busy_job = uuid::Uuid::new_v4().to_string();
         // As a launch runs a CLI: a CLI with a command of its own, and a server a command started
-        // and let go, all carrying the launch's job; the launch waits for its CLI.
+        // and let go, all carrying the launch's job; the launch waits for its CLI. And another
+        // launch whose CLI's command works.
         let launch = "set -eu\n\
             mkdir -p \"$HOME/.local/share/$1/runs\"\n\
             AGENT_STUDIO_JOB=$2 setsid sh -c 'sleep 300 & exec sleep 301' </dev/null >/dev/null 2>&1 &\n\
             cli=$!\n\
             AGENT_STUDIO_JOB=$2 setsid sh -c 'exec sleep 302' </dev/null >/dev/null 2>&1 &\n\
             printf '%s 0\\n' \"$cli\" > \"$HOME/.local/share/$1/runs/$2\"\n\
+            AGENT_STUDIO_JOB=$3 setsid sh -c 'sh -c \"while :; do :; done\" & wait' </dev/null >/dev/null 2>&1 &\n\
+            printf '%s 0\\n' \"$!\" > \"$HOME/.local/share/$1/runs/$3\"\n\
             wait \"$cli\"\n";
         let mut running = tokio::process::Command::new("wsl.exe")
             .args([
@@ -881,7 +995,7 @@ mod tests {
                 "-c",
                 launch,
             ])
-            .args(["agent-studio", &namespace, &job])
+            .args(["agent-studio", &namespace, &job, &busy_job])
             .stdin(std::process::Stdio::null())
             .creation_flags(0x08000000)
             .kill_on_drop(true)
@@ -893,6 +1007,24 @@ mod tests {
             namespace: namespace.clone(),
             job: job.clone(),
         }];
+        // The command of one sleeps, the other's works.
+        let mut both = jobs.clone();
+        both.push(WslJob {
+            conversation: "busy".into(),
+            distribution: distribution.clone(),
+            namespace: namespace.clone(),
+            job: busy_job.clone(),
+        });
+        let mut work = HashMap::new();
+        for _ in 0..30 {
+            work = wsl_work(both.clone()).await;
+            if work.len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        assert!(work["ui"] < super::super::machine::IDLE_CORE, "{work:?}");
+        assert!(work["busy"] >= super::super::machine::IDLE_CORE, "{work:?}");
         let mut left = HashMap::new();
         for _ in 0..30 {
             left = wsl_left(jobs.clone()).await;
@@ -913,12 +1045,12 @@ mod tests {
         assert_eq!(stop(found).await[0].outcome, Outcome::Gone);
         let ended = "set -u\n\
             for environ in /proc/[0-9]*/environ; do\n\
-              if tr '\\0' '\\n' < \"$environ\" 2>/dev/null | grep -qx \"AGENT_STUDIO_JOB=$2\"; then\n\
+              if tr '\\0' '\\n' < \"$environ\" 2>/dev/null | grep -qxE \"AGENT_STUDIO_JOB=($2|$3)\"; then\n\
                 pid=${environ#/proc/}; kill -KILL \"${pid%/environ}\" 2>/dev/null || true\n\
               fi\n\
             done\n\
             case $1 in agent-studio-test-*) rm -rf -- \"$HOME/.local/share/$1\" ;; esac\n";
-        in_wsl(&distribution, ended, &[namespace, job]).await;
+        in_wsl(&distribution, ended, &[namespace, job, busy_job]).await;
         let _ = running.wait().await;
     }
 

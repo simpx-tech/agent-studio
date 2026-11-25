@@ -15,6 +15,18 @@ pub struct Members {
     pub chats: HashMap<u32, String>,
     /// Each chat CLI's own process, whose descendants belong to its chat.
     pub roots: HashMap<u32, String>,
+    /// What each chat's job ran, by its CLI's process (Windows).
+    pub jobs: HashMap<u32, JobTime>,
+}
+
+/// What a chat's job ran: its processes now, and the CPU time of every process it ever held,
+/// those that already ended included, so that a command's short processes, which begin and end
+/// between two readings of the computer, still count (`machine::work`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct JobTime {
+    pub pids: Vec<u32>,
+    /// In milliseconds, since the job began.
+    pub cpu_ms: u64,
 }
 
 #[derive(Default)]
@@ -110,6 +122,16 @@ impl Jobs {
                 members.chats.insert(*pid, job.conversation.clone());
             }
             members.roots.insert(job.pid, job.conversation.clone());
+            #[cfg(windows)]
+            if let Some(cpu_ms) = windows::cpu_ms(&job.job) {
+                members.jobs.insert(
+                    job.pid,
+                    JobTime {
+                        pids: pids.to_vec(),
+                        cpu_ms,
+                    },
+                );
+            }
         });
         members
     }
@@ -152,8 +174,9 @@ mod windows {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectAssociateCompletionPortInformation,
-        JobObjectBasicProcessIdList, JobObjectExtendedLimitInformation, QueryInformationJobObject,
-        SetInformationJobObject, JOBOBJECT_ASSOCIATE_COMPLETION_PORT,
+        JobObjectBasicAccountingInformation, JobObjectBasicProcessIdList,
+        JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
+        JOBOBJECT_ASSOCIATE_COMPLETION_PORT, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
     };
     use windows_sys::Win32::System::IO::{
@@ -272,6 +295,24 @@ mod windows {
             }
             Some(job)
         }
+    }
+
+    /// The CPU time every process the job held used since it began, those that ended included,
+    /// in milliseconds; None when it cannot be read.
+    pub fn cpu_ms(job: &Handle) -> Option<u64> {
+        let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { std::mem::zeroed() };
+        let read = unsafe {
+            QueryInformationJobObject(
+                job.0,
+                JobObjectBasicAccountingInformation,
+                &mut info as *mut _ as *mut c_void,
+                std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        // In units of 100 nanoseconds.
+        (read != 0)
+            .then(|| (info.TotalUserTime.max(0) + info.TotalKernelTime.max(0)) as u64 / 10_000)
     }
 
     /// The processes in a job now, or None when it cannot be read.

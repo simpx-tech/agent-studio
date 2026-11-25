@@ -55,6 +55,8 @@ test('the reservations window shows the computer now and each past measurement w
       { conversationId: art, label: 'Level step 2 `Start-Sleep -Seconds 15`', ms: 4654 },
     ],
     others: [],
+    // Work that stayed idle beside it, which the window did not wait for.
+    idle: [{ conversationId: art, label: '`python3 watch-pr-comments.py 5201`', ms: 12_000 }],
     held: {
       chats: 1,
       ms: 19_400,
@@ -316,6 +318,10 @@ test('the reservations window shows the computer now and each past measurement w
     /UnrealEditor\.exe\s*· Level art\s*2\.0%\s*· 4\.0%\s*14 GB/,
     /vmmemWSL\s*· WSL\s*1\.0%\s*· 3\.0%\s*6\.0 GB/,
   ]);
+  await expect(dialog.getByRole('heading', { name: "Other chats' idle work" })).toBeVisible();
+  await expect(dialog.locator('.facts').filter({ hasText: 'watch-pr-comments' })).toHaveText(
+    /Level art\s*python3 watch-pr-comments\.py 5201\s*· 12\.0s/,
+  );
   await expect(dialog.getByLabel('Why other chats waited').locator('.row')).toHaveText(
     /Level art\s*· handing over\s*5\.0s/,
   );

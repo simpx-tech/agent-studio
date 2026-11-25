@@ -155,6 +155,8 @@ export const pcRecordSchema = z.object({
   ranBeside: list(besideSchema),
   blockers: list(timedSchema),
   others: list(timedSchema),
+  /** Other chats' work in progress its window opened beside, which stayed idle. */
+  idle: list(timedSchema),
   held: z
     .object({
       chats: z.number(),

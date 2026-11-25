@@ -478,6 +478,21 @@
                 {/each}
               </ul>
             {/if}
+            {#if record.idle.length}
+              <h4>Other chats' idle work</h4>
+              <ul class="facts">
+                {#each record.idle as other, index (index)}
+                  <li>
+                    <span class="fact-name">{title(other.conversationId)}</span>
+                    <span
+                      >{@render label(other.label)}<span class="muted"
+                        >{' · '}{formatReplyTime(other.ms)}</span
+                      ></span
+                    >
+                  </li>
+                {/each}
+              </ul>
+            {/if}
           </section>
         {/if}
 

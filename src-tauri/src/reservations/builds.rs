@@ -379,6 +379,7 @@ mod tests {
         let members = Members {
             chats: HashMap::from([(10, "chat-a".to_string())]),
             roots: HashMap::new(),
+            ..Default::default()
         };
         let owners = Owners::new(&reading, &members, 999);
         let builds = compiling(&reading, &owners);

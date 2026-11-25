@@ -213,7 +213,16 @@ describe('the history of reservations', () => {
     expect(records[0].stopped).toEqual([]);
     expect(records[0].held).toEqual({ chats: 0, ms: 0, refused: 0, causes: [] });
     expect(records[0].machine).toBeNull();
+    expect(records[0].idle).toEqual([]);
     expect(pcRecords('not a list')).toEqual([]);
+  });
+
+  it('keeps the idle work a window opened beside apart from what ran during it', () => {
+    const watcher = { conversationId: 'ui', label: '`python3 watch-pr-comments.py`', ms: 420_000 };
+    const [opened] = pcRecords([record({ idle: [watcher], contaminated: false })]);
+    expect(opened.idle).toEqual([watcher]);
+    expect(opened.others).toEqual([]);
+    expect(opened.contaminated).toBe(false);
   });
 
   it('adds up what the reservations took, a window that never opened waiting to the end', () => {

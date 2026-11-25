@@ -224,6 +224,85 @@ fn usage(previous: &Reading, current: &Reading) -> Option<Usage> {
     })
 }
 
+/// Work that keeps less than this much of one core busy is idle: it waits, as a watcher, a server
+/// or a poll between its checks does, and a reservation's window does not wait for it (requested
+/// 2026-11-25, after a pull request watcher that slept between its polls, for up to three hours,
+/// kept a window closed while four chats waited on a computer at 3.6% CPU).
+pub const IDLE_CORE: f64 = 0.25;
+
+/// How much of a core each chat's work kept busy between two readings, each with the chats' jobs
+/// then: what the chat's job ran, short-lived processes included (`Members::jobs`), less its CLI
+/// itself and the programs it left running outside the CLI's tree, which are not its work in
+/// progress. Only chats whose CLI both readings saw are listed.
+pub fn work(previous: (&Reading, &Members), current: (&Reading, &Members)) -> HashMap<String, f64> {
+    let (before, then) = previous;
+    let (after, now) = current;
+    let mut work = HashMap::new();
+    let seconds = after.at.saturating_duration_since(before.at).as_secs_f64();
+    if seconds <= 0.0 {
+        return work;
+    }
+    let earlier: HashMap<(u32, u64), u64> = before
+        .processes
+        .iter()
+        .map(|p| ((p.pid, p.began), p.cpu_ms))
+        .collect();
+    let index: HashMap<u32, &Process> = after.processes.iter().map(|p| (p.pid, p)).collect();
+    let began = |reading: &Reading, pid: u32| {
+        reading
+            .processes
+            .iter()
+            .find(|p| p.pid == pid)
+            .map(|p| p.began)
+    };
+    for (root, job) in &now.jobs {
+        let (Some(conversation), Some(last)) = (now.roots.get(root), then.jobs.get(root)) else {
+            continue;
+        };
+        // The same CLI both times, since a later process may take a CLI's id.
+        let cli = began(after, *root);
+        if then.roots.get(root) != Some(conversation)
+            || cli.is_none()
+            || began(before, *root) != cli
+        {
+            continue;
+        }
+        let mut ms = job.cpu_ms.saturating_sub(last.cpu_ms) as f64;
+        let members: HashSet<u32> = job.pids.iter().copied().collect();
+        for process in job.pids.iter().filter_map(|pid| index.get(pid)) {
+            if process.pid == *root || !under(process, *root, &index, &members) {
+                if let Some(used) = earlier.get(&(process.pid, process.began)) {
+                    ms -= process.cpu_ms.saturating_sub(*used) as f64;
+                }
+            }
+        }
+        *work.entry(conversation.clone()).or_insert(0.0) += ms.max(0.0) / 1000.0 / seconds;
+    }
+    work
+}
+
+/// Whether `process` descends from the CLI `root` through processes of its job, unless an id on
+/// the way belongs to a process that began after its child.
+fn under(process: &Process, root: u32, index: &HashMap<u32, &Process>, job: &HashSet<u32>) -> bool {
+    let mut current = process;
+    for _ in 0..256 {
+        if current.pid == root {
+            return true;
+        }
+        match index.get(&current.parent) {
+            Some(next)
+                if next.pid != current.pid
+                    && next.began <= current.began
+                    && job.contains(&next.pid) =>
+            {
+                current = next
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
 /// A program as a report shows it: its processes of one owner, together.
 #[derive(Default)]
 struct Group {
@@ -898,6 +977,7 @@ mod tests {
         let members = Members {
             chats: HashMap::from([(11, "chat-a".to_string())]),
             roots: HashMap::new(),
+            ..Default::default()
         };
         let owners = Owners::new(&r, &members, 10);
         assert_eq!(owners.of(13), Owner::Chat("chat-a".into()));
@@ -910,11 +990,135 @@ mod tests {
     }
 
     #[test]
+    fn a_chat_s_work_is_what_its_job_ran_less_its_cli_and_what_it_left_running() {
+        use super::super::jobs::JobTime;
+        let start = Instant::now();
+        let chat = |pairs: &[(u32, &str)]| -> HashMap<u32, String> {
+            pairs.iter().map(|(pid, c)| (*pid, c.to_string())).collect()
+        };
+        let job = |pids: &[u32], cpu_ms: u64| JobTime {
+            pids: pids.to_vec(),
+            cpu_ms,
+        };
+        let before = reading(
+            start,
+            0,
+            0,
+            vec![
+                // A chat's CLI, its command and an MCP server, and an editor a command left
+                // running, whose parent is gone.
+                process(11, 10, "claude.exe", 1_000, 0, 11),
+                process(12, 11, "bash.exe", 0, 0, 12),
+                process(13, 11, "node.exe", 100, 0, 13),
+                process(20, 99, "UnrealEditor.exe", 5_000, 0, 20),
+                // A Codex chat whose command sleeps.
+                process(30, 10, "codex.exe", 400, 0, 30),
+                process(31, 30, "python.exe", 10, 0, 31),
+                // A CLI whose id a later process takes.
+                process(40, 10, "claude.exe", 0, 0, 40),
+            ],
+        );
+        let then = Members {
+            chats: chat(&[
+                (11, "a"),
+                (12, "a"),
+                (13, "a"),
+                (20, "a"),
+                (30, "b"),
+                (31, "b"),
+                (40, "c"),
+            ]),
+            roots: chat(&[(11, "a"), (30, "b"), (40, "c")]),
+            jobs: HashMap::from([
+                (11, job(&[11, 12, 13, 20], 10_000)),
+                (30, job(&[30, 31], 410)),
+                (40, job(&[40], 0)),
+            ]),
+        };
+        let after = reading(
+            start + Duration::from_secs(2),
+            0,
+            0,
+            vec![
+                process(11, 10, "claude.exe", 1_200, 0, 11),
+                process(12, 11, "bash.exe", 300, 0, 12),
+                process(13, 11, "node.exe", 100, 0, 13),
+                process(20, 99, "UnrealEditor.exe", 6_000, 0, 20),
+                process(30, 10, "codex.exe", 440, 0, 30),
+                process(31, 30, "python.exe", 20, 0, 31),
+                process(40, 10, "claude.exe", 0, 0, 41),
+                process(50, 10, "claude.exe", 0, 0, 50),
+            ],
+        );
+        let now = Members {
+            chats: chat(&[
+                (11, "a"),
+                (12, "a"),
+                (13, "a"),
+                (20, "a"),
+                (30, "b"),
+                (31, "b"),
+                (40, "c"),
+                (50, "d"),
+            ]),
+            roots: chat(&[(11, "a"), (30, "b"), (40, "c"), (50, "d")]),
+            jobs: HashMap::from([
+                // 200 ms of the CLI, 300 of the command, 1,000 of the editor, and 500 of short
+                // processes that began and ended between the readings.
+                (11, job(&[11, 12, 13, 20], 12_000)),
+                (30, job(&[30, 31], 460)),
+                (40, job(&[40], 900)),
+                (50, job(&[50], 900)),
+            ]),
+        };
+        let work = work((&before, &then), (&after, &now));
+        // The command and the short processes, 800 ms over two seconds.
+        assert!((work["a"] - 0.4).abs() < 1e-9, "{work:?}");
+        assert!(work["a"] >= IDLE_CORE);
+        // 10 ms of a sleeping command over two seconds: idle.
+        assert!((work["b"] - 0.005).abs() < 1e-9, "{work:?}");
+        assert!(work["b"] < IDLE_CORE);
+        // A CLI a later process replaced, and one the last reading did not see.
+        assert_eq!(work.len(), 2, "{work:?}");
+    }
+
+    /// A chat whose command waits is idle, and one whose command starts short processes one after
+    /// another is busy, though each of them ends between two readings.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn real_jobs_tell_a_waiting_command_from_one_that_works() {
+        let jobs = super::super::jobs::Jobs::default();
+        let spawn = |command: &str| {
+            tokio::process::Command::new("cmd.exe")
+                .args(["/C", command])
+                .creation_flags(0x08000000)
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap()
+        };
+        let mut waits = spawn("ping -n 12 127.0.0.1 >NUL");
+        jobs.adopt("waits", &waits, None);
+        let mut works =
+            spawn("for /L %i in (1,1,60) do @powershell -NoProfile -NonInteractive -Command exit");
+        jobs.adopt("works", &works, None);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let first = (read().unwrap(), jobs.members());
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let second = (read().unwrap(), jobs.members());
+        let work = work((&first.0, &first.1), (&second.0, &second.1));
+        crate::runner::kill_tree(&mut waits).await;
+        crate::runner::kill_tree(&mut works).await;
+        assert!(work["waits"] < IDLE_CORE, "{work:?}");
+        assert!(work["works"] >= IDLE_CORE, "{work:?}");
+    }
+
+    #[test]
     fn a_window_reports_the_measuring_chat_apart_from_everything_else() {
         let start = Instant::now();
         let members = Members {
             chats: HashMap::from([(11, "bench".to_string()), (21, "other".to_string())]),
             roots: HashMap::new(),
+            ..Default::default()
         };
         let mut window = Window::default();
         let first = reading(
@@ -972,6 +1176,7 @@ mod tests {
         let members = Members {
             chats: HashMap::from([(11, "bench".to_string())]),
             roots: HashMap::from([(11, "bench".to_string())]),
+            ..Default::default()
         };
         // WSL's machine runs as a system process; the chat's own process is its wsl.exe.
         let processes = |vm_ms, chrome_ms| {
@@ -1045,6 +1250,7 @@ mod tests {
         let members = Members {
             chats: HashMap::new(),
             roots: HashMap::new(),
+            ..Default::default()
         };
         let owners = Owners::new(&r, &members, 999);
         assert_eq!(owners.of(11), Owner::Session("claude-app"));
@@ -1069,6 +1275,7 @@ mod tests {
         let members = Members {
             chats: HashMap::from([(11, "bench".to_string())]),
             roots: HashMap::new(),
+            ..Default::default()
         };
         let processes = |game: u64, chrome: u64, defender: u64| {
             let mut scanner = process(30, 1, "MsMpEng.exe", defender, 1 << 28, 30);
@@ -1153,6 +1360,7 @@ mod tests {
         let members = Members {
             chats: HashMap::from([(5, "art".to_string())]),
             roots: HashMap::new(),
+            ..Default::default()
         };
         let text = now_from(&first, &second, &members, 10, &HashSet::new())
             .text(|c| format!("the chat \"{c}\""));

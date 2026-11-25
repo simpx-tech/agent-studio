@@ -407,6 +407,8 @@ fn held_time_goes_to_what_kept_the_window_closed() {
         conversation: "ui".into(),
         label: label.into(),
         background: false,
+        idle: false,
+        woke: false,
         from: at(from),
         until: Some(at(until)),
     };
@@ -1004,10 +1006,7 @@ async fn a_measurement_beside_other_heavy_work_says_so_and_whose() {
     broker.tool("run-codex", &test);
     // And a program of the user's, busy over two readings of four cores.
     {
-        let members = jobs::Members {
-            chats: HashMap::new(),
-            roots: HashMap::new(),
-        };
+        let members = jobs::Members::default();
         let start = Instant::now();
         let mut state = broker.lock();
         for (second, chrome) in [(0, 0), (2, 3_000), (4, 6_000)] {
@@ -1069,6 +1068,181 @@ async fn a_measurement_beside_other_heavy_work_says_so_and_whose() {
     let unopened = broker.release("bench").unwrap();
     assert!(!unopened.text.contains("Measurement:"), "{}", unopened.text);
     assert!(unopened.record["contaminated"].is_null());
+}
+
+/// Settles the first reservation as it stands at `now`.
+fn settle_at(broker: &Broker, now: Instant) {
+    let mut state = broker.lock();
+    let items = items(&state, &[], now);
+    settle(&mut state, &items, now, broker.settings().lull());
+}
+
+/// A reading of `chat`'s work on this computer, `cores` busy from `from` to `until`.
+fn read_work(broker: &Broker, chat: &str, cores: f64, from: Instant, until: Instant) {
+    let mut state = broker.lock();
+    let work = HashMap::from([(chat.to_string(), cores)]);
+    heard_work(&mut state, false, [chat.to_string()], &work, from, until);
+}
+
+/// Ends the first reservation at `now`, as releasing it does, on a test's own timeline.
+fn release_at(broker: &Broker, now: Instant) -> Report {
+    let mut state = broker.lock();
+    broker.end(&mut state, 0, now, "release")
+}
+
+#[tokio::test]
+async fn idle_work_never_keeps_a_window_closed_and_stays_out_of_its_measurement() {
+    let broker = lulling(vec![], None);
+    broker.run_started("run-ui", "ui");
+    let (watch, _) = command(
+        "watch",
+        "python3 watch-pr-comments.py 5201 --max-hours 3 --poll 90",
+    );
+    broker.tool("run-ui", &watch);
+    broker.run_started("run-bench", "bench");
+    broker.reserve("run-bench", "bench", "Frame timing", None);
+    let t0 = Instant::now();
+    let at = |s: u64| t0 + Duration::from_secs(s);
+    assert_eq!(broker.snapshot().reservations[0].phase, "lull");
+    // A reading that found the watcher busy, then idle ones: the window waits until it has
+    // stayed idle for ten seconds.
+    read_work(&broker, "ui", 0.6, t0, at(2));
+    read_work(&broker, "ui", 0.01, at(2), at(4));
+    settle_at(&broker, at(4));
+    assert_eq!(broker.snapshot().reservations[0].phase, "lull");
+    for second in [6, 8, 10, 12] {
+        read_work(&broker, "ui", 0.0, at(second - 2), at(second));
+    }
+    {
+        let state = broker.lock();
+        let standing = broker.standing(&state, "bench", &items(&state, &[], at(12)));
+        assert!(
+            standing.contains("Idle in other chats (the window does not wait for these while they stay idle):\n- the chat \"Fix inventory UI\": `python3 watch-pr-comments.py"),
+            "{standing}"
+        );
+    }
+    settle_at(&broker, at(12));
+    let view = &broker.snapshot().reservations[0];
+    assert_eq!(view.phase, "open");
+    assert!(view.waiting_for.is_empty());
+    // It stays idle while the window is open, so the measurement is clean.
+    read_work(&broker, "ui", 0.0, at(12), at(14));
+    settle_at(&broker, at(14));
+    let report = release_at(&broker, at(16));
+    assert!(
+        report.text.contains(
+            "It opened beside other chats' work that stayed idle: the chat \"Fix inventory UI\" `python3 watch-pr-comments.py"
+        ),
+        "{}",
+        report.text
+    );
+    assert!(
+        report
+            .text
+            .contains("Measurement: clean, no other heavy work ran"),
+        "{}",
+        report.text
+    );
+    assert_eq!(report.record["contaminated"], false);
+    assert_eq!(report.record["idle"][0]["conversationId"], "ui");
+    assert_eq!(report.record["idle"][0]["ms"], 4_000);
+    assert_eq!(report.record["others"].as_array().map(Vec::len), Some(0));
+    // pc_status says which of other chats' work is idle.
+    broker.run_started("run-x", "x");
+    let (serve, _) = command("serve", "npm run dev");
+    broker.tool("run-x", &serve);
+    let now = Instant::now();
+    let earlier = now.checked_sub(Duration::from_secs(12)).unwrap_or(now);
+    read_work(&broker, "x", 0.0, earlier, now);
+    let status = broker.status("bench", None);
+    assert!(
+        status.contains("`npm run dev` (idle, so a reservation's window does not wait for it)"),
+        "{status}"
+    );
+}
+
+#[tokio::test]
+async fn idle_work_that_wakes_while_a_window_is_open_ran_beside_it() {
+    let broker = broker_with(vec![], None);
+    broker.run_started("run-ui", "ui");
+    let (serve, _) = command("serve", "npm run dev");
+    broker.tool("run-ui", &serve);
+    broker.run_started("run-bench", "bench");
+    broker.reserve("run-bench", "bench", "Frame timing", None);
+    let t0 = Instant::now();
+    let at = |s: u64| t0 + Duration::from_secs(s);
+    assert_eq!(broker.snapshot().reservations[0].phase, "draining");
+    for second in [2, 4, 6, 8, 10, 12] {
+        read_work(&broker, "ui", 0.02, at(second - 2), at(second));
+    }
+    settle_at(&broker, at(12));
+    assert_eq!(broker.snapshot().reservations[0].phase, "open");
+    // Then it works: it ran beside the measurement.
+    read_work(&broker, "ui", 1.5, at(12), at(14));
+    settle_at(&broker, at(14));
+    let report = release_at(&broker, at(16));
+    assert!(
+        report.text.contains(
+            "Other chats' work that ran during it anyway: the chat \"Fix inventory UI\" `npm run dev`"
+        ),
+        "{}",
+        report.text
+    );
+    assert!(
+        report.text.contains(
+            "Measurement: ran beside other heavy work, so its numbers may be off: the chat \"Fix inventory UI\" ran `npm run dev`"
+        ),
+        "{}",
+        report.text
+    );
+    assert_eq!(report.record["contaminated"], true);
+}
+
+#[tokio::test]
+async fn a_wsl_chat_s_work_is_idle_only_by_fresh_readings_inside_wsl() {
+    let broker = broker_with(vec![], None);
+    broker.run_started("run-ui", "ui");
+    let (watch, _) = command("watch", "python3 watch.py");
+    broker.tool("run-ui", &watch);
+    broker.run_started("run-bench", "bench");
+    broker.reserve("run-bench", "bench", "Frame timing", None);
+    broker.lock().in_wsl.insert("ui".into());
+    let t0 = Instant::now();
+    let at = |s: u64| t0 + Duration::from_secs(s);
+    let inside = |cores: Option<f64>, from: u64, until: u64| {
+        let mut state = broker.lock();
+        let work: HashMap<String, f64> = cores.map(|c| ("ui".to_string(), c)).into_iter().collect();
+        heard_work(
+            &mut state,
+            true,
+            ["ui".to_string()],
+            &work,
+            at(from),
+            at(until),
+        );
+    };
+    // This computer sees only the chat's wsl.exe, which does nothing.
+    for second in (2..=16).step_by(2) {
+        read_work(&broker, "ui", 0.0, at(second - 2), at(second));
+    }
+    settle_at(&broker, at(16));
+    assert_eq!(broker.snapshot().reservations[0].phase, "draining");
+    // Inside WSL: a reading that could not read it counts as busy, then idle ones.
+    inside(None, 0, 5);
+    inside(Some(0.03), 5, 9);
+    inside(Some(0.03), 9, 13);
+    settle_at(&broker, at(14));
+    assert_eq!(broker.snapshot().reservations[0].phase, "draining");
+    // Readings that stopped coming tell nothing.
+    settle_at(&broker, at(40));
+    assert_eq!(broker.snapshot().reservations[0].phase, "draining");
+    // Once both have found it idle for ten seconds, the window opens.
+    for second in (42..=52).step_by(2) {
+        read_work(&broker, "ui", 0.0, at(second - 2), at(second));
+        inside(Some(0.03), second - 2, second);
+    }
+    settle_at(&broker, at(52));
+    assert_eq!(broker.snapshot().reservations[0].phase, "open");
 }
 
 #[tokio::test]

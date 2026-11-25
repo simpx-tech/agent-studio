@@ -41,9 +41,9 @@ one broker, since they share the computer.
    reserves again within ten minutes of releasing hears that one reservation covers a series.
    First in line, the reservation waits for a lull (below); once its wait runs out, or its window
    opens, other chats' new commands and MCP tool calls wait, except light ones.
-3. **Wait for the window.** `pc_wait` returns once no other chat runs a command or an MCP tool
-   call, nor background work that a reply of its own still runs and waits on, nor holds what it
-   was asked to hand over.
+3. **Wait for the window.** `pc_wait` returns once no other chat runs busy work, a command, an
+   MCP tool call or background work that a reply of its own still runs and waits on, unless it
+   sits idle (below), nor holds what it was asked to hand over.
    Background work and programs a chat left running after its reply ended (a dev server, an
    editor) do not keep the window closed; they are listed, with the programs other chats left
    running, so that the agent can stop them first, and they show in the report.
@@ -56,8 +56,9 @@ one broker, since they share the computer.
 ### Waiting for a lull
 
 The first reservation in line does not hold anyone at first. Its window opens at the first moment
-no other chat runs a command, an MCP tool call or background work a running reply of its own waits
-on, and other chats work on until then: their commands go through the gate, and a `pc_wait` of
+no other chat runs busy work, a command, an MCP tool call or background work a running reply of its
+own waits on, other than idle work (below), and other chats work on until then: their commands go
+through the gate, and a `pc_wait` of
 theirs returns at once. Only when no such moment comes within the wait set in Settings →
 Reservations (`Settings::lull_minutes`, three minutes unless changed, kept on this computer in app
 data `reservations/settings.json`, never synced) does it hold their new work, from then on, and
@@ -66,6 +67,30 @@ work from then on, a hand-over that closes it again included. Zero holds at once
 2026-11-25. The Reservations window and the gauge show the phase as Waiting for a lull, Holding or
 Measuring, and the report says whether the window opened at a lull or how long it waited for one
 before holding the others (`lullMs` in the history).
+
+### Idle work
+
+Work that only waits never keeps a window closed (requested 2026-11-25, after four chats waited on
+a computer at 3.6% CPU behind a pull request watcher that slept between its polls and could run
+for three hours, while the measurement waited for it to end). While the first reservation's window
+waits, and while it is open, the broker reads the computer every two seconds, and each chat's work
+is what its CLI's job ran between two readings (`machine::work`): the job's own CPU time
+(`JobObjectBasicAccountingInformation`, which counts processes that already ended, so a command's
+short processes count however briefly each runs), less the CLI's own process and the programs it
+left running outside the CLI's tree. A chat whose CLI runs in a WSL distribution is read there too,
+one reading at a time (`programs::wsl_work` with `wsl-programs.sh`), since this computer sees all
+of WSL as one virtual machine: its CLI's tree there, with the time of the children each process
+waited for (the `c` lines) and of processes that began between the script's two samples. Work in
+progress that has kept less than a quarter of a core busy (`machine::IDLE_CORE`) by every reading
+of the last ten seconds (`IDLE_FOR`) is idle, so a watcher between its polls, a server waiting for
+requests or a command waiting on the network does not keep the window closed. A reading older
+than fifteen seconds (`STALE`), or one that could not read the chat, tells nothing, and the window
+waits for that work again. `pc_status` marks idle work, the holder's answers list it apart, and
+the window that opens says it goes on beside it. Idle work that a reading then finds busy counts
+as work that ran beside the measurement; work that stayed idle shows in the report on a line of its
+own (`idle` in the history, Other chats' idle work in the Reservations window) and never marks the
+measurement. Inside WSL only the virtual machine's load tells whether such work woke while the
+window was open, since nothing reads there during a measurement.
 
 Reservations take turns, first come first served: the first holds the computer, the others wait
 in line, and their own chats' commands wait for the first like everyone else's. A chat that
@@ -287,13 +312,15 @@ reservation:
   or to the one it makes next in the same reply, since a chat clears the computer before it
   reserves as often as after;
 - other chats' work that ran while it was open anyway (work left running, commands of a chat
-  whose gate could not run), and the processes that waited for it to end, by chat and program;
+  whose gate could not run, idle work a reading then found busy), the idle work it opened beside
+  that stayed idle (`idle`), and the processes that waited for it to end, by chat and program;
 - the computer while it was open, read every two seconds: CPU on average and at most, the
   measuring chat's processes apart from everything else, memory in use and free, and the busiest
   and largest other programs with whose they are;
 - whether the measurement ran beside other heavy work, whoever ran it (requested 2026-11-24):
   the Measurement line reads `clean`, or `ran beside other heavy work` with each thing that did:
-  another chat's command or MCP tool call that ran while the window was open, and every owner
+  another chat's command or MCP tool call that ran while the window was open, unless it stayed
+  idle, and every owner
   whose processes used at least a whole core and 5% of the computer in two readings or more
   (`machine::Window::beside`): a chat's programs, the Claude app, Claude Code or Codex outside
   Agent Studio, Agent Studio, the system, WSL or the user's own. The history keeps it as
