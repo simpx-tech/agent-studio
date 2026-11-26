@@ -1528,3 +1528,180 @@ async fn reserving_again_soon_after_releasing_asks_for_one_reservation_a_series(
     let next = broker.reserve("run-bench-2", "bench", "After the fix", None);
     assert!(!next.contains("whole series"), "{next}");
 }
+
+/// Twenty gigabytes free on thirty-two cores.
+fn twenty_free() -> Option<machine::Reading> {
+    Some(reading(Instant::now(), 0, 32, 20 << 30, vec![]))
+}
+
+#[tokio::test]
+async fn work_holds_the_memory_it_was_granted_and_a_run_beside_it_needs_room() {
+    let folder = tempfile::tempdir().unwrap();
+    let history = folder.path().join("reservations").join("history.jsonl");
+    let broker = broker_with(vec![], Some(history));
+    broker.read_with(twenty_free);
+    broker.run_started("run-ui", "ui");
+    // A build is granted what is left after a few gigabytes, and its script reads it from the
+    // file its chat's environment names (requested 2026-11-26).
+    let candidate = r".\Tools\Build.ps1 -Candidate";
+    assert!(broker
+        .gate("ui", candidate, Some("claude:build"), "pc_wait")
+        .is_none());
+    let (build, built) = command("build", candidate);
+    broker.tool("run-ui", &build);
+    let file = grant_file(folder.path(), "ui");
+    let grant: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(grant["bytes"], 17u64 << 30);
+    assert_eq!(grant["weight"], "build");
+    let granted = broker.snapshot().grants;
+    assert_eq!(granted.len(), 1);
+    assert_eq!(
+        (granted[0].conversation_id.as_str(), granted[0].weight),
+        ("ui", "build")
+    );
+    // A game run beside it waits: the build has not taken its memory yet, and holds it.
+    broker.run_started("run-art", "art");
+    let game = r#"& "D:\p\Tools\Run-Game.ps1" -Mode net"#;
+    let reason = broker.gate("art", game, None, "pc_wait").unwrap();
+    assert!(
+        reason.starts_with(
+            "This run did not start: 1 build runs on this computer now (the chat \"Fix inventory UI\""
+        ),
+        "{reason}"
+    );
+    assert!(
+        reason.contains(
+            "a game or test run needs 8.0 GB of free memory (commit) and 3.0 GB is free beside the 17.0 GB held for the work started before it"
+        ),
+        "{reason}"
+    );
+    assert!(
+        reason.contains("returns once there is room for it"),
+        "{reason}"
+    );
+    let waiting = broker.snapshot().slots;
+    assert_eq!(
+        (waiting[0].conversation_id.as_str(), waiting[0].weight),
+        ("art", "run")
+    );
+    // A dry run builds nothing and never waits; a build of a few files needs room of its own.
+    assert!(broker
+        .gate(
+            "bench",
+            r".\Tools\Build.ps1 -Candidate -WhatIf",
+            None,
+            "pc_wait"
+        )
+        .is_none());
+    let check = broker
+        .gate("bench", r".\Tools\Build.ps1 -Check", None, "pc_wait")
+        .unwrap();
+    assert!(
+        check.contains(
+            "a build of a few files needs 4.0 GB of free memory (commit) and 3.0 GB is free"
+        ),
+        "{check}"
+    );
+    // The grant ends once its call ended, the chat compiles no more and the build had time to
+    // grow; its file goes with it.
+    broker.tool("run-ui", &built);
+    {
+        let mut state = broker.lock();
+        let now = Instant::now();
+        assert!(!broker.settle_grants(&mut state, None, None, now));
+        assert!(broker.settle_grants(&mut state, None, None, now + builds::RAMP));
+    }
+    assert!(!file.exists());
+    assert!(broker.snapshot().grants.is_empty());
+    // Then the run starts, granted what it needs.
+    assert!(broker.gate("art", game, None, "pc_wait").is_none());
+    let run: Value =
+        serde_json::from_slice(&std::fs::read(grant_file(folder.path(), "art")).unwrap()).unwrap();
+    assert_eq!(
+        (run["weight"].as_str(), run["bytes"].as_u64()),
+        (Some("run"), Some(8 << 30))
+    );
+    assert!(broker
+        .snapshot()
+        .slots
+        .iter()
+        .all(|s| s.conversation_id != "art"));
+    // A grant whose work never started ends too, and a reply that ends ends its work's grant.
+    {
+        let mut state = broker.lock();
+        let now = Instant::now();
+        assert!(broker.settle_grants(&mut state, None, None, now + GRANT + builds::RAMP));
+    }
+    assert!(broker.snapshot().grants.is_empty());
+}
+
+#[tokio::test]
+async fn the_window_names_the_chats_waiting_for_the_computer() {
+    let broker = broker_with(vec![], None);
+    broker.run_started("run-bench", "bench");
+    broker.reserve("run-bench", "bench", "Frame timing", None);
+    broker.run_started("run-ui", "ui");
+    let waiting = {
+        let broker = broker.clone();
+        tokio::spawn(async move { broker.wait("ui", &CancellationToken::new(), &quiet).await })
+    };
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(!waiting.is_finished());
+    // Its row in the sidebar marks it (requested 2026-11-26).
+    assert_eq!(broker.snapshot().waiting, ["ui"]);
+    broker.release("bench");
+    let free = waiting.await.unwrap().unwrap();
+    assert!(free.starts_with("The computer is free again"), "{free}");
+    assert!(broker.snapshot().waiting.is_empty());
+}
+
+#[tokio::test]
+async fn a_chat_in_line_for_its_turn_waits_for_its_turn_while_another_measures() {
+    let broker = broker_with(vec![], None);
+    let key = named::key("github.com/simpx-tech/bluevox");
+    broker.run_started("run-bench", "bench");
+    broker.take_turn(
+        "run-bench",
+        "bench",
+        &key,
+        "github.com/simpx-tech/bluevox",
+        true,
+        "Final pipeline and push",
+    );
+    broker.run_started("run-ui", "ui");
+    broker.take_turn(
+        "run-ui",
+        "ui",
+        &key,
+        "github.com/simpx-tech/bluevox",
+        true,
+        "Final pipeline and push",
+    );
+    // A third chat measures, and holds other chats' commands meanwhile.
+    broker.run_started("run-perf", "perf");
+    broker.reserve("run-perf", "perf", "Frame timing", None);
+    let (told, tell) = heard();
+    let waiting = {
+        let broker = broker.clone();
+        tokio::spawn(async move { broker.wait("ui", &CancellationToken::new(), &tell).await })
+    };
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(!waiting.is_finished());
+    // Its wait is for its turn, as its time report says, and no wait the measurement caused.
+    assert_eq!(*told.lock().unwrap(), [None, Some("turn")]);
+    assert!(broker.snapshot().waiting.is_empty());
+    assert_eq!(broker.snapshot().reservations[0].held, 0);
+    // Its turn comes while the measurement still holds the computer: from then on it waits for
+    // the computer, whose window its commands could not run beside, and hears once both are its.
+    broker.release_turns("bench", Some(&key));
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(!waiting.is_finished());
+    assert_eq!(*told.lock().unwrap(), [None, Some("turn"), Some("held")]);
+    broker.release("perf");
+    let came = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(came.starts_with("Your turn came after"), "{came}");
+}

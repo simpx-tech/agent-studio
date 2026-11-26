@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { mockDesktop } from './desktop-helper';
 import { initialWorkspace } from '../src/lib/domain';
+import { chooseTestFolder } from './folder-helper';
 
 // This computer's reservations for measurements (src-tauri/src/reservations.rs): the window
 // shows the one holding it now and every one its history kept.
@@ -400,4 +401,119 @@ test('Settings sets how long a measurement waits for a lull before it holds othe
   await expect
     .poll(() => page.evaluate(() => localStorage.getItem('test-pc-settings')))
     .toBe('{"lullMinutes":10}');
+});
+
+// Requested 2026-11-26: the gauge is always in the sidebar's footer, a chat's row says where it
+// stands with this computer (reserving it, or waiting for it, a build slot or its turn) as the
+// monitoring pulse marks a monitor, the running reply of a chat that waits says so in a card of
+// its own, and the Reservations window opens again after a click on its backdrop closed it.
+test('rows and the running reply show who reserves and who waits, and the gauge always opens the window', async ({
+  page,
+}) => {
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  const gauge = page.locator('.pc-button');
+  await expect(gauge).toBeVisible();
+  await expect(gauge).toHaveAttribute('title', 'Reservations');
+  await expect(gauge).not.toHaveClass(/pc-reserved/);
+
+  // A chat whose reply runs.
+  await chooseTestFolder(page);
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('Waiting chat');
+  await page.getByRole('button', { name: 'Send message', exact: true }).click();
+  await expect
+    .poll(() => page.evaluate(() => Object.keys((window as any).capabilityRuns ?? {}).length))
+    .toBe(1);
+  const me = await page.evaluate(
+    () =>
+      JSON.parse(localStorage.getItem('test-workspace')!).conversations.find(
+        (c: any) => c.title === 'Waiting chat',
+      )?.id as string,
+  );
+  expect(me).toBeTruthy();
+  const send = (snapshot: object) =>
+    page.evaluate(
+      (snapshot) => (window as any).emitTauriEvent('studio-pc', snapshot),
+      { reservations: [], turns: [], slots: [], waiting: [], grants: [], ...snapshot },
+    );
+  const row = page.locator('.conversation-item', { hasText: 'Waiting chat' });
+  const card = page.locator('.hold-card');
+
+  // Another chat reserves the computer and this one waits for it.
+  await send({
+    reservations: [
+      {
+        id: 'pc-1',
+        conversationId: crypto.randomUUID(),
+        purpose: 'Frame timing',
+        phase: 'draining',
+        askedAt: Date.now(),
+        waitingFor: [],
+        held: 1,
+      },
+    ],
+    waiting: [me],
+  });
+  await expect(row.locator('.conversation-held')).toBeVisible();
+  await expect(row).toHaveAttribute(
+    'title',
+    /Waiting for the computer: Another chat reserved it: Frame timing/,
+  );
+  await expect(card).toHaveText(
+    /^\s*Waiting for the computer\s*Another chat reserved it: Frame timing\s*$/,
+  );
+  await expect(page.locator('.live-label')).toHaveText(/Waiting for the computer/);
+  await expect(gauge).toHaveClass(/pc-reserved/);
+
+  // Its build waits for a slot: the card says how long it has waited.
+  await send({
+    slots: [
+      { conversationId: me, label: '`Tools/Build.ps1`', weight: 'build', since: Date.now() - 65_000 },
+    ],
+  });
+  await expect(card.locator('strong')).toHaveText('Waiting for a build slot');
+  await expect(card).toContainText('First in line · Tools/Build.ps1');
+  await expect(card.locator('.hold-time')).toHaveText(/^1m/);
+  await expect(row.locator('.conversation-held')).toBeVisible();
+
+  // It reserves the computer itself and measures: the gauge in the accent, on its row too.
+  await send({
+    reservations: [
+      {
+        id: 'pc-2',
+        conversationId: me,
+        purpose: 'Frame timing',
+        phase: 'open',
+        askedAt: Date.now(),
+        openedAt: Date.now(),
+        waitingFor: [],
+        held: 0,
+      },
+    ],
+  });
+  await expect(row.locator('.conversation-reserving.measuring')).toBeVisible();
+  await expect(row.locator('.conversation-held')).toHaveCount(0);
+  await expect(card).toHaveCount(0);
+
+  // Nothing reserved: no mark, and the gauge stays, quiet.
+  await send({});
+  await expect(row.locator('.conversation-reserving')).toHaveCount(0);
+  await expect(gauge).not.toHaveClass(/pc-reserved/);
+  await expect(gauge).toHaveAttribute('title', 'Reservations');
+
+  // The window opens from it, closes on its backdrop, and opens again.
+  const dialog = page.getByRole('dialog', { name: 'Reservations' });
+  await gauge.click();
+  await expect(dialog).toBeVisible();
+  await page.mouse.click(3, 3);
+  await expect(dialog).toHaveCount(0);
+  await gauge.click();
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(dialog).toHaveCount(0);
+
+  await page.evaluate(() => {
+    const run = (Object.values((window as any).capabilityRuns) as any[]).at(-1);
+    run.finish('complete');
+  });
 });

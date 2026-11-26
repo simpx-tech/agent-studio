@@ -195,35 +195,61 @@ or its reply ends.
 tools, goes back to the CLI through the run's own channel (`Session::rx`), so a long wait never
 holds up the reply's loop, and Stop ends it.
 
-## Build slots
+## Build slots and memory grants
 
 Several heavy builds at once compete for memory before they compete for the cores: with three or
 four chats building, free commit fell to 3.5 GB on 2026-11-24 and a shell could not start a
 thread. A cap inside one project's build script sees none of the others, so the broker counts every
 build on the computer and holds a chat's build at its gate while another would not fit
-(`reservations/builds.rs`):
+(`reservations/builds.rs`). Reading the free memory once, as a build asked to start, was not enough
+(2026-11-26): a build that started with 6.1 GB of commit free lost a compiler to an internal error
+when other chats' builds and games, started after it, took the rest, and one build hung for 94
+minutes on a full page file while its chat held a landing turn. So what starts is **granted** its
+memory, which the broker holds for it until it ends.
 
-- **A build** is recognized from the command a chat asks to run (`builds::is_build`): Unreal's
-  `Build.bat`, `RunUAT` and UnrealBuildTool, a project's own build script (a `.ps1`, `.bat`,
-  `.cmd` or `.sh` script whose name starts with "build"), `cargo build`, `test`, `check` and
-  `clippy`, `dotnet build` and `test`, `cmake --build`, MSBuild, Ninja, make and Tauri's
-  release build, through a shell (`pwsh -File`, `bash -lc`) too. The same gate as reservations
-  asks, Claude's `PreToolUse` callback and Codex's `--pc-gate` hook.
-- **What builds now** is every chat call that builds while it runs (`Call::build`) and, from the
-  compilers and linkers on the computer (`cl`, `clang`, `rustc`, `link` and the like), every
-  other build, one for each driver they run under (UnrealBuildTool, `dotnet`, `cargo`,
-  MSBuild…): a chat's build left in the background, a Claude app or terminal session's, or one the
-  user started by hand.
-- **Room** is sized from bluevox's measurements that day: a compiler of its module commits 2.5 to
-  3.5 GB, one build alone ran 8 compilers with 17 GB free, and two heavy builds together took free
-  commit from 17 GB to 2.3. A build always starts alone. Beside others, one starts while fewer
-  builds run than the cores allow (one for each eight) and at least 10 GB of commit stays free
-  (`builds::BESIDE_FREE`), and only once the last build that started had 30 seconds to take its
-  memory (`builds::RAMP`).
-- **Waiting** is first come first served. A refused build's chat waits in `pc_wait`; when a build
-  ends, or the computer's two-second look finds room, the slot is kept for the first in line for two
-  minutes, and its `pc_wait` returns so that it runs the build again. While a measurement holds the
-  computer, only the measuring chat gets a slot. A chat's place in line ends with its reply.
+- **What a command asks** is read from it (`builds::weight`): a **build** (Unreal's `Build.bat`,
+  `RunUAT` and UnrealBuildTool, a project's own build script, a `.ps1`, `.bat`, `.cmd` or `.sh`
+  script whose name starts with "build", `cargo build`, `test`, `check` and `clippy`, `dotnet build`
+  and `test`, `cmake --build`, MSBuild, Ninja, make and Tauri's release build, through a shell such
+  as `pwsh -File` or `bash -lc` too); a **build of a few files** (a build script run with `-Check` or
+  `-SingleFile`, which compiles the files a change touched and links nothing); or a **run**, a game,
+  an editor or a test run of an engine (`UnrealEditor` itself, or a project's `Run-Game`, `Run-Net`,
+  `Run-Tests` or `Run-Editor` script). A build script's dry run (`-WhatIf`) asks nothing, and of
+  several commands on one line the heaviest counts. The same gate as reservations asks, Claude's
+  `PreToolUse` callback and Codex's `--pc-gate` hook.
+- **What builds now** is every chat call that builds while it runs (`Call::weight`, a build of a
+  few files apart, which takes no slot) and, from the compilers and linkers on the computer (`cl`,
+  `clang`, `rustc`, `link` and the like), every other build, one for each driver they run under
+  (UnrealBuildTool, `dotnet`, `cargo`, MSBuild…): a chat's build left in the background, a Claude app
+  or terminal session's, or one the user started by hand.
+- **Available memory** is the free commit less what the grants of the work started before have not
+  taken yet: each grant less what its chat's processes use now (`available`), so a build that has
+  not grown yet, or a game run between its loads, still keeps its room.
+- **Room** is sized from bluevox's measurements: a compiler of its module commits 2.5 to 3.5 GB
+  (`builds::COMPILER`), one build alone ran 8 compilers with 17 GB free, and two heavy builds
+  together took free commit from 17 GB to 2.3. A build always starts alone. Beside others, one
+  starts while fewer builds run than the cores allow (one for each eight), at least 10 GB stays
+  available (`builds::BESIDE_FREE`), and the last build that started had 30 seconds to take its
+  memory (`builds::RAMP`). A build of a few files needs 4 GB available (`LIGHT_FREE`) and a run 8 GB
+  (`RUN_FREE`), unless no grant holds memory; neither takes a slot nor waits for the last build to
+  grow, nor waits behind the builds in line.
+- **A grant** (`builds::grant`): a build gets what is available less 3 GB left to the rest of the
+  computer (`GRANT_KEEP`), between one compiler and eight (`GRANT_MOST`); a build of a few files up to
+  two compilers; a run the 8 GB it needs. The broker writes it to the chat's file in app data,
+  `reservations/grants/<chat>.json` (`{"bytes": …, "weight": "build" | "light" | "run",
+  "grantedAt": …}`), which every Windows chat CLI's commands find by the `AGENT_STUDIO_PC_GRANT`
+  variable (`chat_env`, beside `AGENT_STUDIO_PC_CHAT`, the chat's id), so that a build script runs as
+  many compilers as its grant holds: bluevox's `Tools/Build.ps1` runs one for each 3.5 GB of it.
+  A grant ends once its call ended (or never started within two minutes), the chat's compilers
+  stopped, since a build left in the background goes on after its call, and 30 seconds passed since
+  it was granted (`settle_grants`); its file goes with it, and the app's start clears them all. The
+  window shows the grants held (`grants` in `pc_state`).
+- **Waiting** is first come first served among builds; a run or a build of a few files behind a
+  build that waits starts when there is room for it. A refused chat waits in `pc_wait`; when work
+  ends, or the computer's two-second look finds room, a slot, or room for a run, is kept for the
+  first that fits for two minutes, with the memory it will be granted set aside, and its `pc_wait`
+  returns so that it runs its command again. While a measurement holds the computer, only the
+  measuring chat gets a slot. A chat's place in line ends with its reply.
 
 The wait shows in the reply's Time report as **Waiting for a build slot** (`slot`, On hold), apart
 from the build's own time, which before counted the wait inside a build script as compiling.
@@ -245,6 +271,21 @@ other chats' commands run. It ends with `pc_release` and its `name` or `landing`
 that took it ends; `pc_release` alone releases a chat's named reservations only when it holds no
 reservation of the computer. `pc_status` lists each name with its holder and those waiting, and the
 history keeps each turn (`"kind": "turn"`).
+
+## Leases: what a chat holds while it stays open
+
+A chat's work may hold something of a project's for longer than a reply, such as bluevox's claim on
+a built worktree of its pool, which its next tasks build in (requested 2026-11-26: "Agent Studio
+knows when a chat is closed"). Every Windows chat CLI starts with a folder of its own in its
+environment, `AGENT_STUDIO_LEASE` (app data `leases/<chat>`, `src-tauri/src/leases.rs`), where a
+project's scripts write what the chat holds: bluevox's `Tools/Claim-Worktree.ps1` leaves a lease file
+there beside its claim, and treats a claim whose lease file is gone as no claim. Agent Studio
+removes the folder when the chat is closed, moved to History or deleted (`release_conversation` with
+`closed`, which a Viewer sends through the relay as its `release` job's `closed`), and as the window
+starts for every chat the workspace no longer holds (`prune_leases`), a chat deleted while the
+computer was away. The app's start, which moves saved chats to History, closes none, and neither
+does a History move that arrives by sync. Nothing else in Agent Studio reads a lease: what it means
+is the project's.
 
 ## Coordinating with other chats
 
@@ -340,18 +381,38 @@ reservation:
 A reply waiting in `pc_wait` counts that time as **Waiting for the computer** in its time ledger
 (`held`, in the On hold family of the Time report), or as **Waiting for a build slot** (`slot`) or
 **Waiting for its turn** (`turn`), as the broker tells the ledger what it waits for
-(`Ledger::held_for`). The release's record in Work history carries the verdict as facts
+(`Ledger::held_for`). A chat in line for a turn waits for its turn even while a measurement holds
+the computer, and the measurement's report leaves its wait out; once its turn comes, it waits for
+the computer (until 2026-11-26 the hold came first, and 43 of one chat's 172 minutes in line for a
+landing turn read as held). The release's record in Work history carries the verdict as facts
 (Measurement, and Ran beside with each thing on a line), which the Time report lists below the
 time on hold, response by response, with how many of them ran beside other work.
 
 ## In the window
 
-While the computer is reserved, or chats' builds wait for a slot or chats for a turn, a gauge in
-the sidebar's footer, beside Connections, names the chat and its purpose on hover with where it
-stands (waiting for a lull, for commands or for chats to hand over, measuring, chats waiting,
-reservations in line, builds and turns waiting). It is in the warning colour while other
-chats' work finishes and in the accent while the measurement runs. The window follows
-reservations through `studio-pc` events and `pc_state`; nothing about them is saved or synced.
+A gauge in the sidebar's footer, beside Connections, is always there on the desktop (requested
+2026-11-26; until then it showed only while something waited) and opens the Reservations window. While
+the computer is reserved, or chats' builds wait for a slot or chats for a turn, it names the chat and
+its purpose on hover with where it stands (waiting for a lull, for commands or for chats to hand
+over, measuring, chats waiting, reservations in line, builds and turns waiting), in the warning
+colour while other chats' work finishes and in the accent while the measurement runs; otherwise it
+is quiet and says Reservations. The window follows reservations through `studio-pc` events and
+`pc_state`; nothing about them is saved or synced.
+
+Each chat's row in the sidebar marks where it stands with this computer, beside its running time as
+the monitoring pulse marks a monitor (`pcChatState`, requested 2026-11-26): the gauge while it
+reserves the computer, in the accent once it measures; an hourglass in the warning colour while it
+waits for the computer another chat reserved, a place in line to reserve it, a build slot, room for
+a game or test run, or its turn (`waiting` in `pc_state` names the chats waiting in `pc_wait` for the
+computer); a quiet flag while it holds a landing turn. Its hover and accessible name say which. And
+the running reply of a chat that waits shows a card of its own under its heading, in the warning
+colour, with what it waits for, behind whom, and how long it has waited where that is known
+(`pcWaitCard`, `MessageView`'s `onHold`); its heading's live label says the same in place of
+Responding.
+
+The Reservations window and the Time report close on a click on their backdrop as they do on Escape
+and their close button, through the page's own close: until 2026-11-26 the backdrop closed the
+`<dialog>` alone, the page went on holding it open, and the next click opened nothing.
 
 The gauge opens the Reservations window (`ReservationsDialog.svelte`), which `/reservations` also
 opens at any time. It shows what waits In line (each name with its holder and the chats waiting

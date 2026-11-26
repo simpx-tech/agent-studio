@@ -296,4 +296,14 @@ test('a reply’s time opens as a report of its steps, sub-agents and calls, and
   );
   await report.getByRole('button', { name: 'Close time report' }).click();
   await expect(report).toHaveCount(0);
+  // A click on its backdrop closes it too, and the toolbar opens it again: until 2026-11-26 it
+  // stayed shut for good after one, the page still holding it open.
+  await page.getByRole('button', { name: 'Time report', exact: true }).click();
+  await expect(report).toBeVisible();
+  await page.mouse.click(3, 3);
+  await expect(report).toHaveCount(0);
+  await page.getByRole('button', { name: 'Time report', exact: true }).click();
+  await expect(report).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(report).toHaveCount(0);
 });

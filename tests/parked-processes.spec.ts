@@ -20,9 +20,12 @@ async function recordReleases(page: Page) {
       native = w.__TAURI_INTERNALS__,
       invoke = native.invoke;
     w.released = [];
+    w.closedChats = [];
     native.invoke = async (command: string, args: any) => {
       if (command === 'release_conversation') {
         w.released.push(args.conversationId);
+        // A closed chat lets go of what its work held too (src-tauri/src/leases.rs).
+        if (args.closed) w.closedChats.push(args.conversationId);
         return;
       }
       return invoke(command, args);
@@ -30,6 +33,7 @@ async function recordReleases(page: Page) {
   });
 }
 const released = (page: Page) => page.evaluate(() => (window as any).released as string[]);
+const closed = (page: Page) => page.evaluate(() => (window as any).closedChats as string[]);
 const chatId = (page: Page, title: string) =>
   page.evaluate(
     (title) =>
@@ -91,13 +95,21 @@ test('moving a chat to History or deleting it releases its process, and nothing 
     .getByRole('button', { name: 'Delete conversation', exact: true })
     .click();
   await expect.poll(() => released(page)).toEqual([row, toolbar, deleted]);
+  // Each of them closed the chat: what its work held goes with it.
+  expect(await closed(page)).toEqual([row, toolbar, deleted]);
 
-  // Starting the app again moves saved chats to History without closing anything.
+  // Starting the app again moves saved chats to History without closing anything, and lets go
+  // only of what chats deleted meanwhile held: every saved chat keeps its own.
+  const kept = (await chatId(page, 'Chat left open'))!;
   await page.reload();
   await page.getByRole('tab', { name: /^History/ }).click();
   await expect(page.getByRole('button', { name: 'Chat left open', exact: true })).toBeVisible();
   await page.waitForTimeout(300);
   expect(await released(page)).toEqual([]);
+  const pruned = await page.evaluate(() => (window as any).prunedLeases as string[][]);
+  expect(pruned).toHaveLength(1);
+  expect(pruned[0]).toEqual(expect.arrayContaining([row, toolbar, kept]));
+  expect(pruned[0]).not.toContain(deleted);
 });
 
 test('a chat deleted on another device releases its process here, but a History move from sync does not', async ({
@@ -270,7 +282,7 @@ test('the Viewer asks the computer running a chat to release it when moved to Hi
     await expect.poll(() => received.filter((job) => job.method === 'release').length).toBe(1);
     const job = received.find((job) => job.method === 'release');
     expect(job.target).toBe(host);
-    expect(job.args).toEqual({ conversationId, connectionId: connection });
+    expect(job.args).toEqual({ conversationId, connectionId: connection, closed: true });
     expect(received.filter((job) => job.method === 'run')).toHaveLength(0);
     expect(workerError).toBeUndefined();
   } finally {

@@ -40,20 +40,128 @@ export const pcTurnSchema = z.object({
   grantedAt: z.number().optional(),
 });
 export type PcTurn = z.infer<typeof pcTurnSchema>;
-/** A chat's build waiting for a slot beside the builds running. */
+/** What a chat's command asks of the computer: a build, a build of a few files, or a run. */
+const pcWeightSchema = z.enum(['build', 'light', 'run']).catch('build');
+/** A chat's build waiting for a slot beside the builds running, or its game or test run for room. */
 export const pcSlotSchema = z.object({
   conversationId: z.string(),
   label: z.string(),
+  weight: pcWeightSchema,
   since: z.number(),
   granted: z.boolean().optional(),
 });
 export type PcSlot = z.infer<typeof pcSlotSchema>;
+/** Memory a chat's build or run was granted as it started, held until it ends. */
+export const pcGrantSchema = z.object({
+  conversationId: z.string(),
+  weight: pcWeightSchema,
+  bytes: z.number(),
+  since: z.number(),
+});
+export type PcGrant = z.infer<typeof pcGrantSchema>;
 export const pcSnapshotSchema = z.object({
   reservations: z.array(pcReservationSchema),
   turns: z.array(pcTurnSchema).catch([]),
   slots: z.array(pcSlotSchema).catch([]),
+  /** Chats waiting in pc_wait for a reservation of the computer to end. */
+  waiting: z.array(z.string()).catch([]),
+  grants: z.array(pcGrantSchema).catch([]),
 });
 export type PcSnapshot = z.infer<typeof pcSnapshotSchema>;
+
+/**
+ * Where a chat stands with this computer, which its row in the sidebar marks beside its running
+ * time (requested 2026-11-26): it reserves the computer (`measuring` once its window opened), or
+ * holds a named reservation such as a landing turn, or waits, for the computer another chat
+ * reserved, a build slot, room for a game or test run, or its turn. Waiting shows before holding.
+ */
+export type PcChatState =
+  | { kind: 'reserving'; measuring: boolean; title: string }
+  | { kind: 'waiting'; title: string }
+  | { kind: 'turn'; title: string };
+
+const turnName = (turn: PcTurn) => (turn.landing ? 'the landing turn' : turn.name);
+
+export function pcChatState(
+  snapshot: Pick<PcSnapshot, 'reservations' | 'turns' | 'slots' | 'waiting'>,
+  conversationId: string,
+  title: (conversationId: string) => string,
+): PcChatState | undefined {
+  const reserved = snapshot.reservations.findIndex((r) => r.conversationId === conversationId);
+  if (reserved === 0) {
+    const first = snapshot.reservations[0];
+    return {
+      kind: 'reserving',
+      measuring: first.phase === 'open',
+      title: `Reserving the computer: ${first.purpose}`,
+    };
+  }
+  const wait = pcWaitCard(snapshot, conversationId, title);
+  if (wait) return { kind: 'waiting', title: [wait.heading, wait.detail].join(': ') };
+  const held = snapshot.turns.find(
+    (turn) => turn.conversationId === conversationId && turn.grantedAt != null,
+  );
+  if (held) return { kind: 'turn', title: `Holding ${turnName(held)}` };
+  return undefined;
+}
+
+/**
+ * What a chat waits for now, as the card in its running reply says it (requested 2026-11-26:
+ * "make the waiting for the computer card inside the chat itself more visible"): the computer
+ * another chat reserved, a place in line to reserve it, a build slot, room for a game or test
+ * run, or its turn at a named reservation. `since` is when the wait began, where it is known.
+ */
+export function pcWaitCard(
+  snapshot: Pick<PcSnapshot, 'reservations' | 'turns' | 'slots' | 'waiting'>,
+  conversationId: string,
+  title: (conversationId: string) => string,
+): { heading: string; detail: string; since?: number } | undefined {
+  const [first] = snapshot.reservations;
+  const line = snapshot.reservations.findIndex((r) => r.conversationId === conversationId);
+  if (line > 0)
+    return {
+      heading: 'In line to reserve the computer',
+      detail: `${line === 1 ? 'Next' : `${line} ahead`}, behind ${title(first.conversationId)}: ${first.purpose}`,
+      since: snapshot.reservations[line].askedAt,
+    };
+  if (first && snapshot.waiting.includes(conversationId))
+    return {
+      heading: 'Waiting for the computer',
+      detail: `${title(first.conversationId)} reserved it: ${first.purpose}`,
+    };
+  const slot = snapshot.slots.find((s) => s.conversationId === conversationId);
+  if (slot) {
+    const run = slot.weight === 'run';
+    const ahead = snapshot.slots.findIndex((s) => s === slot);
+    return {
+      heading: slot.granted
+        ? run
+          ? 'Room for its run is free'
+          : 'A build slot is free'
+        : run
+          ? 'Waiting for room for a game or test run'
+          : 'Waiting for a build slot',
+      detail: [
+        ahead > 0 ? `${ahead} ahead in line` : 'First in line',
+        slot.label.replace(/`/g, ''),
+      ].join(' · '),
+      since: slot.since,
+    };
+  }
+  const turn = snapshot.turns.find((t) => t.conversationId === conversationId && t.grantedAt == null);
+  if (turn) {
+    const key = (t: PcTurn) => (t.landing ? `landing:${t.name}` : t.name.toLowerCase());
+    const holder = snapshot.turns.find((t) => key(t) === key(turn) && t.grantedAt != null);
+    return {
+      heading: 'Waiting for its turn',
+      detail: holder
+        ? `${title(holder.conversationId)} holds ${turnName(turn)}: ${holder.purpose}`
+        : `${turnName(turn)}`,
+      since: turn.askedAt,
+    };
+  }
+  return undefined;
+}
 
 /** Named reservations by name, each with its holder first, in the order they were asked for. */
 export function pcTurnGroups(turns: readonly PcTurn[]): { name: string; turns: PcTurn[] }[] {

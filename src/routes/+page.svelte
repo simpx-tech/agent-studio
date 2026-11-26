@@ -105,12 +105,16 @@
     History as HistoryIcon,
     SearchX,
     Gauge,
+    Hourglass,
+    Flag,
     Columns3,
   } from '@lucide/svelte';
   import {
     pcBusy,
+    pcChatState,
     pcQueueTitle,
     pcReservationTitle,
+    pcWaitCard,
     type PcReservation,
     type PcSlot,
     type PcTurn,
@@ -166,6 +170,7 @@
     abandonedReplies,
     releaseConversation,
     closeConversation,
+    pruneLeases,
     signIn,
     runInConsole,
     openLink,
@@ -2124,8 +2129,19 @@
   // Named reservations, such as a repository's landing turn, and builds waiting for a slot.
   let pcTurns = $state<PcTurn[]>([]);
   let pcSlots = $state<PcSlot[]>([]);
+  // Chats waiting in pc_wait for a reservation of the computer to end.
+  let pcWaiting = $state<string[]>([]);
   const pcChatTitle = (id: string) =>
     workspace.conversations.find((c) => c.id === id)?.title || 'Another chat';
+  // Where each chat stands with this computer, which its sidebar row and its running reply show.
+  const pcNow = $derived({
+    reservations: pcReservations,
+    turns: pcTurns,
+    slots: pcSlots,
+    waiting: pcWaiting,
+  });
+  // What the open chat waits for on this computer, a card in its running reply.
+  const activeHold = $derived(active ? pcWaitCard(pcNow, active.id, pcChatTitle) : undefined);
   const pcShown = $derived(
     pcBusy({ reservations: pcReservations, turns: pcTurns, slots: pcSlots }),
   );
@@ -2980,7 +2996,7 @@
           true,
         ).catch(() => {});
       delete queued[conversation.id];
-      await releaseConversation(conversation.id, conversation.settings.connectionId).catch(
+      await releaseConversation(conversation.id, conversation.settings.connectionId, true).catch(
         () => {},
       );
       forgetDraft(draftKey.chat(conversation.id));
@@ -3392,6 +3408,7 @@
       pcReservations = snapshot.reservations;
       pcTurns = snapshot.turns;
       pcSlots = snapshot.slots;
+      pcWaiting = snapshot.waiting;
     });
     const stopUsageRefresh = watchUsageRefresh(refreshUsageConnection);
     const stopNotificationView = watchNotificationView(
@@ -3613,6 +3630,9 @@
         draftSettings = settingsFor(workspace.preferences);
         await loadSavedDrafts();
         loaded = true;
+        // What chats deleted while this computer was away held here goes (src-tauri/src/leases.rs).
+        // Chats moved to History as the app starts are not closed, and keep theirs.
+        void pruneLeases(workspace.conversations.map((c) => c.id)).catch(() => {});
         // The baseline of this session: saved chats are read history, however they ended.
         noteFinishedChats();
         if (!continueScratch()) newChat();
@@ -5427,7 +5447,7 @@
   function releaseDeleted(ids: Iterable<string>) {
     for (const id of ids) {
       forgetChat(id);
-      void releaseConversation(id).catch(() => {});
+      void releaseConversation(id, undefined, true).catch(() => {});
     }
   }
   // Moves a conversation to History. The open chat gives way to the Active conversation listed
@@ -5749,7 +5769,7 @@
         await cancelRun(runId, reply?.settings?.connectionId ?? chat.settings.connectionId, true);
       if (session !== workspaceSession) return;
       delete queued[chat.id];
-      await releaseConversation(chat.id, chat.settings.connectionId).catch(() => {});
+      await releaseConversation(chat.id, chat.settings.connectionId, true).catch(() => {});
       await cancelTitle(chat.id).catch(() => {});
       if (session !== workspaceSession) return;
       workspace.conversations = workspace.conversations.filter((c) => c.id !== chat.id);
@@ -6376,7 +6396,7 @@
         await cancelRun(runId, reply?.settings?.connectionId ?? target.settings.connectionId, true);
       if (session !== workspaceSession) return;
       delete queued[target.id];
-      await releaseConversation(target.id, target.settings.connectionId).catch(() => {});
+      await releaseConversation(target.id, target.settings.connectionId, true).catch(() => {});
       if (session !== workspaceSession) return;
       await cancelTitle(target.id).catch(() => {});
       if (session !== workspaceSession) return;
@@ -7974,12 +7994,14 @@
     ? 0
     : runningMonitors(c.id)}{@const plan =
     runningReply && runningPlanProgress(c.messages)}{@const snoozed =
-    snoozesByChat.has(c.id) && !!snoozeOf(c)}{@const notes = rowNotes(
-    finished,
-    monitors,
-    plan,
-    snoozed,
-  )}{@const uses = rowUses(c, runningReply)}{@const compared = comparisonsByChat.get(c.id)}{@const current =
+    snoozesByChat.has(c.id) && !!snoozeOf(c)}{@const pc = pcChatState(
+    pcNow,
+    c.id,
+    pcChatTitle,
+  )}{@const notes = [
+    ...rowNotes(finished, monitors, plan, snoozed),
+    ...(pc ? [pc.title] : []),
+  ]}{@const uses = rowUses(c, runningReply)}{@const compared = comparisonsByChat.get(c.id)}{@const current =
     view === 'chat' &&
     (activeId === c.id || (!!activeComparison && leadChat(activeComparison) === c.id))}
   <div class="conversation-row" data-order={c.id}>
@@ -8035,7 +8057,21 @@
         />{:else if pinned}<MessageCircle size={13} aria-hidden="true" />{/if}<span>{c.title}</span
       >{#if plan}<small class="conversation-plan" aria-hidden="true"
           >{plan.count}/{plan.total}</small
-        >{/if}{#if runningReply && awaitingAnswer(runningReply)}<MessageCircleQuestionMark
+        >{/if}<!-- Where it stands with this computer, as the monitoring pulse marks a monitor:
+           reserving it, waiting for it (or a build slot, or its turn), or holding a landing turn.
+      -->{#if pc?.kind === 'reserving'}<Gauge
+          size={14}
+          class={pc.measuring ? 'conversation-reserving measuring' : 'conversation-reserving'}
+          aria-hidden="true"
+        />{:else if pc?.kind === 'waiting'}<Hourglass
+          size={14}
+          class="conversation-held"
+          aria-hidden="true"
+        />{:else if pc?.kind === 'turn'}<Flag
+          size={14}
+          class="conversation-turn"
+          aria-hidden="true"
+        />{/if}{#if runningReply && awaitingAnswer(runningReply)}<MessageCircleQuestionMark
           size={14}
           class="conversation-waiting"
           aria-hidden="true"
@@ -8603,9 +8639,12 @@
               : 'Restart to update'}</span
           ></button
         >{/if}
-      {#if pcShown}<button
-          class="icon-button pc-reserved"
-          class:measuring={pcReservations[0]?.phase === 'open'}
+      <!-- Always there on the desktop (requested 2026-11-26), in the warning colour while chats
+           wait on this computer and in the accent while a measurement runs. -->
+      {#if desktop()}<button
+          class="icon-button pc-button"
+          class:pc-reserved={pcShown}
+          class:measuring={pcShown && pcReservations[0]?.phase === 'open'}
           aria-label={pcTitle}
           title={pcTitle}
           onclick={() => (reservationsOpen = true)}
@@ -9066,6 +9105,7 @@
                     message={m}
                     questionDrafts={m.runId ? questionDrafts[m.runId] : undefined}
                     idle={waitsForWork(m)}
+                    onHold={m.status === 'running' ? activeHold : undefined}
                     background={messageBackgroundWork(m, hostBackground[active.id])}
                     {chatChanges}
                     folder={active.location?.path}

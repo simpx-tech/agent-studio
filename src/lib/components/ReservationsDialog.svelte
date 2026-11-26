@@ -86,7 +86,8 @@
     const previous = document.activeElement;
     dialog.showModal();
     closeButton.focus();
-    const release = closeOnBackdrop(dialog);
+    // Its backdrop closes it as Escape and its close button do, so the page can open it again.
+    const release = closeOnBackdrop(dialog, () => close());
     void load();
     return () => {
       release();

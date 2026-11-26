@@ -56,6 +56,25 @@ it('stays open after a drag that began inside, a press released inside, and a cl
   expect(dialog.open).toBe(true);
 });
 
+it("closes through its owner's close, so a page that shows it while a flag is set can open it again", () => {
+  // The Reservations and Time report windows stayed shut for good after a backdrop click: the
+  // dialog closed, but the page's flag that shows it stayed set (2026-11-26).
+  const listeners = new Map<string, (event: unknown) => void>();
+  let closedBy = '';
+  const dialog = {
+    open: true,
+    close: () => (closedBy = 'dialog'),
+    getBoundingClientRect: () => ({ left: 100, top: 100, right: 300, bottom: 200 }),
+    addEventListener: (type: string, listener: (event: unknown) => void) =>
+      listeners.set(type, listener),
+    removeEventListener: (type: string) => listeners.delete(type),
+  };
+  closeOnBackdrop(dialog as unknown as HTMLDialogElement, () => (closedBy = 'owner'));
+  for (const type of ['pointerdown', 'click'])
+    listeners.get(type)?.({ type, target: dialog, clientX: 50, clientY: 150 });
+  expect(closedBy).toBe('owner');
+});
+
 it('lets go of the dialog when detached', () => {
   const { listeners, detach } = dialogAt();
   expect([...listeners.keys()].sort()).toEqual(['click', 'mousedown', 'pointerdown']);

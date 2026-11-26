@@ -36,6 +36,97 @@ pub fn admits(running: usize, free: Option<u64>, cores: u32, since: Option<Durat
             && since.is_none_or(|since| since >= RAMP))
 }
 
+/// What a command asks of the computer while it runs, so that the broker makes room for it and
+/// holds that room until it ends (requested 2026-11-26, after a build that started with 6 GB of
+/// commit free lost a compiler to an internal error once other chats' builds and games, started
+/// after it, took the rest).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Weight {
+    /// A build: many compilers of a few gigabytes each.
+    Build,
+    /// A build of a few files: a project's build script run with `-Check` or `-SingleFile`.
+    Light,
+    /// A game, an editor or a test run of an engine: one program of several gigabytes.
+    Run,
+}
+impl Weight {
+    pub fn name(self) -> &'static str {
+        match self {
+            Weight::Build => "build",
+            Weight::Light => "light",
+            Weight::Run => "run",
+        }
+    }
+    /// What the agent's command is called in what it is told.
+    pub fn what(self) -> &'static str {
+        match self {
+            Weight::Build => "build",
+            Weight::Light => "build of a few files",
+            Weight::Run => "game or test run",
+        }
+    }
+    fn rank(self) -> u8 {
+        match self {
+            Weight::Light => 0,
+            Weight::Run => 1,
+            Weight::Build => 2,
+        }
+    }
+}
+
+/// What one compiler of bluevox's module commits: 2.5 to 3.5 GB.
+pub const COMPILER: u64 = 3584 << 20;
+/// Free memory a build of a few files needs to start beside work holding a grant.
+pub const LIGHT_FREE: u64 = 4 << 30;
+/// Free memory a game, an editor or a test run needs to start beside work holding a grant: a
+/// rendering client or an editor takes 4 to 12 GB.
+pub const RUN_FREE: u64 = 8 << 30;
+/// What a grant leaves to the rest of the computer: its tools, shells and browsers.
+pub const GRANT_KEEP: u64 = 3 << 30;
+/// The most a build is granted: eight compilers, as many as one build ran alone with room.
+pub const GRANT_MOST: u64 = 8 * COMPILER;
+/// The most a build of a few files is granted: two compilers.
+pub const LIGHT_GRANT: u64 = 2 * COMPILER;
+
+/// The memory work of `weight` is granted while it runs, from what is `available` as it starts:
+/// free memory less what earlier grants have not taken yet. A build gets what is left after
+/// `GRANT_KEEP`, between one compiler and `GRANT_MOST`, a build of a few files up to two
+/// compilers, a run what it needs to start. A build's own script reads it (`AGENT_STUDIO_PC_GRANT`)
+/// and runs as many compilers as it holds.
+pub fn grant(weight: Weight, available: Option<u64>) -> u64 {
+    let left = |most: u64| {
+        available.map_or(most, |free| {
+            free.saturating_sub(GRANT_KEEP).clamp(COMPILER, most)
+        })
+    };
+    match weight {
+        Weight::Build => left(GRANT_MOST),
+        Weight::Light => left(LIGHT_GRANT),
+        Weight::Run => RUN_FREE,
+    }
+}
+
+/// Whether work of `weight` may start now, with `running` builds running and the last build
+/// started `since` ago: `granted` tells whether any work holds a grant now, and `available` is
+/// free memory less what those grants have not taken yet. A build is admitted as before (alone
+/// always, beside others with a slot, `BESIDE_FREE` and `RAMP`), now on the memory grants leave;
+/// a build of a few files or a run needs room of its own, `LIGHT_FREE` or `RUN_FREE`, unless no
+/// grant holds memory, and never takes a slot or waits for the last build to grow.
+pub fn admits_weight(
+    weight: Weight,
+    running: usize,
+    granted: bool,
+    available: Option<u64>,
+    cores: u32,
+    since: Option<Duration>,
+) -> bool {
+    match weight {
+        Weight::Build => admits(running, available, cores, since),
+        Weight::Light => !granted || available.is_none_or(|free| free >= LIGHT_FREE),
+        Weight::Run => !granted || available.is_none_or(|free| free >= RUN_FREE),
+    }
+}
+
 /// Programs that build what they are given, by the name a command line calls them.
 const BUILDERS: &[&str] = &[
     "unrealbuildtool",
@@ -91,15 +182,35 @@ const RUNNERS: &[&str] = &[
 ];
 const SCRIPTS: &[&str] = &[".ps1", ".bat", ".cmd", ".sh"];
 
-/// Whether `command`, as its agent wrote it, builds: Unreal's build tool or `Build.bat`, RunUAT,
-/// a project's own build script (a script whose name starts with "build"), a compiler driver
-/// (`cargo build`, `cargo test`, `dotnet build`, `cmake --build`, MSBuild, Ninja, make and the
-/// like), or Tauri's release build. Light commands never are.
-pub fn is_build(command: &str) -> bool {
-    light::parts(command).iter().any(|part| build_part(part))
+/// Scripts that run a game, an editor or tests of an engine, by their name: bluevox's runners.
+const RUN_SCRIPTS: &[&str] = &["run-game", "run-net", "run-tests", "run-editor"];
+
+/// How much `command`, as its agent wrote it, asks of the computer: a build (Unreal's build tool
+/// or `Build.bat`, RunUAT, a project's own build script, whose name starts with "build", a
+/// compiler driver such as `cargo build`, `cargo test`, `dotnet build`, `cmake --build`, MSBuild,
+/// Ninja or make, or Tauri's release build), a build of a few files (a build script run with
+/// `-Check` or `-SingleFile`), or a game, an editor or a test run of an engine (`UnrealEditor`
+/// itself, or a project's `Run-Game`, `Run-Net`, `Run-Tests` or `Run-Editor` script); None for
+/// anything else, a build script's dry run (`-WhatIf`) included. Of several commands, the
+/// heaviest. Light commands never ask anything.
+pub fn weight(command: &str) -> Option<Weight> {
+    light::parts(command)
+        .iter()
+        .filter_map(|part| part_weight(part))
+        .max_by_key(|weight| weight.rank())
 }
 
-fn build_part(words: &[String]) -> bool {
+/// A script's argument that makes it run nothing: PowerShell's `-WhatIf`.
+fn dry_run(word: &str) -> bool {
+    word == "-whatif" || word == "-whatif:$true"
+}
+
+/// A build script's argument that makes it compile a few files alone, linking nothing.
+fn few_files(word: &str) -> bool {
+    matches!(word, "-check" | "-check:$true" | "-singlefile") || word.starts_with("-singlefile:")
+}
+
+fn part_weight(words: &[String]) -> Option<Weight> {
     let mut words: Vec<&String> = words.iter().skip_while(|w| light::assignment(w)).collect();
     // `& "Tools/Build.ps1"`, `pwsh -File Tools/Build.ps1`, `cmd /c build.bat`, `sudo make`.
     while let Some(first) = words.first() {
@@ -119,52 +230,59 @@ fn build_part(words: &[String]) -> bool {
         // `pwsh -Command "..."` and `bash -c "..."` run a command line of their own.
         if let [line] = words.as_slice() {
             if line.contains(char::is_whitespace) {
-                return is_build(line);
+                return weight(line);
             }
         }
     }
-    let Some(first) = words.first() else {
-        return false;
-    };
+    let first = words.first()?;
     let program = light::program_name(first);
     let rest: Vec<String> = words[1..].iter().map(|w| w.to_ascii_lowercase()).collect();
     if script(first) {
         let stem = program
             .rsplit_once('.')
             .map_or(program.as_str(), |(stem, _)| stem);
-        return stem.starts_with("build") || stem == "runuat";
+        if stem.starts_with("build") || stem == "runuat" {
+            if rest.iter().any(|w| dry_run(w)) {
+                return None;
+            }
+            if stem.starts_with("build") && rest.iter().any(|w| few_files(w)) {
+                return Some(Weight::Light);
+            }
+            return Some(Weight::Build);
+        }
+        return RUN_SCRIPTS.contains(&stem).then_some(Weight::Run);
     }
-    if BUILDERS.contains(&program.as_str()) {
-        return true;
+    // `UnrealEditor.exe`, `UnrealEditor-Cmd.exe` and their DebugGame builds: a game, an editor,
+    // a test run or a commandlet.
+    if program.starts_with("unrealeditor") {
+        return Some(Weight::Run);
     }
-    if program == "runuat" {
-        return true;
-    }
-    if program == "cmake" {
-        return rest.iter().any(|w| w == "--build");
-    }
-    // `dotnet ...UnrealBuildTool.dll`, as Build.bat and bluevox's script run it.
-    if program == "dotnet" && rest.iter().any(|w| w.ends_with("unrealbuildtool.dll")) {
-        return true;
-    }
-    // `npm run tauri build`, `npx tauri build`, `cargo tauri build`.
-    if matches!(
+    let build = if BUILDERS.contains(&program.as_str()) || program == "runuat" {
+        true
+    } else if program == "cmake" {
+        rest.iter().any(|w| w == "--build")
+    } else if program == "dotnet" && rest.iter().any(|w| w.ends_with("unrealbuildtool.dll")) {
+        // `dotnet ...UnrealBuildTool.dll`, as Build.bat and bluevox's script run it.
+        true
+    } else if matches!(
         program.as_str(),
         "npm" | "npx" | "pnpm" | "yarn" | "bun" | "bunx"
     ) {
-        return rest
-            .windows(2)
-            .any(|pair| pair[0] == "tauri" && pair[1] == "build");
-    }
-    SUBCOMMANDS
-        .iter()
-        .find(|(name, _)| *name == program)
-        .is_some_and(|(_, subcommands)| {
-            rest.iter()
-                // `cargo +nightly build`, `cargo -q test`.
-                .find(|w| !w.starts_with('-') && !w.starts_with('+'))
-                .is_some_and(|sub| subcommands.contains(&sub.as_str()))
-        })
+        // `npm run tauri build`, `npx tauri build`, `cargo tauri build`.
+        rest.windows(2)
+            .any(|pair| pair[0] == "tauri" && pair[1] == "build")
+    } else {
+        SUBCOMMANDS
+            .iter()
+            .find(|(name, _)| *name == program)
+            .is_some_and(|(_, subcommands)| {
+                rest.iter()
+                    // `cargo +nightly build`, `cargo -q test`.
+                    .find(|w| !w.starts_with('-') && !w.starts_with('+'))
+                    .is_some_and(|sub| subcommands.contains(&sub.as_str()))
+            })
+    };
+    build.then_some(Weight::Build)
 }
 
 fn script(word: &str) -> bool {
@@ -272,6 +390,11 @@ mod tests {
     use crate::reservations::machine::Process;
     use std::time::Instant;
 
+    /// Whether `command` builds, a few files or many.
+    fn is_build(command: &str) -> bool {
+        matches!(weight(command), Some(Weight::Build | Weight::Light))
+    }
+
     #[test]
     fn builds_are_told_from_their_commands() {
         for command in [
@@ -313,6 +436,126 @@ mod tests {
         ] {
             assert!(!is_build(command), "{command}");
         }
+    }
+
+    #[test]
+    fn commands_weigh_as_builds_builds_of_a_few_files_or_runs() {
+        for (command, expected) in [
+            (r".\Tools\Build.ps1 -Candidate", Some(Weight::Build)),
+            (
+                r#"& "D:\p\Tools\Build.ps1" -Target Bluevox"#,
+                Some(Weight::Build),
+            ),
+            // A dry run builds nothing (requested 2026-11-26: the gate held `-WhatIf` twice).
+            (r".\Tools\Build.ps1 -Candidate -WhatIf", None),
+            (r"& .\Tools\Build.ps1 -WhatIf:$true", None),
+            (r".\Tools\Build.ps1 -WhatIf:$false", Some(Weight::Build)),
+            (r".\Tools\Build.ps1 -Check", Some(Weight::Light)),
+            (
+                r#"& "D:\p\Tools\Build.ps1" -SingleFile "D:\p\Source\A.cpp""#,
+                Some(Weight::Light),
+            ),
+            (
+                r"powershell -NoProfile -File .\Tools\Run-Tests.ps1 -Filter Bluevox.Water",
+                Some(Weight::Run),
+            ),
+            (
+                r#"& "D:\p\Tools\Run-Game.ps1" -Mode net -HostTimeline h.txt"#,
+                Some(Weight::Run),
+            ),
+            (r".\Tools\Run-Editor.ps1 -Game", Some(Weight::Run)),
+            (
+                r#"& "D:\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "D:\p\Bluevox.uproject" -run=pythonscript"#,
+                Some(Weight::Run),
+            ),
+            // The heaviest of several.
+            (
+                r".\Tools\Run-Tests.ps1; .\Tools\Build.ps1 -Check",
+                Some(Weight::Run),
+            ),
+            (
+                r".\Tools\Build.ps1 -Check; .\Tools\Build.ps1",
+                Some(Weight::Build),
+            ),
+            (r".\Tools\Release-Worktree.ps1", None),
+            ("git status", None),
+        ] {
+            assert_eq!(weight(command), expected, "{command}");
+        }
+        assert!(is_build(r".\Tools\Build.ps1 -Check"));
+        assert!(!is_build(r".\Tools\Run-Game.ps1"));
+    }
+
+    #[test]
+    fn work_is_granted_memory_it_holds_and_what_starts_beside_it_needs_room() {
+        // A build: what is left after a few gigabytes, between one compiler and eight.
+        assert_eq!(grant(Weight::Build, Some(20 << 30)), 17 << 30);
+        assert_eq!(grant(Weight::Build, Some(2 << 30)), COMPILER);
+        assert_eq!(grant(Weight::Build, Some(90 << 30)), GRANT_MOST);
+        assert_eq!(grant(Weight::Build, None), GRANT_MOST);
+        // A build of a few files: up to two compilers; a run, what it needs.
+        assert_eq!(grant(Weight::Light, Some(40 << 30)), LIGHT_GRANT);
+        assert_eq!(grant(Weight::Run, Some(40 << 30)), RUN_FREE);
+        // A run or a build of a few files needs room of its own beside granted work...
+        assert!(!admits_weight(
+            Weight::Run,
+            1,
+            true,
+            Some(6 << 30),
+            32,
+            None
+        ));
+        assert!(admits_weight(Weight::Run, 1, true, Some(9 << 30), 32, None));
+        assert!(!admits_weight(
+            Weight::Light,
+            1,
+            true,
+            Some(3 << 30),
+            32,
+            None
+        ));
+        assert!(admits_weight(
+            Weight::Light,
+            4,
+            true,
+            Some(5 << 30),
+            32,
+            None
+        ));
+        // ...but none when nothing granted holds memory, and never a slot or the ramp.
+        assert!(admits_weight(
+            Weight::Run,
+            0,
+            false,
+            Some(1 << 30),
+            32,
+            None
+        ));
+        assert!(admits_weight(
+            Weight::Light,
+            4,
+            true,
+            Some(5 << 30),
+            32,
+            Some(Duration::ZERO)
+        ));
+        // A build as before.
+        assert!(admits_weight(
+            Weight::Build,
+            0,
+            true,
+            Some(1 << 30),
+            32,
+            None
+        ));
+        assert!(!admits_weight(
+            Weight::Build,
+            1,
+            true,
+            Some(6 << 30),
+            32,
+            None
+        ));
     }
 
     #[test]

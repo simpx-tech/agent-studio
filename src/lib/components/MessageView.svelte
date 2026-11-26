@@ -31,6 +31,7 @@
   import { replyUsageLimit, savedLimitComment } from '$lib/usage-limits';
   import { continueLabel } from '$lib/auto-continue';
   import { clock as ticks } from '$lib/clock';
+  import { toolElapsed } from '$lib/activity';
   import { modelMark } from '$lib/model-marks';
   import ModelMark from './ModelMark.svelte';
   import { separateMemory, summarizeFileChanges, type SeparatedChanges } from '$lib/file-changes';
@@ -77,6 +78,7 @@
     openSubagent,
     openedSubagent,
     idle = false,
+    onHold,
     switchAccount,
     continuation,
     openScreen,
@@ -115,6 +117,12 @@
     openedSubagent?: { messageId: string; agentId: string };
     /** It runs, but its turn ended and it only waits for background work. */
     idle?: boolean;
+    /**
+     * It waits on this computer: for the computer another chat reserved, a build slot, room for
+     * a game or test run, or its turn (src/lib/pc-reservations.ts, `pcWaitCard`), which a card
+     * of its own says under its heading (requested 2026-11-26).
+     */
+    onHold?: { heading: string; detail: string; since?: number };
     /** Opens the Agent picker to choose another account for the next message. */
     switchAccount?: () => void;
     /**
@@ -255,10 +263,13 @@
 {#snippet liveLabel()}
   <span
     class="live-label"
-    class:waiting
-    class:idle={!waiting && idle}
-    title={!waiting && idle ? 'A message sent now goes at once.' : undefined}
-    >{#if waiting}<MessageCircleQuestionMark size={13} aria-hidden="true" />Waiting for you{:else if idle}<Hourglass
+    class:waiting={waiting || !!onHold}
+    class:idle={!waiting && !onHold && idle}
+    title={!waiting && !onHold && idle ? 'A message sent now goes at once.' : undefined}
+    >{#if waiting}<MessageCircleQuestionMark size={13} aria-hidden="true" />Waiting for you{:else if onHold}<Hourglass
+        size={13}
+        aria-hidden="true"
+      />{onHold.heading}{:else if idle}<Hourglass
         size={13}
         aria-hidden="true"
       />Waiting for background work{:else}<LoaderCircle
@@ -556,6 +567,20 @@
             <strong>{replyModelName(message)}</strong>{#if began}<span>{began}</span
               >{/if}{#if last && message.status === 'running'}{@render liveLabel()}{/if}
           </div>
+          {#if last && message.status === 'running' && onHold}<div
+              class="hold-card"
+              role="status"
+              aria-label={`${onHold.heading}: ${onHold.detail}`}
+            >
+              <Hourglass size={20} aria-hidden="true" />
+              <div class="hold-text">
+                <strong>{onHold.heading}</strong>
+                <span>{onHold.detail}</span>
+              </div>
+              {#if onHold.since}<span class="hold-time"
+                  >{toolElapsed(Math.max(0, ticks.now - onHold.since))}</span
+                >{/if}
+            </div>{/if}
           {#if mismatch && index === opening}<p class="model-mismatch">
               <CircleAlert size={13} aria-hidden="true" />Ran {mismatch.ran} instead of {mismatch.picked}
             </p>{/if}

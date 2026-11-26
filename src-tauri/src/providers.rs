@@ -1352,6 +1352,18 @@ pub async fn chat_command(
     c.env_remove("CLAUDECODE")
         .env_remove("CODEX_THREAD_ID")
         .env("NO_COLOR", "1");
+    // Which chat its commands belong to, where its builds read the memory they were granted and
+    // the lease folder that goes when the chat is closed (`reservations::chat_env`, requested
+    // 2026-11-26). Windows paths, so a WSL launch goes without them.
+    if exe.wsl.is_none() && request.tools_enabled() {
+        if let (Some(conversation), Some(data)) =
+            (request.conversation_id.as_deref(), data.as_deref())
+        {
+            for (key, value) in crate::reservations::chat_env(data, conversation) {
+                c.env(key, value);
+            }
+        }
+    }
     match request.agent.provider.as_str() {
         "codex" => {
             if request.tools_enabled() {

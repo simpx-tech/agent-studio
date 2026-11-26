@@ -49,7 +49,7 @@ use crate::protocol::activity::ToolActivity;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
@@ -131,6 +131,20 @@ pub struct Snapshot {
     pub turns: Vec<TurnView>,
     /// Chats whose builds wait for a slot, first come first served.
     pub slots: Vec<SlotView>,
+    /// Chats waiting in `pc_wait` for a reservation of the computer to end, which their rows in
+    /// the sidebar mark (requested 2026-11-26).
+    pub waiting: Vec<String>,
+    /// The memory chats' builds and runs hold now (`builds::grant`).
+    pub grants: Vec<GrantView>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantView {
+    pub conversation_id: String,
+    /// `build`, `light` (a build of a few files) or `run` (a game, an editor or a test run).
+    pub weight: &'static str,
+    pub bytes: u64,
+    pub since: u64,
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -151,6 +165,8 @@ pub struct SlotView {
     pub conversation_id: String,
     /// The build it asked to run.
     pub label: String,
+    /// `build`, `light` (a build of a few files) or `run` (a game, an editor or a test run).
+    pub weight: &'static str,
     pub since: u64,
     /// A slot is free for it, until its build starts.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -237,6 +253,9 @@ struct State {
     slots: Vec<SlotWait>,
     /// When the last build started, which the next one beside it gives time to grow.
     last_build: Option<Instant>,
+    /// The memory each chat's build or run was granted as it started, held until it ends, so
+    /// that what starts beside it leaves it room (`builds::grant`, requested 2026-11-26).
+    grants: HashMap<String, Grant>,
     /// When each chat last released the computer, and in which reply.
     released: HashMap<String, (String, Instant)>,
     /// What readings found of each chat's work, which a window does not wait for while idle.
@@ -306,14 +325,29 @@ struct Turn {
     granted: Option<Instant>,
     granted_at: Option<u64>,
 }
-/// A chat whose build waits for a slot (`builds`).
+/// A chat whose build waits for a slot (`builds`), or whose run waits for room.
 struct SlotWait {
     conversation: String,
     label: String,
+    weight: builds::Weight,
     since: Instant,
     since_at: u64,
-    /// When a slot was kept for it.
+    /// When a slot was kept for it, with the memory it is granted when it starts.
     granted: Option<Instant>,
+    bytes: u64,
+}
+/// Memory a chat's build or run was granted (`builds::grant`), held until that work ends: its
+/// call ended (or never started), the chat's compilers stopped and `builds::RAMP` passed.
+struct Grant {
+    weight: builds::Weight,
+    bytes: u64,
+    at: Instant,
+    at_ms: u64,
+    /// The call that took it, once it reported running.
+    call: Option<String>,
+    /// That call ended, or the reply that asked for it did; a background build goes on, and so
+    /// does its grant while its compilers run.
+    ended: bool,
 }
 /// A build running on the computer now.
 struct Running {
@@ -369,8 +403,9 @@ enum Asked {
 struct Call {
     label: String,
     light: bool,
-    /// It builds (`builds::is_build`), and so takes a build slot while it runs.
-    build: bool,
+    /// What it asks of the computer (`builds::weight`): a build takes a build slot while it runs,
+    /// and any weighed call holds its chat's grant.
+    weight: Option<builds::Weight>,
     /// The lengths of the command and description it was read from: Claude streams a call's
     /// input, so its first report may name neither.
     read: (usize, usize),
@@ -454,9 +489,11 @@ impl Broker {
         background: Background,
         history: Option<PathBuf>,
     ) -> Arc<Self> {
-        // Processes a run that ended without resuming them held wait no longer.
+        // Processes a run that ended without resuming them held wait no longer, and the grants
+        // it wrote hold nothing now.
         if let Some(history) = &history {
             hold::resume_saved(&history.with_file_name(FROZEN));
+            let _ = std::fs::remove_dir_all(history.with_file_name(GRANTS));
         }
         let settings = history
             .as_ref()
@@ -712,6 +749,7 @@ impl Broker {
                 }
                 return;
             }
+            let state = &mut *state;
             let Some(run) = state.runs.get_mut(run_id) else {
                 return;
             };
@@ -730,24 +768,41 @@ impl Broker {
                     Some((server, _)) => light::remote_server(server),
                     None => !command.is_empty() && light::is_light(&command),
                 };
-                let build = !light && builds::is_build(&command);
+                let weight = (!light).then(|| builds::weight(&command)).flatten();
                 run.calls.insert(
                     tool.id.clone(),
                     Call {
                         label: label_of(tool),
                         light,
-                        build,
+                        weight,
                         read,
                     },
                 );
+                // The call that took its chat's grant holds it.
+                if weight.is_some() {
+                    if let Some(grant) = state
+                        .grants
+                        .get_mut(&run.conversation)
+                        .filter(|g| g.call.is_none() && !g.ended)
+                    {
+                        grant.call = Some(tool.id.clone());
+                    }
+                }
             } else {
                 match run.calls.remove(&tool.id) {
                     None => return,
-                    Some(call) => regrant = call.build,
+                    Some(call) => regrant = call.weight.is_some(),
+                }
+                if let Some(grant) = state
+                    .grants
+                    .get_mut(&run.conversation)
+                    .filter(|g| g.call.as_deref() == Some(tool.id.as_str()))
+                {
+                    grant.ended = true;
                 }
             }
-            regrant &= !state.slots.is_empty();
-            self.settled(&mut state, Instant::now())
+            regrant &= !state.slots.is_empty() || !state.grants.is_empty();
+            self.settled(state, Instant::now())
         };
         if let Some(snapshot) = update {
             self.publish(snapshot);
@@ -791,8 +846,9 @@ impl Broker {
         });
     }
 
-    /// Keeps slots for the builds waiting that fit beside the builds running now, as `reading`
-    /// shows them with their `owners`. Returns whether anything changed.
+    /// Lets go of the grants whose work ended, then keeps slots for the builds and runs waiting
+    /// that fit beside what runs now, as `reading` shows it with its `owners`. Returns whether
+    /// anything changed.
     fn grant(
         &self,
         state: &mut State,
@@ -800,13 +856,15 @@ impl Broker {
         owners: Option<&machine::Owners>,
         now: Instant,
     ) -> bool {
+        let mut changed = self.settle_grants(state, reading, owners, now);
         if state.slots.is_empty() {
-            return false;
+            return changed;
         }
         let running = running_builds(state, reading.zip(owners), None);
-        let free = reading.map(machine::Reading::free);
+        let available = available(state, reading, owners);
         let cores = reading.map_or_else(cores, |r| r.cores);
-        Self::grant_slots(state, running.len(), free, cores, now)
+        changed |= Self::grant_slots(state, running.len(), available, cores, now);
+        changed
     }
 
     /// The reply `run_id` ended: its commands with it, and a reservation it held.
@@ -876,6 +934,11 @@ impl Broker {
         let waiting = state.slots.len();
         state.slots.retain(|w| w.conversation != conversation);
         ended |= state.slots.len() != waiting;
+        // Its work's grant ends with that work: a build left in the background holds it while it
+        // compiles (`settle_grants`).
+        if let Some(grant) = state.grants.get_mut(conversation) {
+            grant.ended = true;
+        }
         for reservation in state.queue.iter_mut() {
             for ask in reservation
                 .asks
@@ -1419,7 +1482,9 @@ impl Broker {
     /// settles the first reservation and measures an open window. Returns whether any
     /// reservation is left to look after.
     async fn tick(self: &Arc<Self>) -> bool {
-        let done = |state: &State| state.queue.is_empty() && state.slots.is_empty();
+        let done = |state: &State| {
+            state.queue.is_empty() && state.slots.is_empty() && state.grants.is_empty()
+        };
         let (measuring, waiting, slots) = {
             let mut state = self.lock();
             if done(&state) {
@@ -1431,7 +1496,8 @@ impl Broker {
             (
                 first.is_some_and(|r| r.opened.is_some()),
                 first.is_some_and(|r| r.opened.is_none()),
-                !state.slots.is_empty(),
+                // Builds waiting for a slot, or granted work whose end the computer tells.
+                !state.slots.is_empty() || !state.grants.is_empty(),
             )
         };
         let reading = if measuring || waiting || slots {
@@ -1832,19 +1898,20 @@ impl Broker {
         if let Some(reason) = self.hold(conversation, light, Asked::Command, call, wait) {
             return Some(reason);
         }
-        if light || !builds::is_build(&own) {
-            return None;
-        }
-        self.slot(conversation, &own, call, wait)
+        let weight = (!light).then(|| builds::weight(&own)).flatten()?;
+        self.slot(conversation, &own, weight, call, wait)
     }
 
-    /// Whether a build `conversation` wants to start waits for a slot (`builds`): the reason to
-    /// give, or None. A slot kept for the chat is its build's; otherwise builds take their turns
-    /// first come first served, and one starts while the builds running leave room for it.
+    /// Whether a build or a run `conversation` wants to start waits (`builds`): the reason to
+    /// give, or None. A slot kept for the chat is its work's; otherwise builds take their turns
+    /// first come first served, and one starts while the builds running leave room for it, on the
+    /// memory the grants of the work started before it leave. A build of a few files or a run
+    /// needs room of its own only. What starts is granted its memory, held until it ends.
     fn slot(
         &self,
         conversation: &str,
         command: &str,
+        weight: builds::Weight,
         call: Option<&str>,
         wait: &str,
     ) -> Option<String> {
@@ -1855,11 +1922,16 @@ impl Broker {
                 .iter()
                 .position(|w| w.conversation == conversation && w.granted.is_some())
             {
-                state.slots.remove(index);
-                state.last_build = Some(Instant::now());
+                let kept = state.slots.remove(index);
+                let now = Instant::now();
+                if kept.weight == builds::Weight::Build {
+                    state.last_build = Some(now);
+                }
+                self.hold_grant(&mut state, conversation, kept.weight, kept.bytes, now);
                 let snapshot = self.view(&state);
                 drop(state);
                 self.publish(snapshot);
+                self.look();
                 return None;
             }
         }
@@ -1872,26 +1944,44 @@ impl Broker {
         let (reason, snapshot) = {
             let mut state = self.lock();
             let now = Instant::now();
+            let build = weight == builds::Weight::Build;
             let running = running_builds(&state, reading.as_ref().zip(owners.as_ref()), call);
-            let granted = state.slots.iter().filter(|w| w.granted.is_some()).count();
-            let ahead = state
-                .slots
+            let kept: Vec<&SlotWait> = state.slots.iter().filter(|w| w.granted.is_some()).collect();
+            let granted = kept
                 .iter()
-                .take_while(|w| w.conversation != conversation)
+                .filter(|w| w.weight == builds::Weight::Build)
                 .count();
+            let kept_bytes: u64 = kept.iter().map(|w| w.bytes).sum();
+            // A build waits behind the builds in line; other work only for room.
+            let ahead = if build {
+                state
+                    .slots
+                    .iter()
+                    .take_while(|w| w.conversation != conversation)
+                    .filter(|w| w.weight == builds::Weight::Build)
+                    .count()
+            } else {
+                0
+            };
             let cores = reading.as_ref().map_or_else(cores, |r| r.cores);
             let free = reading.as_ref().map(machine::Reading::free);
+            let available = available(&state, reading.as_ref(), owners.as_ref())
+                .map(|a| a.saturating_sub(kept_bytes));
+            let holding = !state.grants.is_empty() || !kept.is_empty();
             let since = state.last_build.map(|at| now.saturating_duration_since(at));
             let taken = running.len() + granted;
-            if ahead == 0 && builds::admits(taken, free, cores, since) {
-                let waited = state.slots.len();
+            if ahead == 0 && builds::admits_weight(weight, taken, holding, available, cores, since)
+            {
                 state.slots.retain(|w| w.conversation != conversation);
-                state.last_build = Some(now);
-                let snapshot = (state.slots.len() != waited).then(|| self.view(&state));
-                drop(state);
-                if let Some(snapshot) = snapshot {
-                    self.publish(snapshot);
+                if build {
+                    state.last_build = Some(now);
                 }
+                let bytes = builds::grant(weight, available);
+                self.hold_grant(&mut state, conversation, weight, bytes, now);
+                let snapshot = self.view(&state);
+                drop(state);
+                self.publish(snapshot);
+                self.look();
                 return None;
             }
             // It never ran, though Claude Code reported it as started.
@@ -1905,11 +1995,25 @@ impl Broker {
                 state.slots.push(SlotWait {
                     conversation: conversation.into(),
                     label: command_label(command),
+                    weight,
                     since: now,
                     since_at: epoch_ms(),
                     granted: None,
+                    bytes: 0,
                 });
             }
+            // What the work started before it holds and has not taken yet, which is not free.
+            let held = free
+                .zip(available)
+                .map_or(0, |(free, available)| free.saturating_sub(available));
+            let beside = if held > 0 {
+                format!(
+                    " beside the {} held for the work started before it",
+                    machine::bytes(held)
+                )
+            } else {
+                String::new()
+            };
             let why = if ahead > 0 {
                 format!(
                     "{} {} before it",
@@ -1920,21 +2024,32 @@ impl Broker {
                         "their turns"
                     }
                 )
-            } else if taken >= builds::slots(cores) {
+            } else if build && taken >= builds::slots(cores) {
                 format!(
                     "this computer runs {} at once (one for each eight cores)",
                     plural(builds::slots(cores), "build", "builds")
                 )
-            } else if free.is_some_and(|free| free < builds::BESIDE_FREE) {
+            } else if build && available.is_some_and(|free| free < builds::BESIDE_FREE) {
                 format!(
-                    "a build beside them needs {} of free memory (commit) and {} is free",
+                    "a build beside them needs {} of free memory (commit) and {} is free{beside}",
                     machine::bytes(builds::BESIDE_FREE),
-                    machine::bytes(free.unwrap_or_default())
+                    machine::bytes(available.unwrap_or_default())
                 )
-            } else {
+            } else if build {
                 format!(
                     "the last build started {} ago and is still taking its memory",
                     duration(since.unwrap_or_default())
+                )
+            } else {
+                format!(
+                    "a {} needs {} of free memory (commit) and {} is free{beside}",
+                    weight.what(),
+                    machine::bytes(if weight == builds::Weight::Run {
+                        builds::RUN_FREE
+                    } else {
+                        builds::LIGHT_FREE
+                    }),
+                    machine::bytes(available.unwrap_or_default())
                 )
             };
             let list = running
@@ -1944,19 +2059,28 @@ impl Broker {
                     None => build.label.clone(),
                 })
                 .collect::<Vec<_>>();
+            let builds_now = format!(
+                "{} on this computer now{}",
+                match taken {
+                    0 => "no build runs".to_string(),
+                    _ => plural(taken, "build runs", "builds run"),
+                },
+                if list.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", list.join("; "))
+                }
+            );
             (
-                format!(
-                    "This build did not run: {} on this computer now{}, and {why}. Call {wait}, which returns once a build slot is free for this chat, then run the same command again. Meanwhile keep working on what does not need the build.",
-                    match taken {
-                        0 => "no build runs".to_string(),
-                        _ => plural(taken, "build runs", "builds run"),
-                    },
-                    if list.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({})", list.join("; "))
-                    }
-                ),
+                if weight == builds::Weight::Run {
+                    format!(
+                        "This run did not start: {builds_now}, and {why}. Call {wait}, which returns once there is room for it, then run the same command again. Meanwhile keep working on what does not need it."
+                    )
+                } else {
+                    format!(
+                        "This build did not run: {builds_now}, and {why}. Call {wait}, which returns once a build slot is free for this chat, then run the same command again. Meanwhile keep working on what does not need the build."
+                    )
+                },
                 self.view(&state),
             )
         };
@@ -1965,13 +2089,107 @@ impl Broker {
         Some(reason)
     }
 
+    /// Holds `bytes` of memory for `conversation`'s work of `weight` that starts now, and tells
+    /// its build script (the chat's `AGENT_STUDIO_PC_GRANT` file, `grant_file`).
+    fn hold_grant(
+        &self,
+        state: &mut State,
+        conversation: &str,
+        weight: builds::Weight,
+        bytes: u64,
+        now: Instant,
+    ) {
+        let at_ms = epoch_ms();
+        state.grants.insert(
+            conversation.into(),
+            Grant {
+                weight,
+                bytes,
+                at: now,
+                at_ms,
+                call: None,
+                ended: false,
+            },
+        );
+        if let Some(folder) = self.grants_folder() {
+            let record = serde_json::json!({
+                "bytes": bytes,
+                "weight": weight.name(),
+                "grantedAt": at_ms,
+            });
+            if std::fs::create_dir_all(&folder).is_ok() {
+                let _ = std::fs::write(
+                    folder.join(format!("{}.json", file_safe(conversation))),
+                    record.to_string(),
+                );
+            }
+        }
+    }
+
+    /// Lets go of the grants whose work ended: its call ended, or never started within `GRANT`,
+    /// the chat's compilers stopped (a background build runs on after its call ended), and
+    /// `builds::RAMP` passed since it was granted. Returns whether any ended.
+    fn settle_grants(
+        &self,
+        state: &mut State,
+        reading: Option<&machine::Reading>,
+        owners: Option<&machine::Owners>,
+        now: Instant,
+    ) -> bool {
+        if state.grants.is_empty() {
+            return false;
+        }
+        let compiling: HashSet<String> = reading
+            .zip(owners)
+            .map(|(reading, owners)| {
+                builds::compiling(reading, owners)
+                    .into_iter()
+                    .filter_map(|build| match build.owner {
+                        machine::Owner::Chat(chat) => Some(chat),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let ended: Vec<String> = state
+            .grants
+            .iter()
+            .filter(|(conversation, grant)| {
+                let age = now.saturating_duration_since(grant.at);
+                (grant.ended || (grant.call.is_none() && age >= GRANT))
+                    && age >= builds::RAMP
+                    && !compiling.contains(*conversation)
+            })
+            .map(|(conversation, _)| conversation.clone())
+            .collect();
+        for conversation in &ended {
+            self.end_grant(state, conversation);
+        }
+        !ended.is_empty()
+    }
+
+    fn end_grant(&self, state: &mut State, conversation: &str) {
+        state.grants.remove(conversation);
+        if let Some(folder) = self.grants_folder() {
+            let _ = std::fs::remove_file(folder.join(format!("{}.json", file_safe(conversation))));
+        }
+    }
+
+    /// Where the grants' files go: `reservations/grants` in app data.
+    fn grants_folder(&self) -> Option<PathBuf> {
+        self.history
+            .as_ref()
+            .map(|history| history.with_file_name(GRANTS))
+    }
+
     /// Keeps a slot for the first builds in line that fit beside what runs now, one at a time
-    /// beside other builds. A slot its build did not take in time goes to the next. Returns
-    /// whether anything changed.
+    /// beside other builds, and room for the runs and builds of a few files waiting that fit, on
+    /// the memory `available` once what the slots kept will take is set aside. A slot its work
+    /// did not take in time goes to the next. Returns whether anything changed.
     fn grant_slots(
         state: &mut State,
         running: usize,
-        free: Option<u64>,
+        mut available: Option<u64>,
         cores: u32,
         now: Instant,
     ) -> bool {
@@ -1981,13 +2199,26 @@ impl Broker {
                 .is_none_or(|at| now.saturating_duration_since(at) < GRANT)
         });
         let mut changed = state.slots.len() != waiting;
-        let mut taken = running + state.slots.iter().filter(|w| w.granted.is_some()).count();
+        let mut taken = running
+            + state
+                .slots
+                .iter()
+                .filter(|w| w.granted.is_some() && w.weight == builds::Weight::Build)
+                .count();
+        for kept in state.slots.iter().filter(|w| w.granted.is_some()) {
+            available = available.map(|a| a.saturating_sub(kept.bytes));
+        }
+        let mut holding =
+            !state.grants.is_empty() || state.slots.iter().any(|w| w.granted.is_some());
         // While a measurement holds the computer, only its own chat may build.
         let holder = state
             .queue
             .first()
             .filter(|r| r.holding.is_some())
             .map(|r| r.conversation.clone());
+        // Builds take their turns; a run or a build of a few files behind one that waits starts
+        // when there is room for it.
+        let mut builds_wait = false;
         for index in 0..state.slots.len() {
             if state.slots[index].granted.is_some() {
                 continue;
@@ -1998,13 +2229,25 @@ impl Broker {
             {
                 break;
             }
-            let since = state.last_build.map(|at| now.saturating_duration_since(at));
-            if !builds::admits(taken, free, cores, since) {
-                break;
+            let weight = state.slots[index].weight;
+            let build = weight == builds::Weight::Build;
+            if build && builds_wait {
+                continue;
             }
+            let since = state.last_build.map(|at| now.saturating_duration_since(at));
+            if !builds::admits_weight(weight, taken, holding, available, cores, since) {
+                builds_wait |= build;
+                continue;
+            }
+            let bytes = builds::grant(weight, available);
             state.slots[index].granted = Some(now);
-            state.last_build = Some(now);
-            taken += 1;
+            state.slots[index].bytes = bytes;
+            if build {
+                state.last_build = Some(now);
+                taken += 1;
+            }
+            available = available.map(|a| a.saturating_sub(bytes));
+            holding = true;
             changed = true;
         }
         changed
@@ -2167,6 +2410,16 @@ impl Broker {
                         }
                         Some(_) => Step::Wait("held", false),
                     }
+                } else if state
+                    .turns
+                    .iter()
+                    .any(|t| t.conversation == conversation && t.granted.is_none())
+                {
+                    // Its turn first: a measurement holding the computer meanwhile holds its
+                    // commands, not this wait, which its time report counts as waiting for its
+                    // turn and the measurement's report leaves out (until 2026-11-26 the hold came
+                    // first: 43 of one chat's 172 minutes in line read as held).
+                    Step::Wait("turn", false)
                 } else if held {
                     if guard.is_none() {
                         state.next += 1;
@@ -2185,24 +2438,22 @@ impl Broker {
                 } else if let Some(wait) =
                     state.slots.iter().find(|w| w.conversation == conversation)
                 {
-                    match wait.granted {
-                        Some(at) => Step::Done(format!(
-                            "A build slot is free for this chat{}: run your build now. The slot waits {} for it.",
-                            if slot {
-                                format!(" after {}", duration(began.elapsed()))
-                            } else {
-                                String::new()
-                            },
+                    let after = if slot {
+                        format!(" after {}", duration(began.elapsed()))
+                    } else {
+                        String::new()
+                    };
+                    match (wait.granted, wait.weight) {
+                        (Some(at), builds::Weight::Run) => Step::Done(format!(
+                            "Room for a game or test run is free for this chat{after}: run it now. The room waits {} for it.",
                             duration(GRANT.saturating_sub(at.elapsed()))
                         )),
-                        None => Step::Wait("slot", false),
+                        (Some(at), _) => Step::Done(format!(
+                            "A build slot is free for this chat{after}: run your build now. The slot waits {} for it.",
+                            duration(GRANT.saturating_sub(at.elapsed()))
+                        )),
+                        (None, _) => Step::Wait("slot", false),
                     }
-                } else if state
-                    .turns
-                    .iter()
-                    .any(|t| t.conversation == conversation && t.granted.is_none())
-                {
-                    Step::Wait("turn", false)
                 } else {
                     let came: Vec<&str> = state
                         .turns
@@ -2366,6 +2617,7 @@ impl Broker {
                 .map(|w| SlotView {
                     conversation_id: w.conversation.clone(),
                     label: w.label.clone(),
+                    weight: w.weight.name(),
                     since: w.since_at,
                     granted: w.granted.is_some(),
                 })
@@ -2409,6 +2661,25 @@ impl Broker {
                     held: if index == 0 { waiting.len() } else { 0 },
                 })
                 .collect(),
+            waiting: {
+                let mut waiting: Vec<String> = waiting.iter().map(|c| c.to_string()).collect();
+                waiting.sort();
+                waiting
+            },
+            grants: {
+                let mut grants: Vec<GrantView> = state
+                    .grants
+                    .iter()
+                    .map(|(conversation, grant)| GrantView {
+                        conversation_id: conversation.clone(),
+                        weight: grant.weight.name(),
+                        bytes: grant.bytes,
+                        since: grant.at_ms,
+                    })
+                    .collect();
+                grants.sort_by_key(|g| g.since);
+                grants
+            },
         }
     }
 
@@ -3221,13 +3492,29 @@ fn running_builds(
     let mut tracked = HashSet::new();
     for run in state.runs.values() {
         for (id, call) in &run.calls {
-            if call.build && Some(id.as_str()) != except {
-                tracked.insert(run.conversation.clone());
-                running.push(Running {
-                    conversation: Some(run.conversation.clone()),
-                    label: call.label.clone(),
-                });
+            if Some(id.as_str()) == except {
+                continue;
             }
+            match call.weight {
+                Some(builds::Weight::Build) => {
+                    tracked.insert(run.conversation.clone());
+                    running.push(Running {
+                        conversation: Some(run.conversation.clone()),
+                        label: call.label.clone(),
+                    });
+                }
+                // A build of a few files compiles beside the builds, in no slot of theirs.
+                Some(builds::Weight::Light) => {
+                    tracked.insert(run.conversation.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    // So does one left running in the background, which its grant tells.
+    for (chat, grant) in &state.grants {
+        if grant.weight == builds::Weight::Light {
+            tracked.insert(chat.clone());
         }
     }
     if let Some((reading, owners)) = machine {
@@ -3642,6 +3929,90 @@ fn shortened(text: &str, chars: usize) -> String {
 
 /// The file beside the history that keeps which processes wait (`hold::save`).
 const FROZEN: &str = "frozen.json";
+/// The folder beside the history where each chat's grant is written, for its build scripts.
+const GRANTS: &str = "grants";
+/// What a chat's commands find in their environment: the chat, the file its grant is written to,
+/// and a folder of its own that lasts while the chat stays open (`crate::leases`).
+pub const CHAT_ENV: &str = "AGENT_STUDIO_PC_CHAT";
+pub const GRANT_ENV: &str = "AGENT_STUDIO_PC_GRANT";
+
+/// The file `conversation`'s builds read the memory they were granted from (`GRANT_ENV`):
+/// `{"bytes": …, "weight": "build" | "light" | "run", "grantedAt": …}` while its work holds a
+/// grant, and no file otherwise.
+pub fn grant_file(data: &Path, conversation: &str) -> PathBuf {
+    data.join("reservations")
+        .join(GRANTS)
+        .join(format!("{}.json", file_safe(conversation)))
+}
+
+/// What a chat's CLI is started with for its commands (requested 2026-11-26): which chat it is,
+/// where its grant is written, and its lease folder, which goes when the chat is closed.
+pub fn chat_env(data: &Path, conversation: &str) -> Vec<(&'static str, String)> {
+    vec![
+        (CHAT_ENV, conversation.to_string()),
+        (
+            GRANT_ENV,
+            grant_file(data, conversation)
+                .to_string_lossy()
+                .into_owned(),
+        ),
+        (
+            crate::leases::ENV,
+            crate::leases::folder(data, conversation)
+                .to_string_lossy()
+                .into_owned(),
+        ),
+    ]
+}
+
+/// A chat's id as part of a file name.
+fn file_safe(conversation: &str) -> String {
+    conversation
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// The memory work may still take now: free memory (commit, on Windows) less what the grants of
+/// chats' work started before have not taken yet, each grant less what its chat's processes use
+/// now. None when the computer cannot be read.
+fn available(
+    state: &State,
+    reading: Option<&machine::Reading>,
+    owners: Option<&machine::Owners>,
+) -> Option<u64> {
+    let reading = reading?;
+    let free = reading.free();
+    if state.grants.is_empty() {
+        return Some(free);
+    }
+    let mut used: HashMap<&str, u64> = HashMap::new();
+    if let Some(owners) = owners {
+        for process in &reading.processes {
+            if let machine::Owner::Chat(chat) = owners.of(process.pid) {
+                if let Some((key, _)) = state.grants.get_key_value(chat.as_str()) {
+                    *used.entry(key.as_str()).or_default() += process.memory;
+                }
+            }
+        }
+    }
+    let untaken: u64 = state
+        .grants
+        .iter()
+        .map(|(chat, grant)| {
+            grant
+                .bytes
+                .saturating_sub(used.get(chat.as_str()).copied().unwrap_or(0))
+        })
+        .sum();
+    Some(free.saturating_sub(untaken))
+}
 
 /// Processes held, by chat and program name, in the order they began.
 fn frozen_groups(frozen: &[Frozen]) -> Vec<(String, String, usize)> {

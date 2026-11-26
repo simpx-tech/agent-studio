@@ -86,9 +86,13 @@ const jobInput = z
         .success
     )
       ctx.addIssue({ code: 'custom', message: 'Invalid screen request' });
+    // `closed`: the chat was moved to History, so what its work held goes too (leases).
     if (
       job.method === 'release' &&
-      !z.object({ conversationId: uuid, connectionId: uuid }).strict().safeParse(job.args).success
+      !z
+        .object({ conversationId: uuid, connectionId: uuid, closed: z.boolean().optional() })
+        .strict()
+        .safeParse(job.args).success
     )
       ctx.addIssue({ code: 'custom', message: 'Invalid release request' });
     // A sign-in opened from another device, and the code its page showed there.

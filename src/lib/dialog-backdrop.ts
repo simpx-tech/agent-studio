@@ -3,8 +3,11 @@
  *
  * The press must begin on the backdrop as well, so a drag that starts inside the dialog
  * (panning an image, turning a model, selecting its text) keeps it open wherever it ends.
+ * `close` is how the dialog's owner closes it, as its close button and Escape do: a dialog the
+ * page shows while a flag of its own is set has to hear it, or the flag stays set and the next
+ * click opens nothing (requested 2026-11-26, the Reservations and Time report windows).
  */
-export function closeOnBackdrop(dialog: HTMLDialogElement) {
+export function closeOnBackdrop(dialog: HTMLDialogElement, close: () => void = () => dialog.close()) {
   // The backdrop belongs to the dialog: its events target the dialog, outside the dialog's box.
   const outside = (event: MouseEvent) => {
     if (event.target !== dialog) return false;
@@ -22,7 +25,7 @@ export function closeOnBackdrop(dialog: HTMLDialogElement) {
   // the dialog can stop them.
   const press = (event: MouseEvent) => (pressed = outside(event));
   const click = (event: MouseEvent) => {
-    if (pressed && outside(event)) dialog.close();
+    if (pressed && outside(event)) close();
     pressed = false;
   };
   dialog.addEventListener('pointerdown', press, true);
@@ -39,9 +42,9 @@ export function closeOnBackdrop(dialog: HTMLDialogElement) {
  * Closes a dialog that covers the window when the reader clicks its scrim: the dialog itself and
  * every element it marks `data-scrim`, the room around what it shows. As with `closeOnBackdrop`,
  * the press must begin on the scrim too, so a drag that starts on a picture or a control keeps
- * the dialog open wherever it ends.
+ * the dialog open wherever it ends. `close` is how its owner closes it, as for `closeOnBackdrop`.
  */
-export function closeOnScrim(dialog: HTMLDialogElement) {
+export function closeOnScrim(dialog: HTMLDialogElement, close: () => void = () => dialog.close()) {
   const scrim = (event: MouseEvent) => {
     const target = event.target as Element | null;
     if (event.button || !target) return false;
@@ -53,7 +56,7 @@ export function closeOnScrim(dialog: HTMLDialogElement) {
   let pressed = false;
   const press = (event: MouseEvent) => (pressed = scrim(event));
   const click = (event: MouseEvent) => {
-    if (pressed && scrim(event)) dialog.close();
+    if (pressed && scrim(event)) close();
     pressed = false;
   };
   dialog.addEventListener('pointerdown', press, true);

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   pcBesideText,
   pcBusy,
+  pcChatState,
   pcOutcome,
   pcOwner,
   pcQueueTitle,
@@ -11,6 +12,7 @@ import {
   pcTotals,
   pcTurnGroups,
   pcTurnRecords,
+  pcWaitCard,
   pcWaited,
   type PcReservation,
 } from './pc-reservations';
@@ -64,11 +66,13 @@ describe('lulls, turns, build slots and what ran beside a measurement', () => {
     expect(pcBusy(snapshot)).toBe(true);
     // A turn held with nobody waiting, and nothing else, is no reason to show the indicator.
     expect(pcBusy({ reservations: [], turns: [snapshot.turns[0]], slots: [] })).toBe(false);
-    // A host older than turns and slots sends neither.
+    // A host older than turns and slots sends neither, nor the chats waiting and the grants.
     expect(pcSnapshotSchema.parse({ reservations: [] })).toEqual({
       reservations: [],
       turns: [],
       slots: [],
+      waiting: [],
+      grants: [],
     });
   });
 
@@ -250,5 +254,98 @@ describe('the history of reservations', () => {
     expect(pcOwner('user', title)).toBe('Yours');
     expect(pcOutcome('asking')).toBe('still open');
     expect(pcOutcome('something new')).toBe('something new');
+  });
+});
+
+describe('where each chat stands, for its row in the sidebar and its running reply', () => {
+  const snapshot = pcSnapshotSchema.parse({
+    reservations: [
+      reservation({ held: 1 }),
+      reservation({ id: 'pc-2', conversationId: 'next', purpose: 'Profile the build', askedAt: 5 }),
+    ],
+    turns: [
+      {
+        id: 't1',
+        name: 'the landing of github.com/simpx-tech/bluevox',
+        landing: true,
+        conversationId: 'lander',
+        purpose: 'Final pipeline and push',
+        askedAt: 1,
+        grantedAt: 2,
+      },
+      {
+        id: 't2',
+        name: 'the landing of github.com/simpx-tech/bluevox',
+        landing: true,
+        conversationId: 'queued',
+        purpose: 'Final pipeline and push',
+        askedAt: 3,
+      },
+    ],
+    slots: [
+      { conversationId: 'builder', label: '`Tools\\Build.ps1 -Candidate`', since: 7 },
+      { conversationId: 'gamer', label: '`Run-Game.ps1`', weight: 'run', since: 8 },
+    ],
+    waiting: ['held'],
+  });
+  const titles = (id: string) =>
+    ({ bench: 'Chunk benchmark', lander: 'Square pin' })[id] ?? 'Another chat';
+
+  it('marks the chat reserving, the chats waiting and the one holding a landing turn', () => {
+    expect(pcChatState(snapshot, 'bench', titles)).toEqual({
+      kind: 'reserving',
+      measuring: false,
+      title: 'Reserving the computer: Benchmark of chunk meshing',
+    });
+    expect(
+      pcChatState({ ...snapshot, reservations: [reservation({ phase: 'open' })] }, 'bench', titles),
+    ).toMatchObject({ kind: 'reserving', measuring: true });
+    expect(pcChatState(snapshot, 'held', titles)).toEqual({
+      kind: 'waiting',
+      title: 'Waiting for the computer: Chunk benchmark reserved it: Benchmark of chunk meshing',
+    });
+    expect(pcChatState(snapshot, 'next', titles)?.kind).toBe('waiting');
+    expect(pcChatState(snapshot, 'builder', titles)?.title).toBe(
+      'Waiting for a build slot: First in line · Tools\\Build.ps1 -Candidate',
+    );
+    expect(pcChatState(snapshot, 'gamer', titles)?.title).toBe(
+      'Waiting for room for a game or test run: 1 ahead in line · Run-Game.ps1',
+    );
+    expect(pcChatState(snapshot, 'queued', titles)?.title).toBe(
+      'Waiting for its turn: Square pin holds the landing turn: Final pipeline and push',
+    );
+    expect(pcChatState(snapshot, 'lander', titles)).toEqual({
+      kind: 'turn',
+      title: 'Holding the landing turn',
+    });
+    expect(pcChatState(snapshot, 'idle', titles)).toBeUndefined();
+  });
+
+  it("gives a waiting chat's reply its card, with when its wait began where known", () => {
+    expect(pcWaitCard(snapshot, 'builder', titles)).toEqual({
+      heading: 'Waiting for a build slot',
+      detail: 'First in line · Tools\\Build.ps1 -Candidate',
+      since: 7,
+    });
+    expect(pcWaitCard(snapshot, 'next', titles)).toEqual({
+      heading: 'In line to reserve the computer',
+      detail: 'Next, behind Chunk benchmark: Benchmark of chunk meshing',
+      since: 5,
+    });
+    expect(
+      pcWaitCard({ ...snapshot, slots: [{ ...snapshot.slots[0], granted: true }] }, 'builder', titles)
+        ?.heading,
+    ).toBe('A build slot is free');
+    expect(pcWaitCard(snapshot, 'bench', titles)).toBeUndefined();
+  });
+
+  it('reads a snapshot from before grants and waiting chats', () => {
+    const old = pcSnapshotSchema.parse({
+      reservations: [],
+      slots: [{ conversationId: 'x', label: 'l', since: 1 }],
+    });
+    expect(old.waiting).toEqual([]);
+    expect(old.grants).toEqual([]);
+    expect(old.slots[0].weight).toBe('build');
   });
 });

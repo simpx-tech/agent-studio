@@ -61,7 +61,8 @@
     dialog.showModal();
     // Not the first control, which copies.
     closeButton.focus();
-    const release = closeOnBackdrop(dialog);
+    // Its backdrop closes it as Escape and its close button do, so the page can open it again.
+    const release = closeOnBackdrop(dialog, () => close());
     return () => {
       release();
       dialog.close();

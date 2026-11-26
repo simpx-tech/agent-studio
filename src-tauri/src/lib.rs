@@ -12,6 +12,7 @@ mod drafts;
 mod folder_icons;
 mod folders;
 mod imports;
+mod leases;
 mod lending;
 mod linking;
 mod live_usage;
@@ -1730,12 +1731,29 @@ async fn cancel_run(
 }
 #[tauri::command]
 async fn release_conversation(
+    app: tauri::AppHandle,
     pool: State<'_, pool::Pool>,
     conversation_id: String,
+    closed: Option<bool>,
 ) -> Result<(), String> {
     uuid::Uuid::parse_str(&conversation_id).map_err(|_| "Invalid conversation id")?;
     pool.release(&conversation_id).await;
+    // A chat closed, moved to History or deleted, lets go of what its work held (`leases`).
+    if closed == Some(true) {
+        if let Ok(data) = app.path().app_local_data_dir() {
+            leases::close(&data, &conversation_id);
+        }
+    }
     Ok(())
+}
+/// Lets go of what chats no longer open held on this computer, as the window starts (`leases`).
+#[tauri::command]
+async fn prune_leases(app: tauri::AppHandle, open: Vec<String>) -> Result<usize, String> {
+    let data = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("Cannot locate app data: {e}"))?;
+    Ok(leases::prune(&data, &open.into_iter().collect()))
 }
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
@@ -2571,6 +2589,7 @@ pub fn run() {
             generate_folder_icon,
             cancel_run,
             release_conversation,
+            prune_leases,
             undo_files,
             answer_question,
             answer_workflow_call,

@@ -2656,7 +2656,10 @@ async function localCall(
     return result;
   }
   if (method === 'release')
-    return invoke('release_conversation', { conversationId: args.conversationId });
+    return invoke('release_conversation', {
+      conversationId: args.conversationId,
+      closed: args.closed === true,
+    });
   if (method === 'signIn') return hostSignIn(args, onEvent);
   if (method === 'signInCode') {
     // Only a sign-in still waiting here, for the connection the code was sent for.
@@ -3927,18 +3930,33 @@ export async function cancelRun(runId: string, connectionId?: string, waitForCom
  * here, or deleted on another device and removed here by sync. Nothing else ends one: a
  * parked process stays until the user closes its chat.
  */
-export async function releaseConversation(conversationId: string, connectionId?: string) {
+export async function releaseConversation(
+  conversationId: string,
+  connectionId?: string,
+  /** The chat is closed (moved to History or deleted): what its work held goes too. */
+  closed = false,
+) {
   if (!desktop() || remoteTarget(connectionId)) return;
-  await invoke('release_conversation', { conversationId });
+  await invoke('release_conversation', { conversationId, closed });
 }
 /**
  * The user moved a chat to History, which closes it: the computer that runs it releases its
- * parked CLI process, asked through a relay job from another device. History moves arriving
- * by sync close nothing, since another desktop's startup sends them too.
+ * parked CLI process and lets go of what the chat's work held (its lease folder,
+ * src-tauri/src/leases.rs), asked through a relay job from another device. History moves
+ * arriving by sync close nothing, since another desktop's startup sends them too.
  */
 export async function closeConversation(conversationId: string, connectionId?: string) {
-  if (!connectionId || !remoteTarget(connectionId)) return releaseConversation(conversationId);
-  await routed('release', { conversationId, connectionId }, connectionId);
+  if (!connectionId || !remoteTarget(connectionId))
+    return releaseConversation(conversationId, undefined, true);
+  await routed('release', { conversationId, connectionId, closed: true }, connectionId);
+}
+/**
+ * Lets go of what chats no longer open held on this computer (src-tauri/src/leases.rs): every
+ * lease folder but those of `open`, the chats still open, as it starts.
+ */
+export async function pruneLeases(open: string[]): Promise<number> {
+  if (!desktop()) return 0;
+  return z.number().parse(await invoke('prune_leases', { open }));
 }
 export async function undoFiles(
   conversationId: string,
