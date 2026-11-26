@@ -1738,10 +1738,14 @@ async fn release_conversation(
 ) -> Result<(), String> {
     uuid::Uuid::parse_str(&conversation_id).map_err(|_| "Invalid conversation id")?;
     pool.release(&conversation_id).await;
-    // A chat closed, moved to History or deleted, lets go of what its work held (`leases`).
+    // A chat closed, moved to History or deleted, lets go of what its work held (`leases`), and
+    // of the turns it held or waited for, which its next reply would otherwise have taken on.
     if closed == Some(true) {
         if let Ok(data) = app.path().app_local_data_dir() {
             leases::close(&data, &conversation_id);
+        }
+        if let Some(broker) = app.try_state::<std::sync::Arc<reservations::Broker>>() {
+            broker.chat_closed(&conversation_id);
         }
     }
     Ok(())

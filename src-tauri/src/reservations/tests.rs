@@ -1430,7 +1430,7 @@ async fn a_build_beside_others_needs_free_memory_and_time_for_the_last_to_grow()
 }
 
 #[tokio::test]
-async fn named_reservations_take_turns_and_end_with_their_reply() {
+async fn named_reservations_take_turns_and_outlive_their_reply_a_few_minutes() {
     let folder = tempfile::tempdir().unwrap();
     let history = folder.path().join("history.jsonl");
     let broker = broker_with(vec![], Some(history.clone()));
@@ -1502,8 +1502,34 @@ async fn named_reservations_take_turns_and_end_with_their_reply() {
         "{came}"
     );
     assert_eq!(*told.lock().unwrap(), [None, Some("turn"), None]);
-    // The reply that took it ends: so does its turn, which the history keeps.
+    // The reply that took it ends, as a message the user sends ends one: the turn waits a few
+    // minutes for its chat's next reply, which takes it on (requested 2026-11-26).
     broker.run_ended("run-ui");
+    let kept = broker.snapshot().turns;
+    assert_eq!(kept.len(), 1);
+    assert!(kept[0].granted_at.is_some() && kept[0].kept_until.is_some());
+    let status = broker.status("bench", None);
+    assert!(
+        status.contains("whose reply ended")
+            && status.contains("unless a reply of that chat takes it on"),
+        "{status}"
+    );
+    broker.watch_at(None, &[], Instant::now() + TURN_KEEP / 2);
+    broker.run_started("run-ui-2", "ui");
+    let taken = broker.snapshot().turns;
+    assert_eq!(taken.len(), 1);
+    assert!(taken[0].granted_at.is_some() && taken[0].kept_until.is_none());
+    broker.watch_at(None, &[], Instant::now() + TURN_KEEP * 2);
+    assert_eq!(broker.snapshot().turns.len(), 1);
+    // That reply ends too, and none takes the turn on in time: it ends, which the history keeps.
+    broker.run_ended("run-ui-2");
+    broker.watch_at(
+        None,
+        &[],
+        Instant::now() + TURN_KEEP - Duration::from_secs(1),
+    );
+    assert_eq!(broker.snapshot().turns.len(), 1);
+    broker.watch_at(None, &[], Instant::now() + TURN_KEEP);
     assert!(broker.snapshot().turns.is_empty());
     let records = read_history(&history);
     assert_eq!(records.len(), 2);
@@ -1511,6 +1537,157 @@ async fn named_reservations_take_turns_and_end_with_their_reply() {
     assert_eq!(records[1]["endedBy"], "reply");
     assert_eq!(records[1]["conversationId"], "ui");
     assert!(broker.release_turns("ui", None).is_none());
+}
+
+/// A chat holding `key`'s landing turn, and another in line for it.
+fn two_in_line(broker: &Broker, key: &str) {
+    broker.run_started("run-bench", "bench");
+    broker.take_turn(
+        "run-bench",
+        "bench",
+        key,
+        "the landing of github.com/simpx-tech/bluevox",
+        true,
+        "Final check and push",
+    );
+    broker.run_started("run-ui", "ui");
+    broker.take_turn(
+        "run-ui",
+        "ui",
+        key,
+        "the landing of github.com/simpx-tech/bluevox",
+        true,
+        "Final check and push",
+    );
+}
+
+#[tokio::test]
+async fn a_turn_whose_holder_runs_work_that_uses_no_cpu_goes_to_the_next_in_line() {
+    let folder = tempfile::tempdir().unwrap();
+    let history = folder.path().join("history.jsonl");
+    let broker = broker_with(vec![], Some(history.clone()));
+    let key = named::key("landing:github.com/simpx-tech/bluevox");
+    two_in_line(&broker, &key);
+    // Its holder builds, and the build stops using the CPU, as one did for 94 minutes on a full
+    // page file while four chats waited (requested 2026-11-26).
+    let (build, built) = command("build", r".\Tools\Build.ps1 -Candidate");
+    broker.tool("run-bench", &build);
+    let quiet: HashMap<String, f64> = [("bench".to_string(), 0.02), ("ui".to_string(), 0.0)].into();
+    let start = Instant::now();
+    broker.watch_at(Some(&quiet), &[], start);
+    broker.watch_at(
+        Some(&quiet),
+        &[],
+        start + STALL_WARN - Duration::from_secs(1),
+    );
+    assert!(broker.deliver("bench").is_none());
+    assert!(broker.snapshot().turns[0].stalled_at.is_none());
+    // After a while its holder hears it may have stalled, once.
+    broker.watch_at(Some(&quiet), &[], start + STALL_WARN);
+    let warned = broker.deliver("bench").unwrap();
+    assert!(
+        warned.starts_with("Agent Studio: this chat holds the landing of github.com/simpx-tech/bluevox (Final check and push), and the work it runs (")
+            && warned.contains("has used no CPU for 10m 0s: it may have stalled")
+            && warned.contains("pc_release (landing: true) if you cannot go on soon: 1 chat waits for it.")
+            && warned.contains("Once that work has used no CPU for 20m 0s, the turn goes to the next chat in line"),
+        "{warned}"
+    );
+    assert!(broker.snapshot().turns[0].stalled_at.is_some());
+    assert!(broker.status("ui", None).contains("it may have stalled"));
+    broker.watch_at(
+        Some(&quiet),
+        &[],
+        start + STALL_WARN + Duration::from_secs(10),
+    );
+    assert!(broker.deliver("bench").is_none());
+    // Work that uses the CPU again starts the count afresh.
+    let busy: HashMap<String, f64> = [("bench".to_string(), 3.5)].into();
+    broker.watch_at(
+        Some(&busy),
+        &[],
+        start + STALL_WARN + Duration::from_secs(20),
+    );
+    assert!(broker.snapshot().turns[0].stalled_at.is_none());
+    broker.watch_at(Some(&quiet), &[], start + STALL_RELEASE);
+    assert_eq!(broker.snapshot().turns[0].conversation_id, "bench");
+    // Quiet long enough, it goes to the next chat in line, and its holder hears why.
+    let again = start + STALL_RELEASE + Duration::from_secs(1);
+    broker.watch_at(Some(&quiet), &[], again + STALL_RELEASE);
+    let turns = broker.snapshot().turns;
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].conversation_id, "ui");
+    assert!(turns[0].granted_at.is_some());
+    let told = broker.deliver("bench").unwrap();
+    assert!(
+        told.contains("the landing of github.com/simpx-tech/bluevox went to the next chat in line")
+            && told.contains("used no CPU for 20m 1s, and 1 chat waited for it"),
+        "{told}"
+    );
+    let records = read_history(&history);
+    assert_eq!(records[0]["endedBy"], "stalled");
+    assert_eq!(records[0]["conversationId"], "bench");
+    broker.tool("run-bench", &built);
+}
+
+#[tokio::test]
+async fn a_turn_is_kept_while_its_holder_waits_thinks_or_works_and_nobody_waits_for_it() {
+    let broker = broker_with(vec![], None);
+    let key = named::key("landing:github.com/simpx-tech/bluevox");
+    broker.run_started("run-bench", "bench");
+    broker.take_turn(
+        "run-bench",
+        "bench",
+        &key,
+        "the landing of github.com/simpx-tech/bluevox",
+        true,
+        "Final check and push",
+    );
+    let quiet: HashMap<String, f64> = [("bench".to_string(), 0.0)].into();
+    let start = Instant::now();
+    // No build or run, nor background work, so its agent thinks: nothing to watch.
+    broker.watch_at(Some(&quiet), &[], start);
+    broker.watch_at(Some(&quiet), &[], start + STALL_RELEASE * 2);
+    assert!(broker.deliver("bench").is_none());
+    // A test run in the background that stops using the CPU is warned of, and kept while
+    // nobody waits for the name.
+    let tests = BackgroundWork {
+        conversation: "bench".into(),
+        id: "tests".into(),
+        label: "Run the test suite".into(),
+    };
+    broker.watch_at(Some(&quiet), std::slice::from_ref(&tests), start);
+    broker.watch_at(
+        Some(&quiet),
+        std::slice::from_ref(&tests),
+        start + STALL_RELEASE * 2,
+    );
+    let warned = broker.deliver("bench").unwrap();
+    assert!(
+        warned.contains("the work it runs (Run the test suite) has used no CPU"),
+        "{warned}"
+    );
+    assert!(!warned.contains("waits for it"), "{warned}");
+    assert_eq!(broker.snapshot().turns.len(), 1);
+}
+
+#[tokio::test]
+async fn a_closed_chat_lets_go_of_its_turns_at_once() {
+    let folder = tempfile::tempdir().unwrap();
+    let history = folder.path().join("history.jsonl");
+    let broker = broker_with(vec![], Some(history.clone()));
+    let key = named::key("landing:github.com/simpx-tech/bluevox");
+    two_in_line(&broker, &key);
+    broker.run_ended("run-bench");
+    assert!(broker.snapshot().turns[0].kept_until.is_some());
+    broker.chat_closed("bench");
+    let turns = broker.snapshot().turns;
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].conversation_id, "ui");
+    assert!(turns[0].granted_at.is_some());
+    assert_eq!(read_history(&history)[0]["endedBy"], "closed");
+    // Closing a chat that holds nothing changes nothing.
+    broker.chat_closed("bench");
+    assert_eq!(read_history(&history).len(), 1);
 }
 
 #[tokio::test]

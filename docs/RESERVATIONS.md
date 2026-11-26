@@ -264,13 +264,37 @@ On hold) in their Time report. Names read the same however they are written (cas
 separators). A landing turn's name is the repository's `origin` remote (`github.com/owner/repo`,
 whether written as https, ssh or `git@`), else its common Git folder, read from Git's own files,
 so every checkout and worktree of a repository shares one turn, a WSL folder's included through its
-`\\wsl.localhost` path. Agents take it just before fetching and merging the main branch for the
-final pipeline, and give it back right after the push, so another chat's landing never makes
-theirs redo its pipeline (38 minutes redone one afternoon). A named reservation holds nothing else:
-other chats' commands run. It ends with `pc_release` and its `name` or `landing`, or when the reply
-that took it ends; `pc_release` alone releases a chat's named reservations only when it holds no
-reservation of the computer. `pc_status` lists each name with its holder and those waiting, and the
-history keeps each turn (`"kind": "turn"`).
+`\\wsl.localhost` path. Agents run the full pipeline first, on their branch merged with a freshly
+fetched main branch, and take the turn only then: under it they fetch again and push at once when
+the main branch has not moved, or merge what came and run again the checks it could affect, then
+push, and give the turn back right after the push (requested 2026-11-26, after five chats waited 77
+to 172 minutes in line while each holder ran its whole pipeline under the turn). So another chat's
+landing never makes theirs redo its whole pipeline (38 minutes redone one afternoon), and none
+waits through another's. A named reservation holds nothing else: other chats' commands run. It
+ends with `pc_release` and its `name` or `landing`; `pc_release` alone releases a chat's named
+reservations only when it holds no reservation of the computer. `pc_status` lists each name with
+its holder and those waiting, and the history keeps each turn (`"kind": "turn"`, its `endedBy`
+`release`, `reply`, `stalled` or `closed`).
+
+A turn **outlives the reply that took it** by five minutes (`TURN_KEEP`, requested 2026-11-26: a
+message the user sent ended a reply waiting on its build, and its chat lost the landing turn and its
+place, going back to the end of the line): the chat's next reply takes it on as it starts
+(`run_started`), held or still in line, and it ends only once that time passed with no reply of its
+chat (`watch_turns`, `endedBy: "reply"`). Closing the chat (Move to History, deleting it) ends it at
+once (`chat_closed`, from `release_conversation` with `closed`).
+
+A turn whose holder's work **stalls** goes to the next in line (requested 2026-11-26, after a build
+hung 94 minutes on a full page file while its chat held the landing turn and four chats waited).
+While a chat holds a turn, the computer is read every ten seconds (`STALL_READ`), and its work is
+the chat job's CPU since the last reading (`machine::work`, as for idle work above). When the chat
+runs a build or a run (`builds::weight`) or background work, is not waiting in `pc_wait`, and that
+work keeps under a quarter of a core (`machine::IDLE_CORE`) for ten minutes (`STALL_WARN`), the
+holder hears it may have stalled, once, with its next tool call; after twenty (`STALL_RELEASE`) the
+turn goes to the next chat in line, when one waits, and the holder hears why (`endedBy:
+"stalled"`). Work that uses the CPU again starts the count afresh, a chat thinking between calls
+runs nothing to watch, and a chat inside WSL, whose work this computer's readings do not see, is
+not watched. The Reservations window marks a held turn kept for its chat's next reply, or whose
+work has used no CPU, and the chat's row in the sidebar says so on hover.
 
 ## Leases: what a chat holds while it stays open
 
@@ -445,3 +469,9 @@ the binding records `reservations_rule` once a session has it, and one written b
 - A Codex thread begun before Agent Studio 1.4.0 keeps the tools it started with: its commands
   and MCP calls wait like any other chat's, but it has no `pc_wait` to wait with, nor
   `pc_reserve` to measure with.
+- Watching a WSL chat's work under a turn: its work runs where this computer's readings do not see,
+  so a stalled build of a WSL chat holding a turn keeps it until it is released, its chat is closed
+  or five minutes after its reply ends.
+- A message reaches a chat with its next tool call, so a chat whose call hung hears that its work
+  may have stalled, or that its turn went on, only once that call ends; the Reservations window and
+  the sidebar show it at once.

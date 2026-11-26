@@ -38,8 +38,24 @@ export const pcTurnSchema = z.object({
   purpose: z.string(),
   askedAt: z.number(),
   grantedAt: z.number().optional(),
+  /** Since when the work its holder runs has used no CPU, once its holder heard it may have stalled. */
+  stalledAt: z.number().optional(),
+  /** Its reply ended: when it ends unless a reply of its chat takes it on. */
+  keptUntil: z.number().optional(),
 });
 export type PcTurn = z.infer<typeof pcTurnSchema>;
+
+/**
+ * What a held turn's row adds (requested 2026-11-26): its reply ended and it waits for its chat's
+ * next reply, or the work its holder runs has used no CPU and may have stalled.
+ */
+export function pcTurnNote(turn: PcTurn, now: number): string | undefined {
+  const minutes = (ms: number) => `${Math.max(1, Math.round(ms / 60_000))} min`;
+  if (turn.keptUntil != null)
+    return `its reply ended: kept for its next reply, ${minutes(turn.keptUntil - now)} left`;
+  if (turn.stalledAt != null) return `its work used no CPU for ${minutes(now - turn.stalledAt)}`;
+  return undefined;
+}
 /** What a chat's command asks of the computer: a build, a build of a few files, or a run. */
 const pcWeightSchema = z.enum(['build', 'light', 'run']).catch('build');
 /** A chat's build waiting for a slot beside the builds running, or its game or test run for room. */
@@ -101,7 +117,15 @@ export function pcChatState(
   const held = snapshot.turns.find(
     (turn) => turn.conversationId === conversationId && turn.grantedAt != null,
   );
-  if (held) return { kind: 'turn', title: `Holding ${turnName(held)}` };
+  if (held) {
+    const note =
+      held.keptUntil != null
+        ? ': its reply ended, and it waits a few minutes for the next'
+        : held.stalledAt != null
+          ? ': the work it runs uses no CPU and may have stalled'
+          : '';
+    return { kind: 'turn', title: `Holding ${turnName(held)}${note}` };
+  }
   return undefined;
 }
 
@@ -148,7 +172,9 @@ export function pcWaitCard(
       since: slot.since,
     };
   }
-  const turn = snapshot.turns.find((t) => t.conversationId === conversationId && t.grantedAt == null);
+  const turn = snapshot.turns.find(
+    (t) => t.conversationId === conversationId && t.grantedAt == null,
+  );
   if (turn) {
     const key = (t: PcTurn) => (t.landing ? `landing:${t.name}` : t.name.toLowerCase());
     const holder = snapshot.turns.find((t) => key(t) === key(turn) && t.grantedAt != null);
@@ -413,6 +439,16 @@ export const pcOutcomes: Record<string, string> = {
   gone: 'already gone',
 };
 export const pcOutcome = (outcome: string) => pcOutcomes[outcome] ?? outcome;
+
+/** How a turn the history keeps ended, where it did not end by its release. */
+export const pcTurnEnd = (record: PcTurnRecord): string | undefined =>
+  (
+    ({
+      reply: 'its reply ended',
+      stalled: 'its work used no CPU',
+      closed: 'its chat was closed',
+    }) as Record<string, string>
+  )[record.endedBy];
 
 /** What the history records of a reservation's end. */
 export const pcEndedBy = (record: PcRecord) =>

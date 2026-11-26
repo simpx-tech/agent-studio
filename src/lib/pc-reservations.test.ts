@@ -10,7 +10,9 @@ import {
   pcReservationTitle,
   pcSnapshotSchema,
   pcTotals,
+  pcTurnEnd,
   pcTurnGroups,
+  pcTurnNote,
   pcTurnRecords,
   pcWaitCard,
   pcWaited,
@@ -333,10 +335,34 @@ describe('where each chat stands, for its row in the sidebar and its running rep
       since: 5,
     });
     expect(
-      pcWaitCard({ ...snapshot, slots: [{ ...snapshot.slots[0], granted: true }] }, 'builder', titles)
-        ?.heading,
+      pcWaitCard(
+        { ...snapshot, slots: [{ ...snapshot.slots[0], granted: true }] },
+        'builder',
+        titles,
+      )?.heading,
     ).toBe('A build slot is free');
     expect(pcWaitCard(snapshot, 'bench', titles)).toBeUndefined();
+  });
+
+  it('says when a held turn waits for its next reply or its work may have stalled', () => {
+    const [held] = snapshot.turns;
+    const now = 10 * 60_000;
+    const kept = { ...held, keptUntil: now + 4 * 60_000 };
+    const stalled = { ...held, stalledAt: now - 12 * 60_000 };
+    expect(pcTurnNote(held, now)).toBeUndefined();
+    expect(pcTurnNote(kept, now)).toBe('its reply ended: kept for its next reply, 4 min left');
+    expect(pcTurnNote(stalled, now)).toBe('its work used no CPU for 12 min');
+    expect(pcChatState({ ...snapshot, turns: [kept] }, 'lander', titles)?.title).toBe(
+      'Holding the landing turn: its reply ended, and it waits a few minutes for the next',
+    );
+    expect(pcChatState({ ...snapshot, turns: [stalled] }, 'lander', titles)?.title).toBe(
+      'Holding the landing turn: the work it runs uses no CPU and may have stalled',
+    );
+    const record = (endedBy: string) =>
+      pcTurnRecords([{ kind: 'turn', ...held, endedAt: 9, endedBy, waitedMs: 0 }])[0];
+    expect(pcTurnEnd(record('stalled'))).toBe('its work used no CPU');
+    expect(pcTurnEnd(record('closed'))).toBe('its chat was closed');
+    expect(pcTurnEnd(record('release'))).toBeUndefined();
   });
 
   it('reads a snapshot from before grants and waiting chats', () => {

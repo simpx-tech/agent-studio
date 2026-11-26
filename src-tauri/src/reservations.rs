@@ -73,6 +73,18 @@ const STALE: Duration = Duration::from_secs(15);
 const WSL_DURING: Duration = Duration::from_secs(10);
 /// The file beside the history that keeps this computer's settings of reservations.
 const SETTINGS: &str = "settings.json";
+/// How long a turn's holder may run a build, a test run or other work that uses no CPU before it
+/// hears that its work may have stalled, and before its turn goes to the next chat in line, when
+/// one waits (requested 2026-11-26, after a build hung 94 minutes on a full page file while its
+/// chat held a landing turn and four chats waited).
+const STALL_WARN: Duration = Duration::from_secs(10 * 60);
+const STALL_RELEASE: Duration = Duration::from_secs(20 * 60);
+/// How often the computer is read only to watch the turns' holders.
+const STALL_READ: Duration = Duration::from_secs(10);
+/// How long a turn outlives the reply that took it, for its chat's next reply to take on
+/// (requested 2026-11-26: a message the user sent ended a reply waiting on its build, and its
+/// chat lost its landing turn and its place, going back to the end of the line).
+const TURN_KEEP: Duration = Duration::from_secs(5 * 60);
 
 /// This computer's settings of reservations (app data `reservations/settings.json`, never
 /// synced), which Settings → Reservations changes.
@@ -158,6 +170,14 @@ pub struct TurnView {
     /// When this chat's turn came: it holds the name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub granted_at: Option<u64>,
+    /// Since when the work its holder runs has used no CPU, once that told the holder it may have
+    /// stalled (`STALL_WARN`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stalled_at: Option<u64>,
+    /// The reply that took it ended: when it ends unless a reply of its chat takes it on
+    /// (`TURN_KEEP`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kept_until: Option<u64>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -256,6 +276,8 @@ struct State {
     /// The memory each chat's build or run was granted as it started, held until it ends, so
     /// that what starts beside it leaves it room (`builds::grant`, requested 2026-11-26).
     grants: HashMap<String, Grant>,
+    /// When the computer was last read to watch the turns' holders (`STALL_READ`).
+    stall_read_at: Option<Instant>,
     /// When each chat last released the computer, and in which reply.
     released: HashMap<String, (String, Instant)>,
     /// What readings found of each chat's work, which a window does not wait for while idle.
@@ -324,6 +346,12 @@ struct Turn {
     asked_at: u64,
     granted: Option<Instant>,
     granted_at: Option<u64>,
+    /// The reply that took it ended: since when it waits for its chat's next reply (`TURN_KEEP`).
+    orphaned: Option<Instant>,
+    /// Since when the work its holder runs has used no CPU (`watch_turns`), and whether the holder
+    /// heard it may have stalled.
+    quiet_since: Option<Instant>,
+    warned: bool,
 }
 /// A chat whose build waits for a slot (`builds`), or whose run waits for room.
 struct SlotWait {
@@ -645,6 +673,27 @@ impl Broker {
         *self.read.lock().unwrap_or_else(|e| e.into_inner()) = read;
     }
 
+    /// Watches the turns as a tick at `now` does, with each chat's work as `work` read it.
+    #[cfg(test)]
+    pub fn watch_at(
+        &self,
+        work: Option<&HashMap<String, f64>>,
+        background: &[BackgroundWork],
+        now: Instant,
+    ) {
+        let (reports, snapshot) = {
+            let mut state = self.lock();
+            let (reports, changed) = self.watch_turns(&mut state, work, background, now);
+            (reports, changed.then(|| self.view(&state)))
+        };
+        for report in &reports {
+            self.keep(report);
+        }
+        if let Some(snapshot) = snapshot {
+            self.publish(snapshot);
+        }
+    }
+
     /// This computer's settings of reservations.
     pub fn settings(&self) -> Settings {
         *self.settings.lock().unwrap_or_else(|e| e.into_inner())
@@ -723,15 +772,62 @@ impl Broker {
         (self.emit)(&snapshot);
     }
 
-    /// A reply of `conversation` began on this computer.
+    /// A reply of `conversation` began on this computer. It takes on the turns its chat's last
+    /// reply left (`TURN_KEEP`).
     pub fn run_started(&self, run_id: &str, conversation: &str) {
-        self.lock().runs.insert(
-            run_id.into(),
-            Run {
-                conversation: conversation.into(),
-                calls: HashMap::new(),
-            },
-        );
+        let snapshot = {
+            let mut state = self.lock();
+            state.runs.insert(
+                run_id.into(),
+                Run {
+                    conversation: conversation.into(),
+                    calls: HashMap::new(),
+                },
+            );
+            let mut taken = false;
+            for turn in state
+                .turns
+                .iter_mut()
+                .filter(|t| t.conversation == conversation && t.orphaned.is_some())
+            {
+                turn.run_id = run_id.into();
+                turn.orphaned = None;
+                taken = true;
+            }
+            taken.then(|| self.view(&state))
+        };
+        if let Some(snapshot) = snapshot {
+            self.publish(snapshot);
+        }
+    }
+
+    /// `conversation` was closed (moved to History or deleted): the turns it held or waited for,
+    /// its builds waiting for a slot and its work's grant go at once.
+    pub fn chat_closed(&self, conversation: &str) {
+        let (reports, snapshot) = {
+            let mut state = self.lock();
+            let now = Instant::now();
+            let reports = self.end_turns(
+                &mut state,
+                |t| t.conversation == conversation,
+                now,
+                "closed",
+            );
+            let waiting = state.slots.len();
+            state.slots.retain(|w| w.conversation != conversation);
+            let granted = state.grants.contains_key(conversation);
+            if granted {
+                self.end_grant(&mut state, conversation);
+            }
+            if reports.is_empty() && waiting == state.slots.len() && !granted {
+                return;
+            }
+            (reports, self.view(&state))
+        };
+        for report in &reports {
+            self.keep(report);
+        }
+        self.publish(snapshot);
     }
 
     /// A call a running reply reported. Commands, monitors and calls of MCP servers' tools count
@@ -869,7 +965,7 @@ impl Broker {
 
     /// The reply `run_id` ended: its commands with it, and a reservation it held.
     pub fn run_ended(&self, run_id: &str) {
-        let (report, snapshot) = {
+        let (report, snapshot, kept) = {
             let mut state = self.lock();
             let now = Instant::now();
             let ended = state.runs.remove(run_id).map(|run| run.conversation);
@@ -879,8 +975,17 @@ impl Broker {
                 .iter()
                 .position(|r| r.run_id == run_id)
                 .map(|index| self.end(&mut state, index, now, "reply"));
-            // The names it held or waited for go with the reply that took them.
-            let turns = self.end_turns(&mut state, |t| t.run_id == run_id, now, "reply");
+            // The names it held or waited for wait a few minutes for its chat's next reply to take
+            // them on (`TURN_KEEP`), and go after that (`watch_turns`).
+            let mut kept = false;
+            for turn in state
+                .turns
+                .iter_mut()
+                .filter(|t| t.run_id == run_id && t.orphaned.is_none())
+            {
+                turn.orphaned = Some(now);
+                kept = true;
+            }
             // Unless another reply of its chat took over, what the chat was asked ends with it.
             let asks_ended = match ended {
                 Some(conversation)
@@ -894,19 +999,20 @@ impl Broker {
             let snapshot = match (&report, changed) {
                 (_, Some(snapshot)) => Some(snapshot),
                 (Some(_), None) => Some(self.view(&state)),
-                (None, None) if asks_ended || !turns.is_empty() => Some(self.view(&state)),
+                (None, None) if asks_ended || kept => Some(self.view(&state)),
                 (None, None) => None,
             };
-            (
-                report.into_iter().chain(turns).collect::<Vec<_>>(),
-                snapshot,
-            )
+            (report, snapshot, kept)
         };
-        for report in &report {
+        if let Some(report) = &report {
             self.keep(report);
         }
         if let Some(snapshot) = snapshot {
             self.publish(snapshot);
+        }
+        // A kept turn ends once no reply of its chat took it on in time.
+        if kept {
+            self.look();
         }
     }
 
@@ -1483,14 +1589,30 @@ impl Broker {
     /// reservation is left to look after.
     async fn tick(self: &Arc<Self>) -> bool {
         let done = |state: &State| {
-            state.queue.is_empty() && state.slots.is_empty() && state.grants.is_empty()
+            state.queue.is_empty()
+                && state.slots.is_empty()
+                && state.grants.is_empty()
+                && state.turns.is_empty()
         };
-        let (measuring, waiting, slots) = {
+        let (measuring, waiting, slots, stalls) = {
             let mut state = self.lock();
             if done(&state) {
                 state.ticking = false;
                 state.last = None;
+                state.stall_read_at = None;
                 return false;
+            }
+            let now = Instant::now();
+            // A turn's holder, whose work `watch_turns` reads every `STALL_READ`.
+            let stalls = state
+                .turns
+                .iter()
+                .any(|t| t.granted.is_some() && t.orphaned.is_none())
+                && state
+                    .stall_read_at
+                    .is_none_or(|at| now.saturating_duration_since(at) >= STALL_READ);
+            if stalls {
+                state.stall_read_at = Some(now);
             }
             let first = state.queue.first();
             (
@@ -1498,9 +1620,10 @@ impl Broker {
                 first.is_some_and(|r| r.opened.is_none()),
                 // Builds waiting for a slot, or granted work whose end the computer tells.
                 !state.slots.is_empty() || !state.grants.is_empty(),
+                stalls,
             )
         };
-        let reading = if measuring || waiting || slots {
+        let reading = if measuring || waiting || slots || stalls {
             let read = *self.read.lock().unwrap_or_else(|e| e.into_inner());
             tauri::async_runtime::spawn_blocking(read)
                 .await
@@ -1511,11 +1634,12 @@ impl Broker {
         };
         let members = reading.as_ref().map(|_| self.jobs.members());
         let launches = reading.as_ref().map(|_| self.jobs.wsl());
-        let (update, inside) = {
+        let (update, inside, reports) = {
             let mut state = self.lock();
             if done(&state) {
                 state.ticking = false;
                 state.last = None;
+                state.stall_read_at = None;
                 return false;
             }
             let now = Instant::now();
@@ -1532,14 +1656,16 @@ impl Broker {
             }
             // How busy each chat's work was since the last reading, unless that is too long ago
             // to tell of now.
+            let mut work = None;
             if let (Some(reading), Some(members)) = (&reading, &members) {
                 if let Some((before, then)) = state
                     .last
                     .take()
                     .filter(|(before, _)| reading.at.saturating_duration_since(before.at) <= STALE)
                 {
-                    let work = machine::work((&before, &then), (reading, members));
-                    heard_work(&mut state, false, replying, &work, before.at, reading.at);
+                    let found = machine::work((&before, &then), (reading, members));
+                    heard_work(&mut state, false, replying, &found, before.at, reading.at);
+                    work = Some(found);
                 }
                 state.last = Some((reading.clone(), members.clone()));
             }
@@ -1548,7 +1674,16 @@ impl Broker {
                 .zip(members.as_ref())
                 .map(|(r, m)| machine::Owners::new(r, m, std::process::id()));
             // Builds waiting for a slot, beside what builds now.
-            let changed = self.grant(&mut state, reading.as_ref(), owners.as_ref(), now);
+            let mut changed = self.grant(&mut state, reading.as_ref(), owners.as_ref(), now);
+            // The turns: one its reply left, and one whose holder's work stalled.
+            let background = if work.is_some() && state.turns.iter().any(|t| t.granted.is_some()) {
+                (self.background)()
+            } else {
+                vec![]
+            };
+            let (reports, turns_changed) =
+                self.watch_turns(&mut state, work.as_ref(), &background, now);
+            changed |= turns_changed;
             if let (Some(reading), Some(owners), Some(launches)) = (reading, owners, &launches) {
                 if let Some(first) = state.queue.first_mut().filter(|r| r.opened.is_some()) {
                     let holder = first.conversation.clone();
@@ -1582,8 +1717,11 @@ impl Broker {
                 None if changed => Some(self.view(&state)),
                 None => None,
             };
-            (update, inside)
+            (update, inside, reports)
         };
+        for report in &reports {
+            self.keep(report);
+        }
         if let Some(snapshot) = update {
             self.publish(snapshot);
         }
@@ -1657,6 +1795,7 @@ impl Broker {
                 Some(turn) => {
                     turn.purpose = purpose.trim().into();
                     turn.run_id = run_id.into();
+                    turn.orphaned = None;
                 }
                 None => {
                     state.next += 1;
@@ -1673,6 +1812,9 @@ impl Broker {
                         asked_at: epoch_ms(),
                         granted: None,
                         granted_at: None,
+                        orphaned: None,
+                        quiet_since: None,
+                        warned: false,
                     });
                 }
             }
@@ -1683,6 +1825,8 @@ impl Broker {
             )
         };
         self.publish(snapshot);
+        // Its holder is watched, and a turn its reply left ends after a while.
+        self.look();
         text
     }
 
@@ -1698,7 +1842,7 @@ impl Broker {
         let release = release_hint(mine);
         if mine.granted.is_some() {
             return format!(
-                "This chat holds {} now: another chat that asks for it waits until you release it with pc_release ({release}), or until this reply ends. Release it as soon as you are done with it.",
+                "This chat holds {} now: another chat that asks for it waits until you release it with pc_release ({release}), or until a few minutes after this chat's reply ends with no reply of it taking it on. Release it as soon as you are done with it.",
                 mine.name
             );
         }
@@ -1752,6 +1896,148 @@ impl Broker {
         )
     }
 
+    /// Watches the turns (requested 2026-11-26). One its reply left goes once `TURN_KEEP` passed
+    /// with no reply of its chat taking it on. One whose holder runs work that uses no CPU (less
+    /// than `machine::IDLE_CORE` by `work`, each chat's work since the last reading) tells the
+    /// holder after `STALL_WARN` that its work may have stalled, and after `STALL_RELEASE` goes to
+    /// the next chat in line, when one waits. The work watched is a call that builds or runs
+    /// (`builds::weight`), else the background work its CLI keeps; a holder waiting in `pc_wait`
+    /// runs none. Returns the reports of the turns that ended, and whether anything changed.
+    fn watch_turns(
+        &self,
+        state: &mut State,
+        work: Option<&HashMap<String, f64>>,
+        background: &[BackgroundWork],
+        now: Instant,
+    ) -> (Vec<Report>, bool) {
+        let mut reports = self.end_turns(
+            state,
+            |t| {
+                t.orphaned
+                    .is_some_and(|at| now.saturating_duration_since(at) >= TURN_KEEP)
+            },
+            now,
+            "reply",
+        );
+        let mut changed = !reports.is_empty();
+        let Some(work) = work else {
+            return (reports, changed);
+        };
+        // What each holder runs now that uses no CPU, and how many chats wait for its name. A turn
+        // its reply left ends by itself; a chat inside WSL works where this computer's readings do
+        // not see.
+        let watched: Vec<(usize, Option<String>, usize)> = state
+            .turns
+            .iter()
+            .enumerate()
+            .filter(|(_, turn)| {
+                turn.granted.is_some()
+                    && turn.orphaned.is_none()
+                    && !state.in_wsl.contains(&turn.conversation)
+            })
+            .map(|(index, turn)| {
+                let holder = turn.conversation.as_str();
+                let waits_here = state
+                    .waits
+                    .iter()
+                    .any(|w| w.conversation == holder && w.until.is_none())
+                    || state
+                        .slots
+                        .iter()
+                        .any(|w| w.conversation == holder && w.granted.is_none());
+                let quiet = !waits_here
+                    && work
+                        .get(holder)
+                        .is_some_and(|cores| *cores < machine::IDLE_CORE);
+                let running = quiet
+                    .then(|| {
+                        state
+                            .runs
+                            .values()
+                            .filter(|r| r.conversation == holder)
+                            .flat_map(|r| r.calls.values())
+                            .find(|c| c.weight.is_some())
+                            .map(|c| c.label.clone())
+                            .or_else(|| {
+                                background
+                                    .iter()
+                                    .find(|b| b.conversation == holder)
+                                    .map(|b| b.label.clone())
+                            })
+                    })
+                    .flatten();
+                let others = state
+                    .turns
+                    .iter()
+                    .filter(|t| t.key == turn.key && t.granted.is_none())
+                    .count();
+                (index, running, others)
+            })
+            .collect();
+        let mut stalled = vec![];
+        for (index, running, others) in watched {
+            let turn = &mut state.turns[index];
+            let Some(label) = running else {
+                changed |= turn.warned;
+                turn.quiet_since = None;
+                turn.warned = false;
+                continue;
+            };
+            let quiet = now.saturating_duration_since(*turn.quiet_since.get_or_insert(now));
+            if quiet >= STALL_RELEASE && others > 0 {
+                stalled.push((
+                    turn.id.clone(),
+                    turn.conversation.clone(),
+                    turn.name.clone(),
+                    label,
+                    quiet,
+                    others,
+                ));
+            } else if quiet >= STALL_WARN && !turn.warned {
+                turn.warned = true;
+                changed = true;
+                let text = format!(
+                    "this chat holds {} ({}), and the work it runs ({label}) has used no CPU for {}: it may have stalled. Check it and end it if it hung, or release the turn with pc_release ({}) if you cannot go on soon{}. Once that work has used no CPU for {}, the turn goes to the next chat in line, if one waits.",
+                    turn.name,
+                    turn.purpose,
+                    duration(quiet),
+                    release_hint(turn),
+                    if others > 0 {
+                        format!(": {} for it", plural(others, "chat waits", "chats wait"))
+                    } else {
+                        String::new()
+                    },
+                    duration(STALL_RELEASE)
+                );
+                let to = turn.conversation.clone();
+                state.messages.push(Message {
+                    from: None,
+                    to,
+                    text,
+                    hand_over: false,
+                });
+            }
+        }
+        if !stalled.is_empty() {
+            changed = true;
+            let ids: HashSet<String> = stalled.iter().map(|s| s.0.clone()).collect();
+            reports.extend(self.end_turns(state, |t| ids.contains(&t.id), now, "stalled"));
+            for (_, holder, name, label, quiet, others) in stalled {
+                state.messages.push(Message {
+                    from: None,
+                    to: holder,
+                    text: format!(
+                        "{name} went to the next chat in line: this chat held it while the work it ran ({label}) used no CPU for {}, and {} for it. End that work if it hung, and ask for the turn again with pc_reserve when you need it.",
+                        duration(quiet),
+                        plural(others, "chat waited", "chats waited")
+                    ),
+                    hand_over: false,
+                });
+            }
+        }
+        (reports, changed)
+    }
+
     /// Takes the turns `ended` picks out of line, gives their names to the next in line, and
     /// reports on each.
     fn end_turns(
@@ -1787,10 +2073,14 @@ impl Broker {
                         "Released {} ({}){}: this chat held it {}{}. {}",
                         turn.name,
                         turn.purpose,
-                        if by == "reply" {
-                            " when the reply that took it ended"
-                        } else {
-                            ""
+                        match by {
+                            "reply" => format!(
+                                " {} after the reply that took it ended, when no reply of this chat took it on",
+                                duration(TURN_KEEP)
+                            ),
+                            "stalled" => " while the work this chat ran used no CPU".into(),
+                            "closed" => " when this chat was closed".into(),
+                            _ => String::new(),
                         },
                         duration(held),
                         if waited >= Duration::from_secs(1) {
@@ -2609,6 +2899,13 @@ impl Broker {
                     purpose: t.purpose.clone(),
                     asked_at: t.asked_at,
                     granted_at: t.granted_at,
+                    stalled_at: t
+                        .quiet_since
+                        .filter(|_| t.warned)
+                        .map(|since| epoch_ms().saturating_sub(ms(since.elapsed()))),
+                    kept_until: t
+                        .orphaned
+                        .map(|at| epoch_ms() + ms(TURN_KEEP.saturating_sub(at.elapsed()))),
                 })
                 .collect(),
             slots: state
@@ -2947,6 +3244,18 @@ impl Broker {
                 holder.purpose,
                 duration(holder.granted.map_or(Duration::ZERO, |at| at.elapsed()))
             ));
+            if let Some(at) = holder.orphaned {
+                text.push_str(&format!(
+                    ", whose reply ended {} ago: it goes in {} unless a reply of that chat takes it on",
+                    duration(at.elapsed()),
+                    duration(TURN_KEEP.saturating_sub(at.elapsed()))
+                ));
+            } else if let Some(since) = holder.quiet_since.filter(|_| holder.warned) {
+                text.push_str(&format!(
+                    ", whose work has used no CPU for {}: it may have stalled",
+                    duration(since.elapsed())
+                ));
+            }
             if same.len() > 1 {
                 text.push_str(&format!(
                     "; waiting: {}",

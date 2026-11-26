@@ -28,7 +28,9 @@
     pcOutcome,
     pcOwner,
     pcTotals,
+    pcTurnEnd,
     pcTurnGroups,
+    pcTurnNote,
     pcWaited,
     type PcRecord,
     type PcReservation,
@@ -539,7 +541,15 @@
                   <span class="name"
                     >{group.turns[0].purpose}<span class="muted"
                       >{' · '}{title(group.turns[0].conversationId)}</span
-                    ></span
+                    >{#if pcTurnNote(group.turns[0], clock.now)}<span
+                        class="turn-note"
+                        class:stalled={group.turns[0].stalledAt != null &&
+                          group.turns[0].keptUntil == null}
+                        >{#if group.turns[0].keptUntil == null}<TriangleAlert
+                            size={11}
+                            aria-hidden="true"
+                          />{/if}{pcTurnNote(group.turns[0], clock.now)}</span
+                      >{/if}</span
                   >
                   <span class="time"
                     >{formatReplyTime(
@@ -715,6 +725,7 @@
                       when(turn.askedAt),
                       turn.heldMs != null && `held ${formatReplyTime(turn.heldMs)}`,
                       turn.waitedMs >= 1000 && `waited ${formatReplyTime(turn.waitedMs)}`,
+                      pcTurnEnd(turn) ?? false,
                     ]
                       .filter((part) => part !== false)
                       .join(' · ')}</span
@@ -1062,6 +1073,19 @@
   .tag.measuring {
     background: var(--accent-soft);
     color: var(--accent-text);
+  }
+  /* A held turn whose reply ended, or whose holder's work may have stalled. */
+  .turn-note {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    margin-inline-start: 8px;
+    color: var(--text-secondary);
+    font-size: var(--text-xs);
+  }
+  .turn-note.stalled {
+    color: var(--warning);
+    font-weight: 600;
   }
   .waits {
     display: flex;
