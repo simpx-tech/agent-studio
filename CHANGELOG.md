@@ -5,6 +5,35 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 1.4.2 - 2026-11-26
+
+### Added
+
+- Workflows follow things up over many runs: a Watch trigger starts a run for each new or changed
+  item a command lists, a Command step runs a script, an Agent step can keep one chat per value,
+  triggers can skip or wait while an earlier run goes on, webhooks can check a signing secret, and
+  a Review requests workflow follows up the pull requests waiting for you, a chat for each
+- The sidebar always shows the reservations gauge, and each chat's row marks it reserving the
+  computer, waiting (for the computer, a build slot, room for a run or its turn) or holding a
+  landing turn; a waiting chat's reply shows a card saying what it waits for and behind whom
+- Builds, games and test runs keep the memory they started with, so work started after them leaves
+  them room, and a build script can size its compilers to it
+- A chat's turn at a repository's landing waits a few minutes after its reply ends for its next
+  reply, so a message you send no longer costs it its place in line; closing the chat lets go of
+  the turn, and of what its work held, such as a worktree it claimed, at once
+- A turn whose holder's build or run uses no CPU for ten minutes tells that chat it may have
+  stalled, and after twenty goes to the next chat in line; the Reservations window marks it
+- Agents run their whole pipeline before taking a repository's landing turn, and while they hold it
+  only fetch again, and merge and check what came if the main branch moved
+
+### Fixed
+
+- The Reservations window and the Time report open again after a click outside closed them
+- A chat in line for its turn no longer counts as held by a measurement running meanwhile, and a
+  build script's dry run no longer waits for a build slot
+- A reply waiting for its background work no longer ends early, at a monitor's event or when
+  several reports arrive together
+
 ## 1.4.1 - 2026-11-25
 
 ### Added
