@@ -5,6 +5,28 @@ each GitHub release uses its section as release notes. `npm run release:version`
 version's section from the commit subjects since the previous release; edit it before committing.
 See [automatic updates](docs/UPDATES.md#publishing-a-release).
 
+## 1.4.3 - 2026-11-27
+
+### Added
+
+- Merge trains: in a repository that says how (`.agent-studio/train.json`), chats land their
+  branches with `pc_land`, and Agent Studio lands those queued together, a few at a time, with one
+  merge, one pipeline and one push by the repository's own script, leaving out a branch that
+  conflicts or breaks it and telling its chat why; `pc_status`, the Reservations window and each
+  chat's card show the trains and their branches
+- A measurement of GPU work alone (`pc_reserve` with `scope: "gpu"`) holds only games, editors and
+  browser tests, and other chats' builds and headless tests run on beside it
+
+### Changed
+
+- A game or test run asks for the memory runs of its kind took lately instead of 8 GB each time, so
+  a short test run no longer waits minutes for room it never uses
+- A build that would start with a single compiler waits up to three minutes for room for two while
+  other chats' work holds memory, then starts with what there is
+- Every wait for a build slot or for room is kept in the reservations history, with why it waited
+- Loops and filters that only read files, and variables set from reading commands, run while a
+  measurement holds the computer, as other light commands do
+
 ## 1.4.2 - 2026-11-26
 
 ### Added
