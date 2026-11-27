@@ -88,12 +88,44 @@ pub const GRANT_MOST: u64 = 8 * COMPILER;
 /// The most a build of a few files is granted: two compilers.
 pub const LIGHT_GRANT: u64 = 2 * COMPILER;
 
+/// The fewest compilers a build is started with while other work holds memory that may soon free
+/// (requested 2026-11-27, after two bluevox builds ran 12 and 15 minutes on one compiler, granted
+/// 3.5 GB while 15.7 GB of commit was free and held for other chats' runs, where the same builds
+/// took about four minutes on six to eight): below it, a build waits up to `FEW_WAIT` since it
+/// first asked for more room, then starts with what there is.
+pub const FEW: u64 = 2 * COMPILER;
+/// How long a build waits for room for `FEW` before it starts with less.
+pub const FEW_WAIT: Duration = Duration::from_secs(3 * 60);
+
+/// Whether a build that would be granted `bytes` waits for more: under `FEW`, while other work
+/// holds memory that may free (`others_hold`), until it has waited `FEW_WAIT`.
+pub fn waits_for_more(bytes: u64, others_hold: bool, waited: Duration) -> bool {
+    bytes < FEW && others_hold && waited < FEW_WAIT
+}
+
+/// The least and the most a run is asked to have free, however little or much it took before.
+pub const RUN_LEAST: u64 = 2 << 30;
+pub const RUN_MOST: u64 = 16 << 30;
+/// How many of a kind of run's last peaks are kept (`signature`).
+pub const PEAKS_KEPT: usize = 10;
+
+/// What a run whose kind took `peaks` of memory at its most the last times needs free to start
+/// (requested 2026-11-27, after a 30-second filtered test run waited 4 and 16 minutes for the
+/// 8 GB every run asked): the most it took, a quarter more and half a gigabyte, between
+/// `RUN_LEAST` and `RUN_MOST`; `RUN_FREE` before any is known.
+pub fn run_need(peaks: &[u64]) -> u64 {
+    match peaks.iter().max() {
+        None => RUN_FREE,
+        Some(most) => (most + most / 4 + (512 << 20)).clamp(RUN_LEAST, RUN_MOST),
+    }
+}
+
 /// The memory work of `weight` is granted while it runs, from what is `available` as it starts:
 /// free memory less what earlier grants have not taken yet. A build gets what is left after
 /// `GRANT_KEEP`, between one compiler and `GRANT_MOST`, a build of a few files up to two
-/// compilers, a run what it needs to start. A build's own script reads it (`AGENT_STUDIO_PC_GRANT`)
-/// and runs as many compilers as it holds.
-pub fn grant(weight: Weight, available: Option<u64>) -> u64 {
+/// compilers, a run what it needs to start (`need`, `run_need`). A build's own script reads it
+/// (`AGENT_STUDIO_PC_GRANT`) and runs as many compilers as it holds.
+pub fn grant(weight: Weight, available: Option<u64>, need: u64) -> u64 {
     let left = |most: u64| {
         available.map_or(most, |free| {
             free.saturating_sub(GRANT_KEEP).clamp(COMPILER, most)
@@ -102,7 +134,7 @@ pub fn grant(weight: Weight, available: Option<u64>) -> u64 {
     match weight {
         Weight::Build => left(GRANT_MOST),
         Weight::Light => left(LIGHT_GRANT),
-        Weight::Run => RUN_FREE,
+        Weight::Run => need,
     }
 }
 
@@ -110,8 +142,9 @@ pub fn grant(weight: Weight, available: Option<u64>) -> u64 {
 /// started `since` ago: `granted` tells whether any work holds a grant now, and `available` is
 /// free memory less what those grants have not taken yet. A build is admitted as before (alone
 /// always, beside others with a slot, `BESIDE_FREE` and `RAMP`), now on the memory grants leave;
-/// a build of a few files or a run needs room of its own, `LIGHT_FREE` or `RUN_FREE`, unless no
-/// grant holds memory, and never takes a slot or waits for the last build to grow.
+/// a build of a few files or a run needs room of its own, `LIGHT_FREE` or what the run needs
+/// (`need`, `run_need`), unless no grant holds memory, and never takes a slot or waits for the
+/// last build to grow.
 pub fn admits_weight(
     weight: Weight,
     running: usize,
@@ -119,11 +152,12 @@ pub fn admits_weight(
     available: Option<u64>,
     cores: u32,
     since: Option<Duration>,
+    need: u64,
 ) -> bool {
     match weight {
         Weight::Build => admits(running, available, cores, since),
         Weight::Light => !granted || available.is_none_or(|free| free >= LIGHT_FREE),
-        Weight::Run => !granted || available.is_none_or(|free| free >= RUN_FREE),
+        Weight::Run => !granted || available.is_none_or(|free| free >= need),
     }
 }
 
@@ -210,7 +244,15 @@ fn few_files(word: &str) -> bool {
     matches!(word, "-check" | "-check:$true" | "-singlefile") || word.starts_with("-singlefile:")
 }
 
-fn part_weight(words: &[String]) -> Option<Weight> {
+/// What a part of a command line runs once its shells and runners are taken off: its words from
+/// the program or script on, or a command line of its own that a shell runs.
+enum Core<'a> {
+    Words(Vec<&'a String>),
+    /// `pwsh -Command "..."` and `bash -c "..."` run a command line of their own.
+    Line(&'a str),
+}
+
+fn core(words: &[String]) -> Option<Core<'_>> {
     let mut words: Vec<&String> = words.iter().skip_while(|w| light::assignment(w)).collect();
     // `& "Tools/Build.ps1"`, `pwsh -File Tools/Build.ps1`, `cmd /c build.bat`, `sudo make`.
     while let Some(first) = words.first() {
@@ -227,13 +269,114 @@ fn part_weight(words: &[String]) -> Option<Weight> {
         while words.first().is_some_and(|w| option(w)) {
             words.remove(0);
         }
-        // `pwsh -Command "..."` and `bash -c "..."` run a command line of their own.
         if let [line] = words.as_slice() {
             if line.contains(char::is_whitespace) {
-                return weight(line);
+                return Some(Core::Line(line));
             }
         }
     }
+    (!words.is_empty()).then_some(Core::Words(words))
+}
+
+fn part_weight(words: &[String]) -> Option<Weight> {
+    match core(words)? {
+        Core::Line(line) => weight(line),
+        Core::Words(words) => core_weight(&words),
+    }
+}
+
+/// Flags of a run that change what it takes, which its signature keeps (`signature`): every other
+/// word is left out, so that runs of one kind share their peaks whatever their names, logs and
+/// ports.
+const SIGNATURE_FLAGS: &[&str] = &[
+    "-filter",
+    "-changed",
+    "-game",
+    "-server",
+    "-nullrhi",
+    "-renderoffscreen",
+    "-hostnullrhi",
+    "-clientnullrhi",
+    "-mode",
+    "-run",
+];
+/// Flags whose value matters too: Run-Game's `-Mode net` runs two programs, and an editor's
+/// `-run=` names its commandlet.
+const SIGNATURE_VALUES: &[&str] = &["-mode", "-run"];
+
+/// The kind of run `command` is (requested 2026-11-27): the program or script it runs and the
+/// flags that change what it takes, such as `run-tests -filter` or `unrealeditor-cmd -game
+/// -nullrhi`, under which the broker keeps the memory runs of that kind took at their most
+/// (`run_need`). None for a command that is not a run.
+pub fn signature(command: &str) -> Option<String> {
+    light::parts(command)
+        .iter()
+        .find_map(|part| match core(part)? {
+            Core::Line(line) => signature(line),
+            Core::Words(words) => {
+                if core_weight(&words) != Some(Weight::Run) {
+                    return None;
+                }
+                let program = light::program_name(words[0]);
+                let name = if script(words[0]) {
+                    program
+                        .rsplit_once('.')
+                        .map_or(program.as_str(), |(stem, _)| stem)
+                } else {
+                    program.as_str()
+                };
+                let rest: Vec<String> = words[1..].iter().map(|w| w.to_ascii_lowercase()).collect();
+                let mut flags: Vec<String> = vec![];
+                for (index, word) in rest.iter().enumerate() {
+                    let (flag, value) = match word.split_once(['=', ':']) {
+                        Some((flag, value)) => (flag, Some(value.to_string())),
+                        None => (word.as_str(), None),
+                    };
+                    if !SIGNATURE_FLAGS.contains(&flag) {
+                        continue;
+                    }
+                    let value = SIGNATURE_VALUES.contains(&flag).then(|| {
+                        value.or_else(|| {
+                            rest.get(index + 1)
+                                .filter(|next| !next.starts_with('-'))
+                                .cloned()
+                        })
+                    });
+                    let flag = match value.flatten() {
+                        Some(value) => format!("{flag} {value}"),
+                        None => flag.to_string(),
+                    };
+                    if !flags.contains(&flag) {
+                        flags.push(flag);
+                    }
+                }
+                flags.sort();
+                Some(
+                    std::iter::once(name.to_string())
+                        .chain(flags)
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                )
+            }
+        })
+}
+
+/// Whether `command` draws on the GPU while it runs (requested 2026-11-27): a game, an editor or a
+/// run of an engine not given `-NullRHI` (bluevox's `Run-Tests` runs its editor under it), or
+/// browser tests (Playwright, and `npm run verify`, which runs them). A measurement of GPU work
+/// alone (`pc_reserve` with `scope: "gpu"`) holds only these of other chats' work.
+pub fn renders(command: &str) -> bool {
+    let lower = command.to_ascii_lowercase();
+    let run = weight(command) == Some(Weight::Run)
+        && !lower.contains("-nullrhi")
+        && signature(command).is_none_or(|kind| !kind.starts_with("run-tests"));
+    run || lower.contains("playwright")
+        || lower.contains("test:e2e")
+        || lower.contains("npm run verify")
+}
+
+/// What the words of a part ask once its shells and runners are taken off (`core`).
+fn core_weight(words: &[&String]) -> Option<Weight> {
     let first = words.first()?;
     let program = light::program_name(first);
     let rest: Vec<String> = words[1..].iter().map(|w| w.to_ascii_lowercase()).collect();
@@ -488,74 +631,136 @@ mod tests {
 
     #[test]
     fn work_is_granted_memory_it_holds_and_what_starts_beside_it_needs_room() {
+        let admits = |weight, running, granted, available, since, need| {
+            admits_weight(weight, running, granted, available, 32, since, need)
+        };
         // A build: what is left after a few gigabytes, between one compiler and eight.
-        assert_eq!(grant(Weight::Build, Some(20 << 30)), 17 << 30);
-        assert_eq!(grant(Weight::Build, Some(2 << 30)), COMPILER);
-        assert_eq!(grant(Weight::Build, Some(90 << 30)), GRANT_MOST);
-        assert_eq!(grant(Weight::Build, None), GRANT_MOST);
+        assert_eq!(grant(Weight::Build, Some(20 << 30), RUN_FREE), 17 << 30);
+        assert_eq!(grant(Weight::Build, Some(2 << 30), RUN_FREE), COMPILER);
+        assert_eq!(grant(Weight::Build, Some(90 << 30), RUN_FREE), GRANT_MOST);
+        assert_eq!(grant(Weight::Build, None, RUN_FREE), GRANT_MOST);
         // A build of a few files: up to two compilers; a run, what it needs.
-        assert_eq!(grant(Weight::Light, Some(40 << 30)), LIGHT_GRANT);
-        assert_eq!(grant(Weight::Run, Some(40 << 30)), RUN_FREE);
+        assert_eq!(grant(Weight::Light, Some(40 << 30), RUN_FREE), LIGHT_GRANT);
+        assert_eq!(grant(Weight::Run, Some(40 << 30), RUN_FREE), RUN_FREE);
+        assert_eq!(grant(Weight::Run, Some(40 << 30), 3 << 30), 3 << 30);
         // A run or a build of a few files needs room of its own beside granted work...
-        assert!(!admits_weight(
-            Weight::Run,
-            1,
-            true,
-            Some(6 << 30),
-            32,
-            None
-        ));
-        assert!(admits_weight(Weight::Run, 1, true, Some(9 << 30), 32, None));
-        assert!(!admits_weight(
+        assert!(!admits(Weight::Run, 1, true, Some(6 << 30), None, RUN_FREE));
+        assert!(admits(Weight::Run, 1, true, Some(9 << 30), None, RUN_FREE));
+        // ...as much as its kind took lately (requested 2026-11-27).
+        assert!(admits(Weight::Run, 1, true, Some(4 << 30), None, 3 << 30));
+        assert!(!admits(
             Weight::Light,
             1,
             true,
             Some(3 << 30),
-            32,
-            None
+            None,
+            RUN_FREE
         ));
-        assert!(admits_weight(
+        assert!(admits(
             Weight::Light,
             4,
             true,
             Some(5 << 30),
-            32,
-            None
+            None,
+            RUN_FREE
         ));
         // ...but none when nothing granted holds memory, and never a slot or the ramp.
-        assert!(admits_weight(
-            Weight::Run,
-            0,
-            false,
-            Some(1 << 30),
-            32,
-            None
-        ));
-        assert!(admits_weight(
+        assert!(admits(Weight::Run, 0, false, Some(1 << 30), None, RUN_FREE));
+        assert!(admits(
             Weight::Light,
             4,
             true,
             Some(5 << 30),
-            32,
-            Some(Duration::ZERO)
+            Some(Duration::ZERO),
+            RUN_FREE
         ));
         // A build as before.
-        assert!(admits_weight(
+        assert!(admits(
             Weight::Build,
             0,
             true,
             Some(1 << 30),
-            32,
-            None
+            None,
+            RUN_FREE
         ));
-        assert!(!admits_weight(
+        assert!(!admits(
             Weight::Build,
             1,
             true,
             Some(6 << 30),
-            32,
-            None
+            None,
+            RUN_FREE
         ));
+    }
+
+    #[test]
+    fn a_run_needs_what_its_kind_took_lately_and_a_build_waits_a_while_for_two_compilers() {
+        // Before any peak, the room every run asked; after, the most it took and some spare.
+        assert_eq!(run_need(&[]), RUN_FREE);
+        assert_eq!(
+            run_need(&[2 << 30, 3 << 30]),
+            (3 << 30) + (3 << 28) + (512 << 20)
+        );
+        assert_eq!(run_need(&[100 << 20]), RUN_LEAST);
+        assert_eq!(run_need(&[40 << 30]), RUN_MOST);
+        // A build granted one compiler waits for two while other work holds memory, for a while.
+        assert!(waits_for_more(COMPILER, true, Duration::ZERO));
+        assert!(!waits_for_more(COMPILER, true, FEW_WAIT));
+        assert!(!waits_for_more(COMPILER, false, Duration::ZERO));
+        assert!(!waits_for_more(FEW, true, Duration::ZERO));
+    }
+
+    #[test]
+    fn runs_of_one_kind_share_a_signature_and_only_some_of_them_render() {
+        for (command, expected) in [
+            (
+                r#"& "D:\p\Tools\Run-Tests.ps1" -Filter Bluevox.Persistence.TearDownSave -Name red"#,
+                Some("run-tests -filter"),
+            ),
+            (
+                r"powershell -NoProfile -File .\Tools\Run-Tests.ps1 -Name ExitSave-candidate",
+                Some("run-tests"),
+            ),
+            (
+                r#"& "D:\p\Tools\Run-Game.ps1" -Mode net -HostTimeline h.txt -Name x"#,
+                Some("run-game -mode net"),
+            ),
+            (
+                r#"& "D:\UE_5.8\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" "D:\p\Bluevox.uproject" L_Empty -server -log "-abslog=D:\x.log""#,
+                Some("unrealeditor-cmd -server"),
+            ),
+            (
+                r#"UnrealEditor-Cmd.exe p.uproject -run=pythonscript -script=x.py"#,
+                Some("unrealeditor-cmd -run pythonscript"),
+            ),
+            (r".\Tools\Build.ps1 -Candidate", None),
+            ("git status", None),
+        ] {
+            assert_eq!(signature(command).as_deref(), expected, "{command}");
+        }
+        // A run's name, log or port never splits its kind.
+        assert_eq!(
+            signature(r".\Tools\Run-Tests.ps1 -Filter A -Name one"),
+            signature(r".\Tools\Run-Tests.ps1 -Name two -Filter B")
+        );
+        for command in [
+            r".\Tools\Run-Editor.ps1 -Game",
+            r#"& "D:\p\Tools\Run-Net.ps1" -Mode net -HostNullRHI"#,
+            "UnrealEditor.exe p.uproject -game",
+            "npx playwright test tests/e2e",
+            "npm run verify",
+        ] {
+            assert!(renders(command), "{command}");
+        }
+        for command in [
+            r".\Tools\Run-Tests.ps1 -Filter Bluevox.Water",
+            "UnrealEditor-Cmd.exe p.uproject 127.0.0.1:7777 -game -NullRHI",
+            r".\Tools\Build.ps1 -Candidate",
+            "cargo test",
+            "git commit -m x",
+        ] {
+            assert!(!renders(command), "{command}");
+        }
     }
 
     #[test]

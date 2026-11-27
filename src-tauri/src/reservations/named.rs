@@ -54,11 +54,27 @@ pub fn repository(folder: &Path) -> Option<String> {
 
 /// The Git folder every worktree of `folder`'s repository shares.
 fn common_dir(folder: &Path) -> Option<PathBuf> {
+    git_dirs(folder).map(|dirs| dirs.common)
+}
+
+/// Where a checkout keeps its Git state: its top folder, its own Git folder (a worktree's under
+/// the common one) and the folder every worktree of its repository shares.
+struct GitDirs {
+    top: PathBuf,
+    own: PathBuf,
+    common: PathBuf,
+}
+
+fn git_dirs(folder: &Path) -> Option<GitDirs> {
     let mut current = Some(folder);
     while let Some(dir) = current {
         let git = dir.join(".git");
         if git.is_dir() {
-            return Some(git);
+            return Some(GitDirs {
+                top: dir.to_path_buf(),
+                own: git.clone(),
+                common: git,
+            });
         }
         if git.is_file() {
             // A worktree's or a submodule's `.git` file names its own Git folder, whose
@@ -66,14 +82,82 @@ fn common_dir(folder: &Path) -> Option<PathBuf> {
             let text = std::fs::read_to_string(&git).ok()?;
             let own = text.trim().strip_prefix("gitdir:")?.trim();
             let own = dir.join(own);
-            return Some(match std::fs::read_to_string(own.join("commondir")) {
+            let common = match std::fs::read_to_string(own.join("commondir")) {
                 Ok(common) => own.join(common.trim()),
-                Err(_) => own,
+                Err(_) => own.clone(),
+            };
+            return Some(GitDirs {
+                top: dir.to_path_buf(),
+                own,
+                common,
             });
         }
         current = dir.parent();
     }
     None
+}
+
+/// The repository's main checkout, whose `.git` folder every worktree shares: the folder a merge
+/// train runs in and reads its `.agent-studio/train.json` from. None for a bare repository.
+pub fn main_checkout(folder: &Path) -> Option<PathBuf> {
+    let common = std::fs::canonicalize(common_dir(folder)?).ok()?;
+    let common = PathBuf::from(common.to_string_lossy().trim_start_matches(r"\\?\"));
+    (common.file_name()? == ".git")
+        .then(|| common.parent().map(Path::to_path_buf))
+        .flatten()
+}
+
+/// What a checkout has checked out, read from Git's own files: its top folder, the branch (None
+/// when its head is detached) and the commit.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Head {
+    pub top: PathBuf,
+    pub branch: Option<String>,
+    pub sha: Option<String>,
+}
+
+pub fn head(folder: &Path) -> Option<Head> {
+    let dirs = git_dirs(folder)?;
+    let text = std::fs::read_to_string(dirs.own.join("HEAD")).ok()?;
+    let text = text.trim();
+    let (branch, sha) = match text.strip_prefix("ref:") {
+        Some(reference) => {
+            let reference = reference.trim();
+            let branch = reference
+                .strip_prefix("refs/heads/")
+                .unwrap_or(reference)
+                .to_string();
+            (Some(branch), reference_sha(&dirs, reference))
+        }
+        None => (None, is_sha(text).then(|| text.to_string())),
+    };
+    Some(Head {
+        top: dirs.top,
+        branch,
+        sha,
+    })
+}
+
+/// The commit a reference names: its loose file, under the worktree's own Git folder or the common
+/// one, else its line in `packed-refs`.
+fn reference_sha(dirs: &GitDirs, reference: &str) -> Option<String> {
+    for dir in [&dirs.own, &dirs.common] {
+        if let Ok(text) = std::fs::read_to_string(dir.join(reference)) {
+            let text = text.trim();
+            if is_sha(text) {
+                return Some(text.to_string());
+            }
+        }
+    }
+    let packed = std::fs::read_to_string(dirs.common.join("packed-refs")).ok()?;
+    packed.lines().find_map(|line| {
+        let (sha, name) = line.split_once(' ')?;
+        (name.trim() == reference && is_sha(sha)).then(|| sha.to_string())
+    })
+}
+
+fn is_sha(text: &str) -> bool {
+    matches!(text.len(), 40 | 64) && text.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// The url of the `origin` remote in a Git config file's text.
@@ -198,5 +282,53 @@ mod tests {
         // A folder outside any repository has no landing.
         let outside = tempfile::tempdir().unwrap();
         assert!(landing(outside.path()).is_err());
+    }
+
+    #[test]
+    fn a_worktree_s_head_and_its_repository_s_main_checkout_read_from_git_s_files() {
+        let root = tempfile::tempdir().unwrap();
+        let main = root.path().join("main");
+        let git = main.join(".git");
+        let own = git.join("worktrees").join("feature");
+        std::fs::create_dir_all(git.join("refs").join("heads")).unwrap();
+        std::fs::create_dir_all(&own).unwrap();
+        let (a, b) = ("a".repeat(40), "b".repeat(40));
+        std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        // The main branch packed, the worktree's branch loose.
+        std::fs::write(
+            git.join("packed-refs"),
+            format!("# pack-refs with: peeled fully-peeled sorted\n{a} refs/heads/main\n"),
+        )
+        .unwrap();
+        std::fs::write(git.join("refs").join("heads").join("worktree-x"), &b).unwrap();
+        let worktree = root.path().join("worktrees").join("feature");
+        std::fs::create_dir_all(worktree.join("Source")).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", own.display()),
+        )
+        .unwrap();
+        std::fs::write(own.join("commondir"), "../..\n").unwrap();
+        std::fs::write(own.join("HEAD"), "ref: refs/heads/worktree-x\n").unwrap();
+
+        let head = head(&worktree.join("Source")).unwrap();
+        assert_eq!(head.top, worktree);
+        assert_eq!(head.branch.as_deref(), Some("worktree-x"));
+        assert_eq!(head.sha.as_deref(), Some(b.as_str()));
+        let main_head = super::head(&main).unwrap();
+        assert_eq!(main_head.branch.as_deref(), Some("main"));
+        assert_eq!(main_head.sha.as_deref(), Some(a.as_str()));
+        // Both name the same main checkout.
+        let checkout = main_checkout(&worktree).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(&checkout).unwrap(),
+            std::fs::canonicalize(&main).unwrap()
+        );
+        assert_eq!(main_checkout(&main.join("x")), main_checkout(&worktree));
+        // A detached head names its commit and no branch.
+        std::fs::write(own.join("HEAD"), format!("{a}\n")).unwrap();
+        let detached = super::head(&worktree).unwrap();
+        assert_eq!((detached.branch, detached.sha), (None, Some(a)));
+        assert!(super::head(tempfile::tempdir().unwrap().path()).is_none());
     }
 }

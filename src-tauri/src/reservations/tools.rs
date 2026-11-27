@@ -1,5 +1,5 @@
 //! The tools chats coordinate this computer with (`pc_status`, `pc_reserve`, `pc_wait`,
-//! `pc_release`, `pc_stop` and `chat_message`), as SDK tools of Claude's agent_studio server and
+//! `pc_release`, `pc_land`, `pc_stop` and `chat_message`), as SDK tools of Claude's agent_studio server and
 //! Codex dynamic tools, and the hooks Claude chats run around their calls: the gate before each
 //! command (`GATE`), which refuses other chats' commands while one holds the computer, and the
 //! delivery of messages after each call (`MESSAGES`). The tools act for the conversation whose
@@ -17,9 +17,10 @@ pub const STATUS: &str = "pc_status";
 pub const RESERVE: &str = "pc_reserve";
 pub const WAIT: &str = "pc_wait";
 pub const RELEASE: &str = "pc_release";
+pub const LAND: &str = "pc_land";
 pub const STOP: &str = "pc_stop";
 pub const MESSAGE: &str = "chat_message";
-pub const NAMES: [&str; 6] = [STATUS, RESERVE, WAIT, RELEASE, STOP, MESSAGE];
+pub const NAMES: [&str; 7] = [STATUS, RESERVE, WAIT, RELEASE, LAND, STOP, MESSAGE];
 /// The hook callback that holds other chats' commands.
 const GATE: &str = "studio-pc-gate";
 /// The hook callback that hands a chat the messages other chats sent it.
@@ -31,7 +32,7 @@ const GATE_TIMEOUT_SECONDS: u64 = 30;
 /// How long the CLI waits for messages after a call, which a running reply also answers at once.
 const MESSAGES_TIMEOUT_SECONDS: u64 = 10;
 
-pub const GUIDANCE: &str = "Chats run side by side on this computer. To measure performance (a benchmark, profiling or a timing run), build, cook and prepare everything first, then reserve the computer with pc_reserve, wait for its window with pc_wait, run the whole series of measured runs, and release it with pc_release right after the last one, before reading logs or writing up (Claude: mcp__agent_studio__pc_reserve, mcp__agent_studio__pc_wait, mcp__agent_studio__pc_release; pc_status shows what runs on the computer now, pc_stop stops programs chats left running, and chat_message writes to another chat). One reservation covers a whole series. Never reserve the computer for ordinary builds, tests or runs. To land on a repository's main branch, run the full pipeline first on your branch merged with a freshly fetched main; then take the repository's landing turn with pc_reserve and landing: true, fetch again, and push at once if main has not moved, or merge what came and run again the checks it could affect, then push; release the turn right after the push, so that chats land one at a time and none waits through another's whole pipeline; pc_reserve with name holds anything else one chat at a time should use, such as a shared folder. When a command or MCP tool call of yours is refused because another chat reserved the computer, or a build because the builds running leave no room for it, call pc_wait, then run it again. When another chat asks you to hand over what you hold, finish what you need, then call pc_release.";
+pub const GUIDANCE: &str = "Chats run side by side on this computer. To measure performance (a benchmark, profiling or a timing run), build, cook and prepare everything first, then reserve the computer with pc_reserve, wait for its window with pc_wait, run the whole series of measured runs, and release it with pc_release right after the last one, before reading logs or writing up (Claude: mcp__agent_studio__pc_reserve, mcp__agent_studio__pc_wait, mcp__agent_studio__pc_release; pc_status shows what runs on the computer now, pc_stop stops programs chats left running, and chat_message writes to another chat). One reservation covers a whole series, and scope: \"gpu\" reserves GPU work alone, beside which other chats' builds and headless tests run on. Never reserve the computer for ordinary builds, tests or runs. To land on a repository's main branch, run the full pipeline first on your branch merged with a freshly fetched main. When the repository has a merge train (.agent-studio/train.json in its main checkout), commit and call pc_land: the train lands the branches queued together, with one merge, one pipeline and one push, and pc_wait returns once yours landed or came back with the reason. Otherwise take the repository's landing turn with pc_reserve and landing: true, fetch again, and push at once if main has not moved, or merge what came and run again the checks it could affect, then push; release the turn right after the push, so that chats land one at a time and none waits through another's whole pipeline; pc_reserve with name holds anything else one chat at a time should use, such as a shared folder. When a command or MCP tool call of yours is refused because another chat reserved the computer, or a build because the builds running leave no room for it, call pc_wait, then run it again. When another chat asks you to hand over what you hold, finish what you need, then call pc_release.";
 
 /// What a Claude session begun before chats could reserve this computer (Agent Studio 1.4.0)
 /// reads once, with its next reply's context (`Session::reservations_rule_changed`): its process
@@ -43,9 +44,10 @@ pub fn guidance_added() -> String {
 }
 
 const STATUS_DESCRIPTION: &str = "Show whether this computer is reserved for a performance measurement and by which chat, what other chats run on it now (commands and background work, and whether each finishes by itself), the programs chats left running outside their CLIs (editors, games, servers) with their program numbers, and the computer's busiest and largest programs with whose they are: a chat's, Agent Studio's, the system's, or the user's own (\"yours\"). Chats are named by title and id. Call it before pc_reserve.";
-const RESERVE_DESCRIPTION: &str = "Reserve this computer for a performance measurement (a benchmark, profiling or a timing run) so that no other chat's work disturbs it. Chats otherwise work side by side: reserve only to measure performance, never for an ordinary build, test or game run. Reserve late: build, cook, stage and prepare everything first, and call pc_status: if programs the user started (\"yours\") use much CPU or memory, ask the user with studio_ask_user whether to close them or measure anyway, before reserving, so that no chat waits on the answer. Reserve once for a whole series of measured runs (five on/off pairs are one reservation), so the wait for other chats' work is paid once. Your window opens at the first moment no other chat runs heavy work; until then other chats work on, and only after a few minutes without such a moment do their new commands and MCP tool calls wait, except light commands such as git status, while what they already run finishes first. Programs chats left running, such as an editor or a game, keep running: stop those of chats that are not replying with pc_stop, and ask a replying chat that still works with one to hand it over with chat_message and hand_over: true, which your window then waits for. Then call pc_wait, which returns once the window opens; run the series at once (warm up, run several times), call pc_release right after the last run, and read logs, analyze and write up afterwards, since other chats wait until you release. Reservations take turns, and one ends by itself when this reply ends.\nWith name or landing, reserve a thing instead of the computer, one chat at a time, across your calls: name holds anything else, such as a shared folder or an editor that holds a project's assets, and landing: true holds the landing turn of the repository this chat's folder belongs to, every checkout and worktree of it alike. Take the landing turn once the full pipeline passed on your branch merged with a freshly fetched main branch, not before it: under the turn, fetch again and push at once if the main branch has not moved, or merge what came and run again the checks it could affect, then push; release it with pc_release and landing: true right after the push, so chats land one at a time and none waits through another's whole pipeline. When another chat holds it, call pc_wait: it returns once your turn comes. A turn holds nothing else: other chats' commands still run. It outlives this reply by a few minutes, for this chat's next reply to take on (a message the user sends ends a reply), and when work this chat runs under it, such as a build or a test run, uses no CPU for 10 minutes you hear it may have stalled, and after 20 the turn goes to the next chat in line, if one waits.";
-const WAIT_DESCRIPTION: &str = "Wait for this computer, as long as it takes. When this chat holds a reservation, it returns once its window opens: no other chat runs busy work then, at most idle work, such as a watcher between its checks. When a build of yours was refused because the builds running leave no room for it, it returns once a build slot is free for it, and when this chat asked for a named reservation or a landing turn another chat holds, once its turn comes. Otherwise it returns once no other chat holds the computer: call it when a command or MCP tool call of yours was refused because another chat reserved the computer, then run it again. A message from another chat ends the wait early: read it, then call pc_wait again if you still must wait.";
+const RESERVE_DESCRIPTION: &str = "Reserve this computer for a performance measurement (a benchmark, profiling or a timing run) so that no other chat's work disturbs it. Chats otherwise work side by side: reserve only to measure performance, never for an ordinary build, test or game run. Reserve late: build, cook, stage and prepare everything first, and call pc_status: if programs the user started (\"yours\") use much CPU or memory, ask the user with studio_ask_user whether to close them or measure anyway, before reserving, so that no chat waits on the answer. Reserve once for a whole series of measured runs (five on/off pairs are one reservation), so the wait for other chats' work is paid once. With scope: \"gpu\", reserve GPU work alone, for a measurement that reads only the GPU, such as frame times or a GPU capture: then only other chats' games, editors, browser tests and MCP tool calls of programs here keep your window closed or wait, and their builds and headless tests run on beside it. Your window opens at the first moment no other chat runs heavy work; until then other chats work on, and only after a few minutes without such a moment do their new commands and MCP tool calls wait, except light commands such as git status, while what they already run finishes first. Programs chats left running, such as an editor or a game, keep running: stop those of chats that are not replying with pc_stop, and ask a replying chat that still works with one to hand it over with chat_message and hand_over: true, which your window then waits for. Then call pc_wait, which returns once the window opens; run the series at once (warm up, run several times), call pc_release right after the last run, and read logs, analyze and write up afterwards, since other chats wait until you release. Reservations take turns, and one ends by itself when this reply ends.\nWith name or landing, reserve a thing instead of the computer, one chat at a time, across your calls: name holds anything else, such as a shared folder or an editor that holds a project's assets, and landing: true holds the landing turn of the repository this chat's folder belongs to, every checkout and worktree of it alike. Take the landing turn once the full pipeline passed on your branch merged with a freshly fetched main branch, not before it: under the turn, fetch again and push at once if the main branch has not moved, or merge what came and run again the checks it could affect, then push; release it with pc_release and landing: true right after the push, so chats land one at a time and none waits through another's whole pipeline. When another chat holds it, call pc_wait: it returns once your turn comes. A turn holds nothing else: other chats' commands still run. It outlives this reply by a few minutes, for this chat's next reply to take on (a message the user sends ends a reply), and when work this chat runs under it, such as a build or a test run, uses no CPU for 10 minutes you hear it may have stalled, and after 20 the turn goes to the next chat in line, if one waits.";
+const WAIT_DESCRIPTION: &str = "Wait for this computer, as long as it takes. When this chat holds a reservation, it returns once its window opens: no other chat runs busy work then, at most idle work, such as a watcher between its checks. When a build of yours was refused because the builds running leave no room for it, it returns once a build slot is free for it, when this chat asked for a named reservation or a landing turn another chat holds, once its turn comes, and when this chat's branch is on a merge train (pc_land), once it landed or came back with the reason. Otherwise it returns once no other chat holds the computer: call it when a command or MCP tool call of yours was refused because another chat reserved the computer, then run it again. A message from another chat ends the wait early: read it, then call pc_wait again if you still must wait.";
 const RELEASE_DESCRIPTION: &str = "End this chat's reservation of the computer right after the last measured run, before reading logs or writing up, so other chats go on. Returns a report: what kept the window closed and for how long, other chats' work that ran while it was open, how busy the computer was (this chat's processes apart from everything else, with the busiest other programs and whose they are), whether the measurement ran beside other heavy work and whose (a chat, Claude Code or Codex outside Agent Studio, the system or the user's programs), and how long other chats waited because of it. Read it before trusting the numbers: when its Measurement line says it ran beside other heavy work, tell the user and offer to measure again. With name or landing: true, release that named reservation or landing turn instead, right after you are done with it (a landing turn right after the push); without them, a chat that holds no reservation of the computer releases its named ones. When the chat holding the computer asked this chat to hand over what it holds, pc_release hands over instead: Agent Studio closes the programs this chat left running, and its commands and MCP tool calls wait until that measurement ends.";
+const LAND_DESCRIPTION: &str = "Land this chat's branch on its repository's main branch through the repository's merge train, instead of a landing turn, when the repository has one (.agent-studio/train.json in its main checkout; otherwise this says so, and you land with pc_reserve and landing: true). Call it once your branch, merged with a freshly fetched main branch, passed your own pipeline and is committed: the car carries the commit the branch's head is on now. The train merges the cars queued, up to a few at a time, onto a fresh main branch, runs the repository's pipeline once, pushes and brings the main checkout up to date; a car that conflicts or breaks the pipeline comes back with the reason and its log, and the others land. Then call pc_wait: it returns once yours landed or came back. Calling it again after a new commit brings a waiting car up to date; pc_release with landing: true takes a car that has not left yet off the train. A car needs no running reply: what became of it reaches this chat with its next tool call.";
 const STOP_DESCRIPTION: &str = "Stop programs a chat left running on this computer outside its CLI, such as an editor, a game or a server, by the program numbers pc_status lists for it, and with background: true the background work its CLI keeps. Only for a chat that is not replying now, or this chat's own programs: ask a replying chat to hand over instead, with chat_message and hand_over: true. A program with a window is asked to close as its close button asks, so it may still ask about unsaved work; one without a window is ended. Programs the user started are never a chat's: ask the user about those.";
 const MESSAGE_DESCRIPTION: &str = "Send a message to another chat replying on this computer, to coordinate your work on it: another agent reads it with its next tool call, not the user. With hand_over: true, the chat holding the computer for a measurement asks that chat to hand over what it holds, such as an editor it still works with: that chat's commands and MCP tool calls run again until it hands over with pc_release, and your window waits until it does or its reply ends; Agent Studio then closes the programs it left running. Name the chat by its title or its id, as pc_status names it.";
 
@@ -69,6 +71,7 @@ pub fn tools() -> Vec<Value> {
             json!({
                 "purpose":{"type":"string","minLength":1,"description":"What you will measure, or do with what you reserve, in a few words, such as \"Benchmark of chunk meshing, Development build\" or \"Final pipeline and push\"."},
                 "minutes":{"type":"number","exclusiveMinimum":0,"description":"About how many minutes the measurement takes once its window opens."},
+                "scope":{"type":"string","enum":["computer","gpu"],"description":"What the measurement reserves: the whole computer (the default), or GPU work alone, beside which other chats' builds and headless tests run on."},
                 "name":{"type":"string","minLength":1,"description":"Reserve this thing instead of the computer, such as a shared folder's path or \"Unreal editor of bluevox\"."},
                 "landing":{"type":"boolean","description":"Reserve the landing turn of this chat's repository instead of the computer."}
             }),
@@ -80,9 +83,17 @@ pub fn tools() -> Vec<Value> {
             RELEASE_DESCRIPTION,
             json!({
                 "name":{"type":"string","minLength":1,"description":"Release this named reservation."},
-                "landing":{"type":"boolean","description":"Release this chat's landing turn."}
+                "landing":{"type":"boolean","description":"Release this chat's landing turn, and take its branch off a merge train it has not left on yet."}
             }),
             &[],
+        ),
+        tool(
+            LAND,
+            LAND_DESCRIPTION,
+            json!({
+                "purpose":{"type":"string","minLength":1,"description":"What the branch changes, in one line, for the train's merge commit and record, such as \"Fed rivers carve their banks\"."}
+            }),
+            &["purpose"],
         ),
         tool(
             STOP,
@@ -347,8 +358,9 @@ struct Context {
 /// The fields each tool takes.
 fn fields(name: &str) -> &'static [&'static str] {
     match name {
-        RESERVE => &["purpose", "minutes", "name", "landing"],
+        RESERVE => &["purpose", "minutes", "scope", "name", "landing"],
         RELEASE => &["name", "landing"],
+        LAND => &["purpose"],
         STOP => &["chat", "programs", "background"],
         // `text` too, as an agent may name the message.
         MESSAGE => &["chat", "message", "hand_over", "text"],
@@ -426,7 +438,16 @@ async fn act(
             let minutes = args["minutes"]
                 .as_f64()
                 .filter(|m| m.is_finite() && *m > 0.0);
-            let text = broker.reserve(run_id, conversation, purpose, minutes);
+            let scope = match args["scope"].as_str().map(str::trim) {
+                None | Some("") | Some("computer") => super::Scope::Computer,
+                Some("gpu") => super::Scope::Gpu,
+                Some(other) => {
+                    return Err(format!(
+                        "scope is \"computer\" or \"gpu\", not \"{other}\"."
+                    ))
+                }
+            };
+            let text = broker.reserve_scoped(run_id, conversation, purpose, minutes, scope);
             Ok(match broker.now().await {
                 Some(now) => format!(
                     "{text}{}\n{}",
@@ -448,7 +469,18 @@ async fn act(
                 .await;
         }
         RELEASE => match named()? {
-            Some((key, name, _)) => broker
+            // A landing turn, and the chat's branch waiting for a merge train.
+            Some((key, name, true)) => {
+                let turns = broker.release_turns(conversation, Some(&key));
+                let cars = broker.withdraw(conversation);
+                match (turns, cars) {
+                    (None, None) => Err(format!(
+                        "This chat holds no turn at {name}, waits for none, and has no branch waiting for a merge train."
+                    )),
+                    (turns, cars) => Ok([turns, cars].into_iter().flatten().collect::<Vec<_>>().join("\n")),
+                }
+            }
+            Some((key, name, false)) => broker
                 .release_turns(conversation, Some(&key))
                 .ok_or_else(|| format!("This chat holds no turn at {name}, and waits for none.")),
             None => match broker.hand_over(conversation).await {
@@ -461,6 +493,18 @@ async fn act(
                 },
             },
         },
+        LAND => {
+            let purpose = args["purpose"]
+                .as_str()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .ok_or("Say in purpose what the branch changes, in one line.")?;
+            let folder = context
+                .folder
+                .as_deref()
+                .ok_or("This chat has no project folder, so no branch to land.")?;
+            broker.land(conversation, folder, purpose)
+        }
         STOP => {
             let programs = match &args["programs"] {
                 Value::Null => vec![],
@@ -766,8 +810,9 @@ mod tests {
         let (error, refusal) = text(&bench.rx.recv().await.unwrap());
         assert!(
             error
-                && refusal
-                    .contains("no field named seconds. It takes purpose, minutes, name, landing."),
+                && refusal.contains(
+                    "no field named seconds. It takes purpose, minutes, scope, name, landing."
+                ),
             "{refusal}"
         );
         bench

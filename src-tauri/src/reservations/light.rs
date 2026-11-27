@@ -1,8 +1,11 @@
 //! Commands light enough to run while another chat measures this computer (chosen 2026-11-24):
 //! reading files, listing folders, searching text and asking Git about the checkout, which end
 //! in moments and use next to no CPU. Anything else, an unknown program included, waits. The
-//! test is about load, not side effects, and leans towards waiting: a command substitution, a
-//! script block or a program this list does not name makes the whole command wait.
+//! test is about load, not side effects, and leans towards waiting: a command substitution or a
+//! program this list does not name makes the whole command wait. A script block does too, unless
+//! it is one a loop or a filter runs for each item and every statement in it is light (requested
+//! 2026-11-27, after a PowerShell loop that only read files waited out a measurement), and so is
+//! a PowerShell variable set to a light command or to a read-only .NET call.
 
 /// Programs that only read or print, by the name a command line calls them.
 const PROGRAMS: &[&str] = &[
@@ -12,8 +15,14 @@ const PROGRAMS: &[&str] = &[
     "whoami", // PowerShell's own aliases of the same.
     "cls", "gc", "gci", "gi", "gl", "pwd", "sl", "sls", "select",
 ];
-/// PowerShell cmdlets that only read, look up or format: their verb or their whole name.
+/// PowerShell cmdlets that only read, look up or format: their verb or their whole name. A loop's
+/// or a filter's own cmdlet is light once its block is (`without_blocks`).
 const CMDLETS: &[&str] = &[
+    "%",
+    "?",
+    "foreach",
+    "foreach-object",
+    "where",
     "format-list",
     "format-table",
     "join-path",
@@ -91,15 +100,187 @@ pub fn is_light(command: &str) -> bool {
     if command.is_empty() {
         return false;
     }
-    // What a substitution, a script block or a backtick runs cannot be told from here.
-    if ["$(", "`", "<(", ">(", "{", "Invoke-", "iex"]
+    // What a substitution, a backtick or a program a variable holds runs cannot be told from here.
+    if ["$(", "`", "<(", ">(", "Invoke-", "iex"]
         .iter()
         .any(|mark| command.contains(mark))
+        || calls_a_variable(command)
     {
         return false;
     }
-    parts(command).iter().all(|part| light_part(part))
+    let Some(flat) = without_blocks(command) else {
+        return false;
+    };
+    let parts = parts(&flat);
+    !parts.is_empty() && parts.iter().all(|part| light_part(part))
 }
+
+/// Whether `&` runs what a variable holds, `& $exe build`, which names no program this can judge.
+fn calls_a_variable(command: &str) -> bool {
+    command
+        .match_indices('&')
+        .any(|(at, _)| command[at + 1..].trim_start().starts_with('$'))
+}
+
+/// Cmdlets, by the names a command line calls them, that run their block for each item they are
+/// given, as a filter, a loop or a sort key.
+const BLOCK_OWNERS: &[&str] = &[
+    "%",
+    "?",
+    "foreach",
+    "foreach-object",
+    "sort-object",
+    "where",
+    "where-object",
+];
+
+/// `command` with its script blocks taken out once each reads as light: the block a
+/// `ForEach-Object` or a `Where-Object` runs for each item (`%`, `?`, `foreach` and `where` too),
+/// and a `foreach (...)` loop's with its head, each of whose statements is itself light. None
+/// when a block is anything else, such as an `if`, a function or a hashtable, or holds what is not
+/// light, or when its braces do not match.
+fn without_blocks(command: &str) -> Option<String> {
+    let chars: Vec<char> = command.chars().collect();
+    let mut out = String::new();
+    let mut quote: Option<char> = None;
+    let mut index = 0;
+    while index < chars.len() {
+        let c = chars[index];
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            out.push(c);
+            index += 1;
+            continue;
+        }
+        match c {
+            '"' | '\'' => {
+                quote = Some(c);
+                out.push(c);
+                index += 1;
+                continue;
+            }
+            '}' => return None,
+            '{' => {}
+            _ => {
+                out.push(c);
+                index += 1;
+                continue;
+            }
+        }
+        let end = matching_brace(&chars, index)?;
+        let body: String = chars[index + 1..end].iter().collect();
+        if !body.trim().is_empty() && !is_light(&body) {
+            return None;
+        }
+        let before = out.trim_end();
+        if let Some(head) = before.strip_suffix(')') {
+            // `foreach ($item in $list) { ... }`: its head and block go once both read as light,
+            // and its keyword stays, light itself, for the statement to have a word.
+            let open = head.rfind('(')?;
+            let (word, inside) = (head[..open].trim_end(), &head[open + 1..]);
+            let keyword = word.rsplit(char::is_whitespace).next().unwrap_or(word);
+            if !keyword.eq_ignore_ascii_case("foreach") || !light_loop_head(inside) {
+                return None;
+            }
+            let kept = word.len();
+            out.truncate(kept);
+        } else {
+            let owner = before.rsplit(char::is_whitespace).next().unwrap_or(before);
+            if !BLOCK_OWNERS.contains(&owner.to_ascii_lowercase().as_str()) {
+                return None;
+            }
+        }
+        index = end + 1;
+    }
+    quote.is_none().then_some(out)
+}
+
+/// Where the block opened at `open` closes, braces inside quotes left alone.
+fn matching_brace(chars: &[char], open: usize) -> Option<usize> {
+    let (mut depth, mut quote) = (0usize, None);
+    for (index, &c) in chars.iter().enumerate().skip(open) {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' => quote = Some(c),
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A `foreach` loop's head, `$item in what`, that runs nothing heavy: what it walks is a variable,
+/// a list of quoted words, or a light command.
+fn light_loop_head(inside: &str) -> bool {
+    // Lower case keeps every byte where it was, so where ` in ` stands holds in `inside` too.
+    let Some(at) = inside.to_ascii_lowercase().find(" in ") else {
+        return false;
+    };
+    let (item, what) = (inside[..at].trim(), inside[at + 4..].trim());
+    let variable = |text: &str| {
+        text.strip_prefix('$').is_some_and(|name| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':'))
+        })
+    };
+    variable(item)
+        && (variable(what) || quoted_list(what) || (!what.contains('(') && is_light(what)))
+}
+
+/// `'a', "b"`: quoted words separated by commas, which name things rather than run them.
+fn quoted_list(text: &str) -> bool {
+    let mut quote = None;
+    let mut inside_any = false;
+    for c in text.chars() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if c == '\'' || c == '"' => {
+                quote = Some(c);
+                inside_any = true;
+            }
+            None if c == ',' || c.is_whitespace() => {}
+            None => return false,
+        }
+    }
+    quote.is_none() && inside_any
+}
+
+/// .NET members a PowerShell line may call that only read or compute, by how the call begins.
+const READ_ONLY_CALLS: &[&str] = &[
+    "[io.file]::readall",
+    "[system.io.file]::readall",
+    "[io.file]::exists",
+    "[system.io.file]::exists",
+    "[io.directory]::exists",
+    "[system.io.directory]::exists",
+    "[io.path]::",
+    "[system.io.path]::",
+    "[regex]::",
+    "[math]::",
+    "[string]::",
+    "[convert]::",
+    "[text.encoding]::",
+    "[system.text.encoding]::",
+    "[datetime]::",
+    "[datetimeoffset]::",
+    "[timespan]::",
+];
 
 /// The parts of a command line, split where `&&`, `||`, `;`, `|` and line breaks stand outside
 /// quotes, each as its words with quotes taken away.
@@ -137,15 +318,72 @@ pub(super) fn parts(command: &str) -> Vec<Vec<String>> {
     parts
 }
 
+/// PowerShell's comparison and format operators, which a statement reading a variable may apply.
+const OPERATORS: &[&str] = &[
+    "-and",
+    "-as",
+    "-contains",
+    "-eq",
+    "-f",
+    "-ge",
+    "-gt",
+    "-in",
+    "-is",
+    "-isnot",
+    "-join",
+    "-le",
+    "-like",
+    "-lt",
+    "-match",
+    "-ne",
+    "-not",
+    "-notcontains",
+    "-notin",
+    "-notlike",
+    "-notmatch",
+    "-or",
+    "-replace",
+    "-split",
+];
+
+/// A statement that only reads a variable, as a loop's or a filter's block does: `$_.FullName`,
+/// `$_.Length -gt 100`, `$_ -match 'error'`. A bare `$name` is not one, since a POSIX shell runs
+/// the program it holds, nor is a path built on one (`$UE/Build.bat`), nor a method's call.
+fn reads_a_variable(words: &[String]) -> bool {
+    let Some((first, rest)) = words.split_first() else {
+        return false;
+    };
+    let property = first
+        .strip_prefix('$')
+        .and_then(|name| name.split_once('.'))
+        .is_some_and(|(name, member)| !name.is_empty() && !member.is_empty());
+    (first == "$_" || property)
+        && !first.contains(['/', '\\'])
+        && !words.iter().any(|word| word.contains('('))
+        && rest
+            .first()
+            .is_none_or(|operator| OPERATORS.contains(&operator.to_ascii_lowercase().as_str()))
+}
+
 fn light_part(words: &[String]) -> bool {
-    let mut words = words.iter().skip_while(|word| assignment(word));
-    let Some(program) = words.next().map(|word| program_name(word)) else {
+    // A PowerShell variable set to what follows: `$text = Get-Content log.txt -Raw`.
+    let words = match words {
+        [name, equals, rest @ ..] if name.starts_with('$') && equals == "=" => rest,
+        _ => words,
+    };
+    let Some(start) = words.iter().position(|word| !assignment(word)) else {
         // Only variable assignments.
         return true;
     };
+    let words = &words[start..];
+    let first = words[0].to_ascii_lowercase();
+    if READ_ONLY_CALLS.iter().any(|call| first.starts_with(call)) || reads_a_variable(words) {
+        return true;
+    }
+    let program = program_name(&words[0]);
     if program == "git" {
         // Options before the subcommand, such as -C path or --no-pager. `-C` takes a value.
-        let mut rest = words.peekable();
+        let mut rest = words[1..].iter().peekable();
         while let Some(word) = rest.next_if(|word| word.starts_with('-')) {
             if word == "-C" || word == "-c" {
                 rest.next();
@@ -264,6 +502,43 @@ mod tests {
             "python bench.py",
             "sudo ls",
             "./bench.sh",
+        ] {
+            assert!(!is_light(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn a_loop_or_a_filter_whose_block_only_reads_is_light_and_any_other_block_waits() {
+        for command in [
+            "Get-ChildItem *.log | ForEach-Object { Get-Content $_.FullName -Tail 5 }",
+            "Get-ChildItem -Recurse | Where-Object { $_.Length -gt 1000000 } | Select-Object FullName",
+            "gci | ? { $_.Name -match '\\.log$' } | % { $_.FullName }",
+            "foreach ($f in Get-ChildItem *.log) { Get-Content $f -Tail 3 }",
+            "foreach ($name in 'a.txt', 'b.txt') { Test-Path $name }",
+            "foreach ($f in $files) { Select-String -Path $f -Pattern TODO }; git status",
+            "$text = Get-Content log.txt -Raw; $text.Length",
+            "$lines = [IO.File]::ReadAllLines('log.txt'); $lines.Count",
+            "Get-ChildItem | Sort-Object { $_.LastWriteTime } | Select-Object -Last 3",
+            "git log --format='%h {%s}' -3",
+        ] {
+            assert!(is_light(command), "{command}");
+        }
+        for command in [
+            "Get-ChildItem | ForEach-Object { & .\\build.ps1 }",
+            "foreach ($p in $projects) { cargo build }",
+            "if (Test-Path x) { Remove-Item x }",
+            "Measure-Command { npm run verify }",
+            "function f { ls }; f",
+            "& $exe build",
+            "$cmd = 'cargo build'; & $cmd",
+            "UE=/d/UE; $UE/Build.bat Game Win64",
+            "BUILD='cargo build'; $BUILD",
+            "foreach ($f in (Get-Item x).Children) { cat $f }",
+            "Get-ChildItem | ForEach-Object { $_.Delete() }",
+            "Get-ChildItem | ForEach-Object { }  | ForEach-Object { make }",
+            "echo ${HOME}",
+            "ls }",
+            "ls {",
         ] {
             assert!(!is_light(command), "{command}");
         }

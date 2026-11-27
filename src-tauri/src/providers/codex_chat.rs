@@ -76,6 +76,7 @@ const HELD_BACK: &[&str] = &[
     "pc_reserve",
     // pc_wait stays loaded: a command the gate refuses names it (reservations/codex_gate.rs).
     "pc_release",
+    "pc_land",
     "pc_stop",
     "chat_message",
 ];

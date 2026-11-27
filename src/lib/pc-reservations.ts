@@ -12,6 +12,8 @@ export const pcReservationSchema = z.object({
   id: z.string(),
   conversationId: z.string(),
   purpose: z.string(),
+  /** `gpu`: a measurement of GPU work alone, beside which other chats' builds and headless tests run. */
+  scope: z.enum(['computer', 'gpu']).catch('computer'),
   phase: z.enum(['queued', 'lull', 'draining', 'open']),
   askedAt: z.number(),
   /** While it waits for a lull: when it holds other chats' new work if none comes. */
@@ -75,6 +77,29 @@ export const pcGrantSchema = z.object({
   since: z.number(),
 });
 export type PcGrant = z.infer<typeof pcGrantSchema>;
+/** A chat's branch queued with pc_land: on the train running now (`riding`), or waiting for the next. */
+export const pcCarSchema = z.object({
+  id: z.string(),
+  conversationId: z.string(),
+  purpose: z.string(),
+  branch: z.string(),
+  sha: z.string(),
+  queuedAt: z.number(),
+  riding: z.boolean().optional(),
+});
+export type PcCar = z.infer<typeof pcCarSchema>;
+/**
+ * A repository's merge train (requested 2026-11-27): the branches chats queued, landed together by
+ * the repository's own script with one merge, one pipeline and one push, under its landing turn.
+ * Its id stands in for a chat's in turns, slots and grants.
+ */
+export const pcTrainSchema = z.object({
+  id: z.string(),
+  repository: z.string(),
+  startedAt: z.number().optional(),
+  cars: z.array(pcCarSchema).catch([]),
+});
+export type PcTrain = z.infer<typeof pcTrainSchema>;
 export const pcSnapshotSchema = z.object({
   reservations: z.array(pcReservationSchema),
   turns: z.array(pcTurnSchema).catch([]),
@@ -82,8 +107,17 @@ export const pcSnapshotSchema = z.object({
   /** Chats waiting in pc_wait for a reservation of the computer to end. */
   waiting: z.array(z.string()).catch([]),
   grants: z.array(pcGrantSchema).catch([]),
+  trains: z.array(pcTrainSchema).catch([]),
 });
 export type PcSnapshot = z.infer<typeof pcSnapshotSchema>;
+
+/** How the id a repository's merge trains go by begins, in place of a chat's. */
+const TRAIN = 'train:';
+/** The name of a chat, or of a repository's merge train where its id stands for one. */
+export const pcName = (conversationId: string, title: (conversationId: string) => string) =>
+  conversationId.startsWith(TRAIN)
+    ? `Merge train of ${conversationId.slice(TRAIN.length)}`
+    : title(conversationId);
 
 /**
  * Where a chat stands with this computer, which its row in the sidebar marks beside its running
@@ -99,7 +133,8 @@ export type PcChatState =
 const turnName = (turn: PcTurn) => (turn.landing ? 'the landing turn' : turn.name);
 
 export function pcChatState(
-  snapshot: Pick<PcSnapshot, 'reservations' | 'turns' | 'slots' | 'waiting'>,
+  snapshot: Pick<PcSnapshot, 'reservations' | 'turns' | 'slots' | 'waiting'> &
+    Partial<Pick<PcSnapshot, 'trains'>>,
   conversationId: string,
   title: (conversationId: string) => string,
 ): PcChatState | undefined {
@@ -136,10 +171,12 @@ export function pcChatState(
  * run, or its turn at a named reservation. `since` is when the wait began, where it is known.
  */
 export function pcWaitCard(
-  snapshot: Pick<PcSnapshot, 'reservations' | 'turns' | 'slots' | 'waiting'>,
+  snapshot: Pick<PcSnapshot, 'reservations' | 'turns' | 'slots' | 'waiting'> &
+    Partial<Pick<PcSnapshot, 'trains'>>,
   conversationId: string,
-  title: (conversationId: string) => string,
+  chatTitle: (conversationId: string) => string,
 ): { heading: string; detail: string; since?: number } | undefined {
+  const title = (id: string) => pcName(id, chatTitle);
   const [first] = snapshot.reservations;
   const line = snapshot.reservations.findIndex((r) => r.conversationId === conversationId);
   if (line > 0)
@@ -186,6 +223,26 @@ export function pcWaitCard(
       since: turn.askedAt,
     };
   }
+  for (const train of snapshot.trains ?? []) {
+    const car = train.cars.find((c) => c.conversationId === conversationId);
+    if (!car) continue;
+    const ahead = train.cars.filter((c) => !c.riding).indexOf(car);
+    return {
+      heading: car.riding ? 'Landing on the merge train' : 'Waiting for the merge train',
+      detail: [
+        car.riding
+          ? `${train.cars.filter((c) => c.riding).length} on the train`
+          : ahead > 0
+            ? `${ahead} ahead in line`
+            : train.startedAt != null
+              ? 'Next, after the train running now'
+              : 'Next',
+        car.branch,
+        train.repository,
+      ].join(' · '),
+      since: car.riding ? (train.startedAt ?? car.queuedAt) : car.queuedAt,
+    };
+  }
   return undefined;
 }
 
@@ -199,11 +256,18 @@ export function pcTurnGroups(turns: readonly PcTurn[]): { name: string; turns: P
   return [...groups.values()].map((list) => ({ name: list[0].name, turns: list }));
 }
 
-/** Whether anything waits on this computer: a reservation, a build for a slot or a turn. */
-export const pcBusy = (snapshot: Pick<PcSnapshot, 'reservations' | 'turns' | 'slots'>) =>
+/**
+ * Whether anything waits or lands on this computer: a reservation, a build for a slot, a turn, or
+ * a merge train.
+ */
+export const pcBusy = (
+  snapshot: Pick<PcSnapshot, 'reservations' | 'turns' | 'slots'> &
+    Partial<Pick<PcSnapshot, 'trains'>>,
+) =>
   snapshot.reservations.length > 0 ||
   snapshot.slots.length > 0 ||
-  snapshot.turns.some((turn) => turn.grantedAt == null);
+  snapshot.turns.some((turn) => turn.grantedAt == null) ||
+  (snapshot.trains ?? []).some((train) => train.cars.length > 0);
 
 /** The hover text of the indicator: who holds the computer, what for, and where it stands. */
 export function pcReservationTitle(
@@ -229,13 +293,20 @@ export function pcReservationTitle(
   return parts.join(' · ');
 }
 
-/** The hover text of the indicator while builds wait for a slot or chats for a turn. */
-export function pcQueueTitle(snapshot: Pick<PcSnapshot, 'turns' | 'slots'>): string {
+/** The hover text of the indicator while builds wait for a slot, chats for a turn or branches land. */
+export function pcQueueTitle(
+  snapshot: Pick<PcSnapshot, 'turns' | 'slots'> & Partial<Pick<PcSnapshot, 'trains'>>,
+): string {
   const waiting = snapshot.turns.filter((turn) => turn.grantedAt == null).length;
+  const cars = (snapshot.trains ?? []).flatMap((train) => train.cars);
+  const riding = cars.filter((car) => car.riding).length;
   return [
     snapshot.slots.length &&
       `${snapshot.slots.length} ${snapshot.slots.length === 1 ? 'build waits' : 'builds wait'} for a slot`,
     waiting && `${waiting} ${waiting === 1 ? 'chat waits' : 'chats wait'} for a turn`,
+    riding && `${riding} ${riding === 1 ? 'branch lands' : 'branches land'} on a merge train`,
+    cars.length - riding &&
+      `${cars.length - riding} ${cars.length - riding === 1 ? 'branch waits' : 'branches wait'} for a merge train`,
   ]
     .filter(Boolean)
     .join(' · ');
@@ -368,15 +439,18 @@ export const pcTurnRecordSchema = z.object({
 });
 export type PcTurnRecord = z.infer<typeof pcTurnRecordSchema>;
 
-const isTurn = (value: unknown) =>
-  typeof value === 'object' && value !== null && (value as { kind?: unknown }).kind === 'turn';
+/** The kind of a history's record: `turn`, `wait` (for a slot) or `train`; none for a reservation. */
+const kindOf = (value: unknown) =>
+  typeof value === 'object' && value !== null ? (value as { kind?: unknown }).kind : undefined;
+const isTurn = (value: unknown) => kindOf(value) === 'turn';
 
 /** The reservations of a history, newest first, leaving out what does not read as one. */
 export function pcRecords(values: unknown): PcRecord[] {
   if (!Array.isArray(values)) return [];
   return values
     .flatMap((value) => {
-      if (isTurn(value)) return [];
+      // Turns, waits for a slot and merge trains are records of their own kinds.
+      if (kindOf(value) != null) return [];
       const parsed = pcRecordSchema.safeParse(value);
       return parsed.success ? [parsed.data] : [];
     })
@@ -447,6 +521,7 @@ export const pcTurnEnd = (record: PcTurnRecord): string | undefined =>
       reply: 'its reply ended',
       stalled: 'its work used no CPU',
       closed: 'its chat was closed',
+      train: 'a merge train took it over',
     }) as Record<string, string>
   )[record.endedBy];
 

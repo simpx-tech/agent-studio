@@ -3,6 +3,7 @@ import {
   pcBesideText,
   pcBusy,
   pcChatState,
+  pcName,
   pcOutcome,
   pcOwner,
   pcQueueTitle,
@@ -23,6 +24,7 @@ const reservation = (overrides: Partial<PcReservation> = {}): PcReservation => (
   id: 'pc-1',
   conversationId: 'bench',
   purpose: 'Benchmark of chunk meshing',
+  scope: 'computer',
   phase: 'draining',
   askedAt: 1,
   waitingFor: [],
@@ -68,13 +70,15 @@ describe('lulls, turns, build slots and what ran beside a measurement', () => {
     expect(pcBusy(snapshot)).toBe(true);
     // A turn held with nobody waiting, and nothing else, is no reason to show the indicator.
     expect(pcBusy({ reservations: [], turns: [snapshot.turns[0]], slots: [] })).toBe(false);
-    // A host older than turns and slots sends neither, nor the chats waiting and the grants.
+    // A host older than turns and slots sends neither, nor the chats waiting, the grants and the
+    // merge trains.
     expect(pcSnapshotSchema.parse({ reservations: [] })).toEqual({
       reservations: [],
       turns: [],
       slots: [],
       waiting: [],
       grants: [],
+      trains: [],
     });
   });
 
@@ -367,11 +371,89 @@ describe('where each chat stands, for its row in the sidebar and its running rep
 
   it('reads a snapshot from before grants and waiting chats', () => {
     const old = pcSnapshotSchema.parse({
-      reservations: [],
+      reservations: [{ ...reservation(), scope: undefined }],
       slots: [{ conversationId: 'x', label: 'l', since: 1 }],
     });
     expect(old.waiting).toEqual([]);
     expect(old.grants).toEqual([]);
+    expect(old.trains).toEqual([]);
     expect(old.slots[0].weight).toBe('build');
+    expect(old.reservations[0].scope).toBe('computer');
+  });
+});
+
+describe('merge trains', () => {
+  const train = 'train:github.com/simpx-tech/bluevox';
+  const car = (conversationId: string, riding = false) => ({
+    id: `car-${conversationId}`,
+    conversationId,
+    purpose: `Work of ${conversationId}`,
+    branch: `worktree-${conversationId}`,
+    sha: 'a'.repeat(40),
+    queuedAt: 5,
+    riding,
+  });
+  const titles = (id: string) => ({ rivers: 'Fed rivers', ui: 'Inventory' })[id] ?? 'Another chat';
+  const snapshot = pcSnapshotSchema.parse({
+    reservations: [],
+    turns: [
+      {
+        id: 'turn-1',
+        name: 'the landing of github.com/simpx-tech/bluevox',
+        landing: true,
+        conversationId: train,
+        purpose: 'merge train of 1 branch',
+        askedAt: 1,
+        grantedAt: 2,
+      },
+      {
+        id: 'turn-2',
+        name: 'the landing of github.com/simpx-tech/bluevox',
+        landing: true,
+        conversationId: 'lander',
+        purpose: 'Final check and push',
+        askedAt: 3,
+      },
+    ],
+    trains: [
+      {
+        id: train,
+        repository: 'github.com/simpx-tech/bluevox',
+        startedAt: 10,
+        cars: [car('rivers', true), car('ui'), car('art')],
+      },
+    ],
+  });
+
+  it('names a train where its id stands for a chat', () => {
+    expect(pcName(train, titles)).toBe('Merge train of github.com/simpx-tech/bluevox');
+    expect(pcName('ui', titles)).toBe('Inventory');
+  });
+
+  it('gives a chat whose branch rides or waits its card, and a lander waiting behind the train its holder', () => {
+    expect(pcWaitCard(snapshot, 'rivers', titles)).toEqual({
+      heading: 'Landing on the merge train',
+      detail: '1 on the train · worktree-rivers · github.com/simpx-tech/bluevox',
+      since: 10,
+    });
+    expect(pcWaitCard(snapshot, 'ui', titles)?.detail).toBe(
+      'Next, after the train running now · worktree-ui · github.com/simpx-tech/bluevox',
+    );
+    expect(pcWaitCard(snapshot, 'art', titles)?.detail).toMatch(/^1 ahead in line/);
+    expect(pcWaitCard(snapshot, 'lander', titles)?.detail).toBe(
+      'Merge train of github.com/simpx-tech/bluevox holds the landing turn: merge train of 1 branch',
+    );
+    expect(pcChatState(snapshot, 'ui', titles)?.kind).toBe('waiting');
+    expect(pcBusy(snapshot)).toBe(true);
+    expect(pcQueueTitle(snapshot)).toBe(
+      '1 chat waits for a turn · 1 branch lands on a merge train · 2 branches wait for a merge train',
+    );
+  });
+
+  it('keeps waits for a slot and trains out of the reservations of the history', () => {
+    const wait = { kind: 'wait', conversationId: 'ui', askedAt: 1, endedAt: 2, endedBy: 'started' };
+    const ridden = { kind: 'train', id: 'train-3', repository: 'r', startedAt: 1, endedAt: 2 };
+    expect(pcRecords([wait, ridden])).toEqual([]);
+    expect(pcTurnRecords([wait, ridden])).toEqual([]);
   });
 });

@@ -112,11 +112,13 @@
   import {
     pcBusy,
     pcChatState,
+    pcName,
     pcQueueTitle,
     pcReservationTitle,
     pcWaitCard,
     type PcReservation,
     type PcSlot,
+    type PcTrain,
     type PcTurn,
   } from '$lib/pc-reservations';
   import {
@@ -2131,24 +2133,28 @@
   let pcSlots = $state<PcSlot[]>([]);
   // Chats waiting in pc_wait for a reservation of the computer to end.
   let pcWaiting = $state<string[]>([]);
+  // Repositories' merge trains: the branches chats queued with pc_land.
+  let pcTrains = $state<PcTrain[]>([]);
+  // A chat's title, or a repository's merge train where its id stands for a chat's.
   const pcChatTitle = (id: string) =>
-    workspace.conversations.find((c) => c.id === id)?.title || 'Another chat';
+    pcName(id, (id) => workspace.conversations.find((c) => c.id === id)?.title || 'Another chat');
   // Where each chat stands with this computer, which its sidebar row and its running reply show.
   const pcNow = $derived({
     reservations: pcReservations,
     turns: pcTurns,
     slots: pcSlots,
     waiting: pcWaiting,
+    trains: pcTrains,
   });
   // What the open chat waits for on this computer, a card in its running reply.
   const activeHold = $derived(active ? pcWaitCard(pcNow, active.id, pcChatTitle) : undefined);
   const pcShown = $derived(
-    pcBusy({ reservations: pcReservations, turns: pcTurns, slots: pcSlots }),
+    pcBusy({ reservations: pcReservations, turns: pcTurns, slots: pcSlots, trains: pcTrains }),
   );
   const pcTitle = $derived(
     [
       pcReservationTitle(pcReservations, pcChatTitle),
-      pcQueueTitle({ turns: pcTurns, slots: pcSlots }),
+      pcQueueTitle({ turns: pcTurns, slots: pcSlots, trains: pcTrains }),
     ]
       .filter(Boolean)
       .join(' · ') || 'Reservations',
@@ -3409,6 +3415,7 @@
       pcTurns = snapshot.turns;
       pcSlots = snapshot.slots;
       pcWaiting = snapshot.waiting;
+      pcTrains = snapshot.trains;
     });
     const stopUsageRefresh = watchUsageRefresh(refreshUsageConnection);
     const stopNotificationView = watchNotificationView(
@@ -9777,6 +9784,7 @@
     reservations={pcReservations}
     turns={pcTurns}
     slots={pcSlots}
+    trains={pcTrains}
     title={pcChatTitle}
     opens={(id) => workspace.conversations.some((c) => c.id === id)}
     open={(id) => {

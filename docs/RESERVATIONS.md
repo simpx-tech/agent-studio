@@ -15,15 +15,17 @@ windows ran beside another chat's build, test or game run).
 The same broker hands out **build slots**, so that chats' builds take turns when memory runs short,
 and **named reservations**, things one chat at a time holds across its calls, such as a
 repository's landing turn (requested 2026-11-24, artifacts/time-backfill/agent-time-follow-up.md
-§8).
+§8). It runs **merge trains**, which land the branches several chats queued together, with one
+merge, one pipeline and one push (requested 2026-11-27, below). A measurement of GPU work alone
+reserves only that (`scope: "gpu"`), and other chats' builds and headless tests run on beside it.
 
 The native broker is `src-tauri/src/reservations.rs`, with `reservations/tools.rs` (the agents'
 tools and the gate), `reservations/light.rs` (light commands), `reservations/machine.rs`
 (measuring the computer), `reservations/jobs.rs` (which chat a process belongs to),
 `reservations/programs.rs` (programs chats left running, and stopping them, with
 `wsl-programs.sh` and `wsl-stop.sh` inside WSL), `reservations/hold.rs` (processes that wait
-for a window to end), `reservations/builds.rs` (build slots) and `reservations/named.rs` (named
-reservations and landing turns). Every Windows chat and the WSL distributions this computer manages share
+for a window to end), `reservations/builds.rs` (build slots), `reservations/named.rs` (named
+reservations and landing turns) and `reservations/train.rs` (merge trains). Every Windows chat and the WSL distributions this computer manages share
 one broker, since they share the computer.
 
 ## How a measurement goes
@@ -40,7 +42,14 @@ one broker, since they share the computer.
    optionally, the minutes the measurement takes. The answer lists what still runs. A reply that
    reserves again within ten minutes of releasing hears that one reservation covers a series.
    First in line, the reservation waits for a lull (below); once its wait runs out, or its window
-   opens, other chats' new commands and MCP tool calls wait, except light ones.
+   opens, other chats' new commands and MCP tool calls wait, except light ones. With
+   `scope: "gpu"`, for a measurement that reads only the GPU (frame times, a GPU capture), only
+   what renders waits or keeps the window closed (`builds::renders`, requested 2026-11-27, after a
+   measurement of frame times held every other chat's builds and test runs): a game, an editor or
+   an engine's run not given `-NullRHI` (bluevox's `Run-Tests` runs its editor under it), browser
+   tests (Playwright, `npm run verify`), and MCP tool calls of servers here, which may drive an
+   editor. Other chats' builds take their slots as usual, processes their programs start are not
+   held, and the report records the scope.
 3. **Wait for the window.** `pc_wait` returns once no other chat runs busy work, a command, an
    MCP tool call or background work that a reply of its own still runs and waits on, unless it
    sits idle (below), nor holds what it was asked to hand over.
@@ -129,8 +138,15 @@ or its reply ends.
   it asks the gate, so a call the gate refused counts for nothing: it never keeps a window closed
   nor shows in a report as work that ran.
 - **Light commands** run anyway (`light.rs`): reading files, listing folders, searching text and
-  asking Git about the checkout, every part of the command line. A command substitution, a script
-  block, `Invoke-Expression` or any program the list does not name makes the command wait.
+  asking Git about the checkout, every part of the command line. A command substitution,
+  `Invoke-Expression`, `& $variable` or any program the list does not name makes the command wait.
+  So does a script block, unless it is the block a `ForEach-Object`, `Where-Object` or
+  `Sort-Object` runs for each item (`%`, `?`, `foreach`, `where`), or a `foreach (...)` loop's over a
+  variable, quoted names or a light command, and every statement in it is light (requested
+  2026-11-27, after a loop that only read files waited out a measurement); a statement reading a
+  variable's property (`$_.FullName`, `$_.Length -gt 100`), a PowerShell variable set to a light
+  command (`$text = Get-Content log.txt -Raw`) and read-only .NET calls (`[IO.File]::ReadAllText`,
+  `[IO.Path]::`, `[regex]::`) are light too.
 - **MCP tool calls** wait like commands (requested 2026-11-25, since a chat driving an open
   editor through unreal-mcp loads the computer as much as a command does). Both agents name an MCP
   tool `mcp__<server>__<tool>` to their hooks (`activity::mcp_tool`), and the broker decides by
@@ -230,12 +246,27 @@ memory, which the broker holds for it until it ends.
   together took free commit from 17 GB to 2.3. A build always starts alone. Beside others, one
   starts while fewer builds run than the cores allow (one for each eight), at least 10 GB stays
   available (`builds::BESIDE_FREE`), and the last build that started had 30 seconds to take its
-  memory (`builds::RAMP`). A build of a few files needs 4 GB available (`LIGHT_FREE`) and a run 8 GB
-  (`RUN_FREE`), unless no grant holds memory; neither takes a slot nor waits for the last build to
-  grow, nor waits behind the builds in line.
+  memory (`builds::RAMP`). A build of a few files needs 4 GB available (`LIGHT_FREE`), unless no
+  grant holds memory; it takes no slot, nor waits for the last build to grow, nor behind the builds
+  in line, and neither does a run.
+- **A run needs what runs of its kind took** (requested 2026-11-27, after a 30-second filtered
+  test run waited 4 and 16 minutes for the 8 GB every run asked): its kind is its program or script
+  and the flags that change what it takes (`builds::signature`: `run-tests -filter`,
+  `run-game -mode net`, `unrealeditor-cmd -nullrhi`), and it needs the most the last ten runs of
+  that kind took, a quarter more and half a gigabyte, between 2 and 16 GB (`builds::run_need`), or
+  8 GB (`RUN_FREE`) before one was measured. A run's peak is the most its chat's processes used
+  beyond what they used as it began, read with every look at the computer while its grant holds,
+  and kept with its kind when the grant ends, once it held ten seconds (`keep_peak`), in
+  `reservations/peaks.json` beside the history.
+- **A build waits a while for two compilers** (requested 2026-11-27, after two bluevox builds ran 12
+  and 15 minutes on one compiler, granted 3.5 GB while 15.7 GB of commit was free and held for other
+  chats' runs, where the same builds took about four minutes on six to eight): one that would be
+  granted less than two compilers (`builds::FEW`) while other chats' work holds memory that may
+  free waits up to three minutes since it first asked (`FEW_WAIT`), then starts with what there is;
+  alone, it starts at once.
 - **A grant** (`builds::grant`): a build gets what is available less 3 GB left to the rest of the
   computer (`GRANT_KEEP`), between one compiler and eight (`GRANT_MOST`); a build of a few files up to
-  two compilers; a run the 8 GB it needs. The broker writes it to the chat's file in app data,
+  two compilers; a run what it needs. The broker writes it to the chat's file in app data,
   `reservations/grants/<chat>.json` (`{"bytes": …, "weight": "build" | "light" | "run",
   "grantedAt": …}`), which every Windows chat CLI's commands find by the `AGENT_STUDIO_PC_GRANT`
   variable (`chat_env`, beside `AGENT_STUDIO_PC_CHAT`, the chat's id), so that a build script runs as
@@ -249,10 +280,17 @@ memory, which the broker holds for it until it ends.
   ends, or the computer's two-second look finds room, a slot, or room for a run, is kept for the
   first that fits for two minutes, with the memory it will be granted set aside, and its `pc_wait`
   returns so that it runs its command again. While a measurement holds the computer, only the
-  measuring chat gets a slot. A chat's place in line ends with its reply.
+  measuring chat gets a slot (any chat, beside one of GPU work alone). A chat's place in line ends
+  with its reply.
 
 The wait shows in the reply's Time report as **Waiting for a build slot** (`slot`, On hold), apart
-from the build's own time, which before counted the wait inside a build script as compiling.
+from the build's own time, which before counted the wait inside a build script as compiling. The
+history keeps every wait for a slot or for room as it ends (requested 2026-11-27, since a chat's
+waits for room left no trace once its reply ended): `"kind": "wait"`, with the chat, what it asked
+(`weight`, its `label` and a run's `signature` and `needBytes`), why it waited when it was last
+refused (`why`: `line`, `slots`, `memory`, `ramp`, `compilers` or `room`), when it asked, when a
+slot was kept for it and when it ended, how long it waited (`waitedMs`), and how (`endedBy`:
+`started`, `unused` when the slot kept for it went to the next, `reply` or `closed`).
 
 ## Named reservations and landing turns
 
@@ -295,6 +333,51 @@ turn goes to the next chat in line, when one waits, and the holder hears why (`e
 runs nothing to watch, and a chat inside WSL, whose work this computer's readings do not see, is
 not watched. The Reservations window marks a held turn kept for its chat's next reply, or whose
 work has used no CPU, and the chat's row in the sidebar says so on hover.
+
+## Merge trains
+
+Landing one chat at a time still redid work when several chats were ready together: every push
+moved the main branch under the next chat in line, which merged it and ran its pipeline again under
+the turn (2026-11-26: turns held 31, 26 and 11 minutes in a row). A repository with a **merge
+train** lands the branches queued together instead (requested 2026-11-27, `reservations/train.rs`):
+
+- **The repository says how**, in `.agent-studio/train.json` in its main checkout (the folder whose
+  `.git` every worktree shares, `named::main_checkout`): `{"branch": "main", "command":
+  ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "Tools/Land-Train.ps1"],
+  "maxCars": 4}`. Without it `pc_land` says so, and the chat lands with its landing turn.
+- **A chat queues its branch** with `pc_land` and a purpose, once the branch, merged with a freshly
+  fetched main branch, passed its own pipeline and is committed. The car carries the commit its
+  checkout's branch is on, read from Git's own files (`named::head`); a checkout on the main branch
+  itself or with a detached head is refused. Calling it again brings a waiting car up to date in its
+  place, a landing turn the chat held or waited for at that repository goes, and `pc_release` with
+  `landing: true` takes a car that has not left off the train (`Broker::withdraw`). A car needs no
+  running reply; closing its chat takes it off.
+- **A train leaves** once cars wait (`board`): it asks the repository's landing turn in line with
+  the chats landing by hand (its id, `train:<repository>`, stands in for a chat's in turns, slots and
+  grants), then, once the turn came and no measurement holds the whole computer, a build slot, and
+  takes up to `maxCars` cars, earliest first (`depart`). Its memory grant is held until its build has
+  compiled, however long it takes to start.
+- **It runs the repository's command** in the main checkout, in a job of its own, so its builds count
+  as a chat's and a measurement waits for it (`train::run`): `AGENT_STUDIO_TRAIN_CARS` names a JSON
+  file of the cars (`{"train", "repository", "branch", "cars": [{"id", "chat", "title", "purpose",
+  "worktree", "branch", "sha"}]}`), `AGENT_STUDIO_TRAIN_RESULT` the file it writes what became of
+  each car to (`{"landed": [ids], "sha", "ejected": [{"id", "reason", "log"}], "requeue": [ids],
+  "note"}`), `AGENT_STUDIO_TRAIN_DIR` a folder for its logs (app data `reservations/trains/…`, with
+  `train.log`, what it printed), and `AGENT_STUDIO_PC_GRANT` its grant. It exits 0 once it wrote its
+  result; it is stopped after three hours (`train::LONGEST`). bluevox's `Tools/Land-Train.ps1` merges
+  the cars onto a fresh main branch in a pooled worktree, resolves the conflicts of its changelog's
+  top entries, runs one build and the whole suite, finds the car that broke it by prefixes, pushes
+  once and pulls the main checkout.
+- **Each car's chat hears** what became of it with its next tool call, and its `pc_wait` returns
+  then (`Waiting for its turn` in its Time report): landed (at which commit, on a train of how many,
+  in how long), ejected with the reason and the log, or waiting for the next train, which it boards
+  first. A train whose command failed gives its cars back to wait for the next; two failing in a row
+  give them back to their chats to land by hand (`train::FAILURES`). The chats waiting for the
+  landing turn by hand hear that the main branch moved, and `pc_status` lists the trains, their
+  cars and what the last trains landed.
+- **The history keeps each train** (`"kind": "train"`: its cars with their outcome and reason, the
+  commit it pushed, its note, the error that stopped it), its turn (`endedBy: "train"`) and its wait
+  for a slot.
 
 ## Leases: what a chat holds while it stays open
 
@@ -427,8 +510,9 @@ Each chat's row in the sidebar marks where it stands with this computer, beside 
 the monitoring pulse marks a monitor (`pcChatState`, requested 2026-11-26): the gauge while it
 reserves the computer, in the accent once it measures; an hourglass in the warning colour while it
 waits for the computer another chat reserved, a place in line to reserve it, a build slot, room for
-a game or test run, or its turn (`waiting` in `pc_state` names the chats waiting in `pc_wait` for the
-computer); a quiet flag while it holds a landing turn. Its hover and accessible name say which. And
+a game or test run, its turn, or its branch's merge train, waiting or on its way (`waiting` in
+`pc_state` names the chats waiting in `pc_wait` for the computer, `trains` the trains and their
+cars); a quiet flag while it holds a landing turn. Its hover and accessible name say which. And
 the running reply of a chat that waits shows a card of its own under its heading, in the warning
 colour, with what it waits for, behind whom, and how long it has waited where that is known
 (`pcWaitCard`, `MessageView`'s `onHold`); its heading's live label says the same in place of
@@ -439,8 +523,9 @@ and their close button, through the page's own close: until 2026-11-26 the backd
 `<dialog>` alone, the page went on holding it open, and the next click opened nothing.
 
 The gauge opens the Reservations window (`ReservationsDialog.svelte`), which `/reservations` also
-opens at any time. It shows what waits In line (each name with its holder and the chats waiting
-for it, and the builds waiting for a slot), the reservations now, each with what its window waits
+opens at any time. It shows what waits In line (each merge train with its cars, each name with its
+holder and the chats waiting for it, and the builds waiting for a slot), the reservations now, each
+with its scope when it is of GPU work alone and what its window waits
 for and the chats waiting, then every reservation this computer's history kept (`pc_history`,
 read whole, newest first): together, how many measurements, how many ran beside other work, how
 long they waited to start and how long other chats waited; and each one with how long it waited

@@ -26,7 +26,10 @@
 //!
 //! The same broker hands out build slots (`builds`): a chat's build waits at its gate while the
 //! builds already running leave no room for it, and named reservations (`named`), such as a
-//! repository's landing turn, which one chat at a time holds across its calls.
+//! repository's landing turn, which one chat at a time holds across its calls. It runs merge trains
+//! (`train`): the branches chats queue with `pc_land` land together, one repository's at a time,
+//! by its own script, under its landing turn. A measurement of GPU work alone (`Scope::Gpu`) holds
+//! only what renders: other chats' builds and headless tests run on beside it.
 //!
 //! Chats coordinate by themselves (`chat_message`): a message reaches a replying chat with its
 //! next tool call. The chat holding the computer may ask a replying chat to hand over what it
@@ -44,6 +47,7 @@ pub mod machine;
 pub mod named;
 pub mod programs;
 pub mod tools;
+pub mod train;
 
 use crate::protocol::activity::ToolActivity;
 use serde::{Deserialize, Serialize};
@@ -148,6 +152,33 @@ pub struct Snapshot {
     pub waiting: Vec<String>,
     /// The memory chats' builds and runs hold now (`builds::grant`).
     pub grants: Vec<GrantView>,
+    /// Repositories' merge trains: the cars waiting and the train running (`train`).
+    pub trains: Vec<TrainView>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrainView {
+    /// The id the repository's trains go by in turns, slots and grants (`train::PREFIX`).
+    pub id: String,
+    pub repository: String,
+    /// When the train running now started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    /// The cars on the train running first, then those waiting, earliest first.
+    pub cars: Vec<CarView>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CarView {
+    pub id: String,
+    pub conversation_id: String,
+    pub purpose: String,
+    pub branch: String,
+    pub sha: String,
+    pub queued_at: u64,
+    /// It is on the train running now.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub riding: bool,
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,6 +229,9 @@ pub struct View {
     pub id: String,
     pub conversation_id: String,
     pub purpose: String,
+    /// `computer`, or `gpu` for a measurement of GPU work alone, beside which other chats' builds
+    /// and headless tests run on.
+    pub scope: &'static str,
     /// `queued` behind another; first in line, `lull` while it waits for a moment when no other
     /// chat runs heavy work, `draining` while it holds other chats' new work and theirs finishes,
     /// or `open`.
@@ -243,10 +277,31 @@ pub struct Broker {
     settings: Mutex<Settings>,
     /// How it reads the computer: `machine::read`, or nothing in tests, which give their own.
     read: Mutex<fn() -> Option<machine::Reading>>,
+    /// How it runs a merge train: `train::run`, unless a test gives its own.
+    runner: Mutex<Option<train::Runner>>,
     /// The broker itself, for the loop that looks at the computer.
     me: std::sync::Weak<Broker>,
     /// Which chat each process belongs to.
     pub jobs: jobs::Jobs,
+}
+
+/// What a reservation of the computer holds (requested 2026-11-27, after a measurement of frame
+/// times held every other chat's builds and test runs, which never touch the GPU).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    /// Everything: other chats' new work waits, light commands apart.
+    Computer,
+    /// GPU work alone: only other chats' games, editors and browser tests wait or keep the window
+    /// closed, and their builds and headless tests run on.
+    Gpu,
+}
+impl Scope {
+    pub fn name(self) -> &'static str {
+        match self {
+            Scope::Computer => "computer",
+            Scope::Gpu => "gpu",
+        }
+    }
 }
 
 #[derive(Default)]
@@ -290,6 +345,17 @@ struct State {
     /// A reading inside WSL is under way (`programs::wsl_work`), and when the last began.
     reading_wsl: bool,
     read_wsl_at: Option<Instant>,
+    /// The memory each kind of run took at its most, its last `builds::PEAKS_KEPT` times
+    /// (`builds::signature`), kept beside the history (`PEAKS`).
+    peaks: HashMap<String, Vec<u64>>,
+    /// Each repository's merge train, by the id its trains go by (`train::PREFIX`).
+    lines: HashMap<String, train::Line>,
+    /// What the last trains landed, newest last, for chats to hear what moved a main branch.
+    landings: Vec<train::Landing>,
+    /// What became of each chat's last car, for its `pc_wait`.
+    outcomes: HashMap<String, String>,
+    /// Records for the history that the next `flush` writes: waits for a slot that ended.
+    pending: Vec<Value>,
     next: u64,
     ticking: bool,
 }
@@ -363,6 +429,12 @@ struct SlotWait {
     /// When a slot was kept for it, with the memory it is granted when it starts.
     granted: Option<Instant>,
     bytes: u64,
+    /// What a run of its kind needs free (`builds::run_need`), and its kind.
+    need: u64,
+    signature: Option<String>,
+    /// Why it waited when it was last refused, for the history: `line`, `slots`, `memory`, `ramp`,
+    /// `compilers` (a build waiting for room for two) or `room` (a run's or a build of a few files').
+    why: &'static str,
 }
 /// Memory a chat's build or run was granted (`builds::grant`), held until that work ends: its
 /// call ended (or never started), the chat's compilers stopped and `builds::RAMP` passed.
@@ -376,6 +448,15 @@ struct Grant {
     /// That call ended, or the reply that asked for it did; a background build goes on, and so
     /// does its grant while its compilers run.
     ended: bool,
+    /// A merge train's: held until its build has compiled, however long it takes to start.
+    train: bool,
+    /// Its chat's compilers ran since it was granted.
+    compiled: bool,
+    /// A run's kind (`builds::signature`), the memory its chat's processes used as it began and the
+    /// most they used beyond that since, which its kind's peaks keep when it ends.
+    signature: Option<String>,
+    base: Option<u64>,
+    peak: u64,
 }
 /// A build running on the computer now.
 struct Running {
@@ -431,6 +512,8 @@ enum Asked {
 struct Call {
     label: String,
     light: bool,
+    /// It draws on the GPU (`builds::renders`), so a measurement of GPU work alone waits for it.
+    renders: bool,
     /// What it asks of the computer (`builds::weight`): a build takes a build slot while it runs,
     /// and any weighed call holds its chat's grant.
     weight: Option<builds::Weight>,
@@ -449,6 +532,7 @@ struct Reservation {
     conversation: String,
     run_id: String,
     purpose: String,
+    scope: Scope,
     minutes: Option<f64>,
     asked: Instant,
     asked_at: u64,
@@ -502,6 +586,8 @@ struct Item {
     conversation: String,
     label: String,
     light: bool,
+    /// It draws on the GPU (`builds::renders`).
+    renders: bool,
     /// Its reply still runs, so it is work in progress rather than something left running.
     in_progress: bool,
     /// Background work its CLI keeps.
@@ -529,8 +615,16 @@ impl Broker {
             .and_then(|bytes| serde_json::from_slice::<Settings>(&bytes).ok())
             .and_then(Settings::valid)
             .unwrap_or_default();
+        let peaks = history
+            .as_ref()
+            .and_then(|history| std::fs::read(history.with_file_name(PEAKS)).ok())
+            .and_then(|bytes| serde_json::from_slice::<HashMap<String, Vec<u64>>>(&bytes).ok())
+            .unwrap_or_default();
         let broker = Arc::new_cyclic(|me| Self {
-            state: Mutex::new(State::default()),
+            state: Mutex::new(State {
+                peaks,
+                ..State::default()
+            }),
             version: watch::channel(0).0,
             emit,
             titles,
@@ -539,6 +633,7 @@ impl Broker {
             release: std::sync::OnceLock::new(),
             settings: Mutex::new(settings),
             read: Mutex::new(if cfg!(test) { || None } else { machine::read }),
+            runner: Mutex::new(None),
             me: me.clone(),
             jobs: jobs::Jobs::default(),
         });
@@ -569,7 +664,10 @@ impl Broker {
             let Some(first) = state.queue.first() else {
                 return;
             };
+            // A measurement of GPU work alone lets what does not render run, and what starts
+            // inside a program cannot be told apart.
             if first.opened.is_none()
+                || first.scope == Scope::Gpu
                 || first.conversation == conversation
                 || first
                     .asks
@@ -671,6 +769,12 @@ impl Broker {
     #[cfg(test)]
     pub fn read_with(&self, read: fn() -> Option<machine::Reading>) {
         *self.read.lock().unwrap_or_else(|e| e.into_inner()) = read;
+    }
+
+    /// Runs merge trains with `runner`, as a test gives it.
+    #[cfg(test)]
+    pub fn run_trains_with(&self, runner: train::Runner) {
+        *self.runner.lock().unwrap_or_else(|e| e.into_inner()) = Some(runner);
     }
 
     /// Watches the turns as a tick at `now` does, with each chat's work as `work` read it.
@@ -802,7 +906,7 @@ impl Broker {
     }
 
     /// `conversation` was closed (moved to History or deleted): the turns it held or waited for,
-    /// its builds waiting for a slot and its work's grant go at once.
+    /// its builds waiting for a slot, its work's grant and its cars waiting for a train go at once.
     pub fn chat_closed(&self, conversation: &str) {
         let (reports, snapshot) = {
             let mut state = self.lock();
@@ -814,12 +918,19 @@ impl Broker {
                 "closed",
             );
             let waiting = state.slots.len();
-            state.slots.retain(|w| w.conversation != conversation);
+            end_slot_waits(&mut state, |w| w.conversation == conversation, "closed");
             let granted = state.grants.contains_key(conversation);
             if granted {
                 self.end_grant(&mut state, conversation);
             }
-            if reports.is_empty() && waiting == state.slots.len() && !granted {
+            let mut cars = 0;
+            for line in state.lines.values_mut() {
+                let before = line.waiting.len();
+                line.waiting.retain(|car| car.conversation != conversation);
+                cars += before - line.waiting.len();
+            }
+            state.outcomes.remove(conversation);
+            if reports.is_empty() && waiting == state.slots.len() && !granted && cars == 0 {
                 return;
             }
             (reports, self.view(&state))
@@ -827,7 +938,9 @@ impl Broker {
         for report in &reports {
             self.keep(report);
         }
+        self.flush();
         self.publish(snapshot);
+        self.look();
     }
 
     /// A call a running reply reported. Commands, monitors and calls of MCP servers' tools count
@@ -865,11 +978,15 @@ impl Broker {
                     None => !command.is_empty() && light::is_light(&command),
                 };
                 let weight = (!light).then(|| builds::weight(&command)).flatten();
+                // A server's tool may drive a program that renders, as unreal-mcp drives an
+                // editor's.
+                let renders = !light && (tool.connected().is_some() || builds::renders(&command));
                 run.calls.insert(
                     tool.id.clone(),
                     Call {
                         label: label_of(tool),
                         light,
+                        renders,
                         weight,
                         read,
                     },
@@ -925,42 +1042,46 @@ impl Broker {
                 .as_ref()
                 .zip(members.as_ref())
                 .map(|(r, m)| machine::Owners::new(r, m, std::process::id()));
-            let snapshot = {
+            let (snapshot, rides) = {
                 let mut state = broker.lock();
-                broker
-                    .grant(
-                        &mut state,
-                        reading.as_ref(),
-                        owners.as_ref(),
-                        Instant::now(),
-                    )
-                    .then(|| broker.view(&state))
+                let (changed, rides) = broker.grant(
+                    &mut state,
+                    reading.as_ref(),
+                    owners.as_ref(),
+                    Instant::now(),
+                );
+                (changed.then(|| broker.view(&state)), rides)
             };
+            broker.flush();
             if let Some(snapshot) = snapshot {
                 broker.publish(snapshot);
             }
+            broker.ride(rides);
         });
     }
 
     /// Lets go of the grants whose work ended, then keeps slots for the builds and runs waiting
-    /// that fit beside what runs now, as `reading` shows it with its `owners`. Returns whether
-    /// anything changed.
+    /// that fit beside what runs now, as `reading` shows it with its `owners`, and starts the
+    /// merge trains whose turn and slot came. Returns whether anything changed, and the trains to
+    /// run.
     fn grant(
         &self,
         state: &mut State,
         reading: Option<&machine::Reading>,
         owners: Option<&machine::Owners>,
         now: Instant,
-    ) -> bool {
+    ) -> (bool, Vec<train::Ride>) {
         let mut changed = self.settle_grants(state, reading, owners, now);
-        if state.slots.is_empty() {
-            return changed;
+        changed |= self.board(state, now);
+        if !state.slots.is_empty() {
+            let running = running_builds(state, reading.zip(owners), None);
+            let available = available(state, reading, owners);
+            let cores = reading.map_or_else(cores, |r| r.cores);
+            changed |= Self::grant_slots(state, running.len(), available, cores, now);
         }
-        let running = running_builds(state, reading.zip(owners), None);
-        let available = available(state, reading, owners);
-        let cores = reading.map_or_else(cores, |r| r.cores);
-        changed |= Self::grant_slots(state, running.len(), available, cores, now);
-        changed
+        let rides = self.depart(state, now);
+        changed |= !rides.is_empty();
+        (changed, rides)
     }
 
     /// The reply `run_id` ended: its commands with it, and a reservation it held.
@@ -1007,6 +1128,7 @@ impl Broker {
         if let Some(report) = &report {
             self.keep(report);
         }
+        self.flush();
         if let Some(snapshot) = snapshot {
             self.publish(snapshot);
         }
@@ -1038,7 +1160,7 @@ impl Broker {
         state.prepared.retain(|s| s.by != conversation);
         // A build it waited a slot for will not start.
         let waiting = state.slots.len();
-        state.slots.retain(|w| w.conversation != conversation);
+        end_slot_waits(state, |w| w.conversation == conversation, "reply");
         ended |= state.slots.len() != waiting;
         // Its work's grant ends with that work: a build left in the background holds it while it
         // compiles (`settle_grants`).
@@ -1055,9 +1177,11 @@ impl Broker {
                 ended = true;
             }
         }
-        let (unread, rest): (Vec<Message>, Vec<Message>) = std::mem::take(&mut state.messages)
+        // What became of its branch on a merge train waits for its next reply.
+        let messages = std::mem::take(&mut state.messages);
+        let (unread, rest): (Vec<Message>, Vec<Message>) = messages
             .into_iter()
-            .partition(|m| m.to == conversation);
+            .partition(|m| m.to == conversation && state.outcomes.get(&m.to) != Some(&m.text));
         state.messages = rest;
         for message in unread {
             let Some(from) = message.from else { continue };
@@ -1509,12 +1633,25 @@ impl Broker {
 
     /// Reserves the computer for `conversation`'s reply `run_id`, or brings up to date the
     /// reservation it has. The answer says where it stands.
+    #[cfg(test)]
     pub fn reserve(
         self: &Arc<Self>,
         run_id: &str,
         conversation: &str,
         purpose: &str,
         minutes: Option<f64>,
+    ) -> String {
+        self.reserve_scoped(run_id, conversation, purpose, minutes, Scope::Computer)
+    }
+
+    /// Reserves as `reserve` does, what `scope` names: the computer, or its GPU work alone.
+    pub fn reserve_scoped(
+        self: &Arc<Self>,
+        run_id: &str,
+        conversation: &str,
+        purpose: &str,
+        minutes: Option<f64>,
+        scope: Scope,
     ) -> String {
         let (text, snapshot) = {
             let mut state = self.lock();
@@ -1537,6 +1674,7 @@ impl Broker {
                 }
                 existing.minutes = minutes.or(existing.minutes);
                 existing.run_id = run_id.into();
+                existing.scope = scope;
             } else {
                 state.next += 1;
                 let id = format!("pc-{}", state.next);
@@ -1551,6 +1689,7 @@ impl Broker {
                     conversation: conversation.into(),
                     run_id: run_id.into(),
                     purpose: purpose.trim().into(),
+                    scope,
                     minutes,
                     asked: now,
                     asked_at: epoch_ms(),
@@ -1593,6 +1732,10 @@ impl Broker {
                 && state.slots.is_empty()
                 && state.grants.is_empty()
                 && state.turns.is_empty()
+                && state
+                    .lines
+                    .values()
+                    .all(|line| line.waiting.is_empty() && line.running.is_none())
         };
         let (measuring, waiting, slots, stalls) = {
             let mut state = self.lock();
@@ -1634,7 +1777,7 @@ impl Broker {
         };
         let members = reading.as_ref().map(|_| self.jobs.members());
         let launches = reading.as_ref().map(|_| self.jobs.wsl());
-        let (update, inside, reports) = {
+        let (update, inside, reports, rides) = {
             let mut state = self.lock();
             if done(&state) {
                 state.ticking = false;
@@ -1673,8 +1816,9 @@ impl Broker {
                 .as_ref()
                 .zip(members.as_ref())
                 .map(|(r, m)| machine::Owners::new(r, m, std::process::id()));
-            // Builds waiting for a slot, beside what builds now.
-            let mut changed = self.grant(&mut state, reading.as_ref(), owners.as_ref(), now);
+            // Builds waiting for a slot, beside what builds now, and the trains whose turn came.
+            let (mut changed, rides) =
+                self.grant(&mut state, reading.as_ref(), owners.as_ref(), now);
             // The turns: one its reply left, and one whose holder's work stalled.
             let background = if work.is_some() && state.turns.iter().any(|t| t.granted.is_some()) {
                 (self.background)()
@@ -1717,17 +1861,19 @@ impl Broker {
                 None if changed => Some(self.view(&state)),
                 None => None,
             };
-            (update, inside, reports)
+            (update, inside, reports, rides)
         };
         for report in &reports {
             self.keep(report);
         }
+        self.flush();
         if let Some(snapshot) = update {
             self.publish(snapshot);
         }
         if !inside.is_empty() {
             self.read_wsl(inside);
         }
+        self.ride(rides);
         true
     }
 
@@ -1934,6 +2080,8 @@ impl Broker {
                 turn.granted.is_some()
                     && turn.orphaned.is_none()
                     && !state.in_wsl.contains(&turn.conversation)
+                    // A train's script is stopped once it runs `train::LONGEST`.
+                    && !turn.conversation.starts_with(train::PREFIX)
             })
             .map(|(index, turn)| {
                 let holder = turn.conversation.as_str();
@@ -2185,11 +2333,22 @@ impl Broker {
     ) -> Option<String> {
         let own = light::own(command);
         let light = light::is_light(&own);
-        if let Some(reason) = self.hold(conversation, light, Asked::Command, call, wait) {
+        let renders = !light && builds::renders(&own);
+        if let Some(reason) = self.hold(conversation, light, renders, Asked::Command, call, wait) {
             return Some(reason);
         }
         let weight = (!light).then(|| builds::weight(&own)).flatten()?;
         self.slot(conversation, &own, weight, call, wait)
+    }
+
+    /// What a run of kind `signature` needs free to start (`builds::run_need`), from what runs of
+    /// its kind took at their most.
+    fn need(state: &State, signature: Option<&str>) -> u64 {
+        builds::run_need(
+            signature
+                .and_then(|kind| state.peaks.get(kind))
+                .map_or(&[][..], Vec::as_slice),
+        )
     }
 
     /// Whether a build or a run `conversation` wants to start waits (`builds`): the reason to
@@ -2217,9 +2376,19 @@ impl Broker {
                 if kept.weight == builds::Weight::Build {
                     state.last_build = Some(now);
                 }
-                self.hold_grant(&mut state, conversation, kept.weight, kept.bytes, now);
+                slot_wait_ended(&mut state, &kept, "started");
+                self.hold_grant(
+                    &mut state,
+                    conversation,
+                    kept.weight,
+                    kept.bytes,
+                    now,
+                    kept.signature,
+                    None,
+                );
                 let snapshot = self.view(&state);
                 drop(state);
+                self.flush();
                 self.publish(snapshot);
                 self.look();
                 return None;
@@ -2258,18 +2427,51 @@ impl Broker {
             let available = available(&state, reading.as_ref(), owners.as_ref())
                 .map(|a| a.saturating_sub(kept_bytes));
             let holding = !state.grants.is_empty() || !kept.is_empty();
+            // Other chats' work holding memory that may soon free, which a build short of room
+            // for two compilers waits a while for.
+            let others_hold = state.grants.keys().any(|c| c != conversation)
+                || kept.iter().any(|w| w.conversation != conversation);
             let since = state.last_build.map(|at| now.saturating_duration_since(at));
             let taken = running.len() + granted;
-            if ahead == 0 && builds::admits_weight(weight, taken, holding, available, cores, since)
-            {
-                state.slots.retain(|w| w.conversation != conversation);
+            let signature = (weight == builds::Weight::Run)
+                .then(|| builds::signature(command))
+                .flatten();
+            let need = Self::need(&state, signature.as_deref());
+            let bytes = builds::grant(weight, available, need);
+            let asked = state
+                .slots
+                .iter()
+                .find(|w| w.conversation == conversation)
+                .map(|w| w.since);
+            let waited = asked.map_or(Duration::ZERO, |at| now.saturating_duration_since(at));
+            let admitted = ahead == 0
+                && builds::admits_weight(weight, taken, holding, available, cores, since, need);
+            let few = admitted && build && builds::waits_for_more(bytes, others_hold, waited);
+            if admitted && !few {
+                end_slot_waits(&mut state, |w| w.conversation == conversation, "started");
                 if build {
                     state.last_build = Some(now);
                 }
-                let bytes = builds::grant(weight, available);
-                self.hold_grant(&mut state, conversation, weight, bytes, now);
+                // What the chat's processes use as its run begins, from which its peak counts.
+                let base = signature.as_ref().and_then(|_| {
+                    reading
+                        .as_ref()
+                        .zip(owners.as_ref())
+                        .map(|(r, o)| chat_memory(r, o, |c| c == conversation))
+                        .map(|used| used.get(conversation).copied().unwrap_or(0))
+                });
+                self.hold_grant(
+                    &mut state,
+                    conversation,
+                    weight,
+                    bytes,
+                    now,
+                    signature,
+                    base,
+                );
                 let snapshot = self.view(&state);
                 drop(state);
+                self.flush();
                 self.publish(snapshot);
                 self.look();
                 return None;
@@ -2280,17 +2482,6 @@ impl Broker {
                 for run in state.runs.values_mut() {
                     run.calls.remove(call);
                 }
-            }
-            if !state.slots.iter().any(|w| w.conversation == conversation) {
-                state.slots.push(SlotWait {
-                    conversation: conversation.into(),
-                    label: command_label(command),
-                    weight,
-                    since: now,
-                    since_at: epoch_ms(),
-                    granted: None,
-                    bytes: 0,
-                });
             }
             // What the work started before it holds and has not taken yet, which is not free.
             let held = free
@@ -2304,44 +2495,100 @@ impl Broker {
             } else {
                 String::new()
             };
-            let why = if ahead > 0 {
-                format!(
-                    "{} {} before it",
-                    plural(ahead, "chat's build waits", "chats' builds wait"),
-                    if ahead == 1 {
-                        "its turn"
-                    } else {
-                        "their turns"
-                    }
+            let (code, why) = if ahead > 0 {
+                (
+                    "line",
+                    format!(
+                        "{} {} before it",
+                        plural(ahead, "chat's build waits", "chats' builds wait"),
+                        if ahead == 1 {
+                            "its turn"
+                        } else {
+                            "their turns"
+                        }
+                    ),
+                )
+            } else if few {
+                let compilers = (bytes / builds::COMPILER).max(1) as usize;
+                (
+                    "compilers",
+                    format!(
+                        "it would start with memory for {} ({} free{beside}), so it waits up to {} since it first asked for room for two, then starts with what there is",
+                        plural(compilers, "compiler", "compilers"),
+                        machine::bytes(available.unwrap_or_default()),
+                        duration(builds::FEW_WAIT)
+                    ),
                 )
             } else if build && taken >= builds::slots(cores) {
-                format!(
-                    "this computer runs {} at once (one for each eight cores)",
-                    plural(builds::slots(cores), "build", "builds")
+                (
+                    "slots",
+                    format!(
+                        "this computer runs {} at once (one for each eight cores)",
+                        plural(builds::slots(cores), "build", "builds")
+                    ),
                 )
             } else if build && available.is_some_and(|free| free < builds::BESIDE_FREE) {
-                format!(
-                    "a build beside them needs {} of free memory (commit) and {} is free{beside}",
-                    machine::bytes(builds::BESIDE_FREE),
-                    machine::bytes(available.unwrap_or_default())
+                (
+                    "memory",
+                    format!(
+                        "a build beside them needs {} of free memory (commit) and {} is free{beside}",
+                        machine::bytes(builds::BESIDE_FREE),
+                        machine::bytes(available.unwrap_or_default())
+                    ),
                 )
             } else if build {
-                format!(
-                    "the last build started {} ago and is still taking its memory",
-                    duration(since.unwrap_or_default())
+                (
+                    "ramp",
+                    format!(
+                        "the last build started {} ago and is still taking its memory",
+                        duration(since.unwrap_or_default())
+                    ),
                 )
             } else {
-                format!(
-                    "a {} needs {} of free memory (commit) and {} is free{beside}",
-                    weight.what(),
-                    machine::bytes(if weight == builds::Weight::Run {
-                        builds::RUN_FREE
-                    } else {
-                        builds::LIGHT_FREE
-                    }),
-                    machine::bytes(available.unwrap_or_default())
+                (
+                    "room",
+                    format!(
+                        "a {} needs {} of free memory (commit){} and {} is free{beside}",
+                        weight.what(),
+                        machine::bytes(if weight == builds::Weight::Run {
+                            need
+                        } else {
+                            builds::LIGHT_FREE
+                        }),
+                        match (&signature, weight) {
+                            (Some(kind), builds::Weight::Run)
+                                if state.peaks.contains_key(kind.as_str()) =>
+                                format!(
+                                    ", from what runs of its kind (`{kind}`) took at their most"
+                                ),
+                            _ => String::new(),
+                        },
+                        machine::bytes(available.unwrap_or_default())
+                    ),
                 )
             };
+            match state
+                .slots
+                .iter_mut()
+                .find(|w| w.conversation == conversation)
+            {
+                Some(waiting) => {
+                    waiting.why = code;
+                    waiting.need = need;
+                }
+                None => state.slots.push(SlotWait {
+                    conversation: conversation.into(),
+                    label: command_label(command),
+                    weight,
+                    since: now,
+                    since_at: epoch_ms(),
+                    granted: None,
+                    bytes: 0,
+                    need,
+                    signature: signature.clone(),
+                    why: code,
+                }),
+            }
             let list = running
                 .iter()
                 .map(|build| match &build.conversation {
@@ -2381,6 +2628,7 @@ impl Broker {
 
     /// Holds `bytes` of memory for `conversation`'s work of `weight` that starts now, and tells
     /// its build script (the chat's `AGENT_STUDIO_PC_GRANT` file, `grant_file`).
+    #[allow(clippy::too_many_arguments)]
     fn hold_grant(
         &self,
         state: &mut State,
@@ -2388,8 +2636,14 @@ impl Broker {
         weight: builds::Weight,
         bytes: u64,
         now: Instant,
+        signature: Option<String>,
+        base: Option<u64>,
     ) {
         let at_ms = epoch_ms();
+        // A grant its chat's earlier work held ends here, its run's peak kept.
+        if let Some(earlier) = state.grants.remove(conversation) {
+            self.keep_peak(state, earlier, now);
+        }
         state.grants.insert(
             conversation.into(),
             Grant {
@@ -2399,6 +2653,11 @@ impl Broker {
                 at_ms,
                 call: None,
                 ended: false,
+                train: conversation.starts_with(train::PREFIX),
+                compiled: false,
+                signature,
+                base,
+                peak: 0,
             },
         );
         if let Some(folder) = self.grants_folder() {
@@ -2441,14 +2700,35 @@ impl Broker {
                     .collect()
             })
             .unwrap_or_default();
+        // What runs' chats use now, from which each run's peak counts.
+        let used = reading.zip(owners).map(|(reading, owners)| {
+            chat_memory(reading, owners, |chat| {
+                state
+                    .grants
+                    .get(chat)
+                    .is_some_and(|grant| grant.signature.is_some())
+            })
+        });
+        for (conversation, grant) in state.grants.iter_mut() {
+            grant.compiled |= compiling.contains(conversation);
+            if let (Some(used), Some(_)) = (&used, &grant.signature) {
+                let now_used = used.get(conversation).copied().unwrap_or(0);
+                let base = *grant.base.get_or_insert(now_used);
+                grant.peak = grant.peak.max(now_used.saturating_sub(base));
+            }
+        }
         let ended: Vec<String> = state
             .grants
             .iter()
             .filter(|(conversation, grant)| {
                 let age = now.saturating_duration_since(grant.at);
-                (grant.ended || (grant.call.is_none() && age >= GRANT))
-                    && age >= builds::RAMP
-                    && !compiling.contains(*conversation)
+                // A train's grant is its build's, however long the train takes to start it.
+                let done = if grant.train {
+                    grant.ended || grant.compiled
+                } else {
+                    grant.ended || (grant.call.is_none() && age >= GRANT)
+                };
+                done && age >= builds::RAMP && !compiling.contains(*conversation)
             })
             .map(|(conversation, _)| conversation.clone())
             .collect();
@@ -2459,9 +2739,31 @@ impl Broker {
     }
 
     fn end_grant(&self, state: &mut State, conversation: &str) {
-        state.grants.remove(conversation);
+        if let Some(grant) = state.grants.remove(conversation) {
+            self.keep_peak(state, grant, Instant::now());
+        }
         if let Some(folder) = self.grants_folder() {
             let _ = std::fs::remove_file(folder.join(format!("{}.json", file_safe(conversation))));
+        }
+    }
+
+    /// Keeps what a run that held `grant` took at its most among its kind's peaks, once it ran
+    /// long enough to be read (`PEAK_AFTER`), and saves them beside the history.
+    fn keep_peak(&self, state: &mut State, grant: Grant, now: Instant) {
+        let Some(kind) = grant.signature else { return };
+        if grant.peak == 0 || now.saturating_duration_since(grant.at) < PEAK_AFTER {
+            return;
+        }
+        let peaks = state.peaks.entry(kind).or_default();
+        peaks.push(grant.peak);
+        let over = peaks.len().saturating_sub(builds::PEAKS_KEPT);
+        peaks.drain(..over);
+        if let Some(history) = &self.history {
+            let path = history.with_file_name(PEAKS);
+            if let Some(folder) = path.parent() {
+                let _ = std::fs::create_dir_all(folder);
+            }
+            let _ = std::fs::write(path, serde_json::to_vec(&state.peaks).unwrap_or_default());
         }
     }
 
@@ -2484,10 +2786,14 @@ impl Broker {
         now: Instant,
     ) -> bool {
         let waiting = state.slots.len();
-        state.slots.retain(|w| {
-            w.granted
-                .is_none_or(|at| now.saturating_duration_since(at) < GRANT)
-        });
+        end_slot_waits(
+            state,
+            |w| {
+                w.granted
+                    .is_some_and(|at| now.saturating_duration_since(at) >= GRANT)
+            },
+            "unused",
+        );
         let mut changed = state.slots.len() != waiting;
         let mut taken = running
             + state
@@ -2500,11 +2806,12 @@ impl Broker {
         }
         let mut holding =
             !state.grants.is_empty() || state.slots.iter().any(|w| w.granted.is_some());
-        // While a measurement holds the computer, only its own chat may build.
+        // While a measurement holds the computer, only its own chat may build; one of GPU work
+        // alone lets every chat build.
         let holder = state
             .queue
             .first()
-            .filter(|r| r.holding.is_some())
+            .filter(|r| r.holding.is_some() && r.scope == Scope::Computer)
             .map(|r| r.conversation.clone());
         // Builds take their turns; a run or a build of a few files behind one that waits starts
         // when there is room for it.
@@ -2525,11 +2832,26 @@ impl Broker {
                 continue;
             }
             let since = state.last_build.map(|at| now.saturating_duration_since(at));
-            if !builds::admits_weight(weight, taken, holding, available, cores, since) {
+            let need = state.slots[index].need;
+            if !builds::admits_weight(weight, taken, holding, available, cores, since, need) {
                 builds_wait |= build;
                 continue;
             }
-            let bytes = builds::grant(weight, available);
+            let bytes = builds::grant(weight, available, need);
+            // Short of room for two compilers while other work holds memory, a build waits a
+            // while for it, and the builds behind it with it.
+            let asking = state.slots[index].conversation.as_str();
+            let others_hold = state.grants.keys().any(|c| c != asking)
+                || state
+                    .slots
+                    .iter()
+                    .any(|w| w.granted.is_some() && w.conversation != asking);
+            let waited = now.saturating_duration_since(state.slots[index].since);
+            if build && builds::waits_for_more(bytes, others_hold, waited) {
+                state.slots[index].why = "compilers";
+                builds_wait = true;
+                continue;
+            }
             state.slots[index].granted = Some(now);
             state.slots[index].bytes = bytes;
             if build {
@@ -2554,13 +2876,15 @@ impl Broker {
         wait: &str,
     ) -> Option<String> {
         let light = server == "agent_studio" || light::remote_server(server);
-        self.hold(conversation, light, Asked::Tool, call, wait)
+        // A server here may drive a program that renders, as unreal-mcp drives an editor's.
+        self.hold(conversation, light, !light, Asked::Tool, call, wait)
     }
 
     fn hold(
         &self,
         conversation: &str,
         light: bool,
+        renders: bool,
         asked: Asked,
         call: Option<&str>,
         wait: &str,
@@ -2570,6 +2894,10 @@ impl Broker {
             let first = state.queue.first_mut()?;
             // While it waits for a lull, other chats work on.
             first.holding?;
+            // A measurement of GPU work alone holds only what renders.
+            if first.scope == Scope::Gpu && !renders {
+                return None;
+            }
             // A chat asked to hand over finishes what it needs first.
             let handing = first
                 .asks
@@ -2602,8 +2930,18 @@ impl Broker {
             Asked::Command => ("This command", "run the same command again"),
             Asked::Tool => ("This tool call", "make the same call again"),
         };
+        let (reserved, others) = match first.scope {
+            Scope::Computer => (
+                "this computer for a performance measurement",
+                "other chats' commands and MCP tool calls wait until it ends",
+            ),
+            Scope::Gpu => (
+                "this computer's GPU for a measurement of GPU work",
+                "other chats' games, editors, browser tests and MCP tool calls of programs here wait until it ends, while builds and headless tests run on",
+            ),
+        };
         format!(
-            "{what} did not run: {} reserved this computer for a performance measurement ({}), and other chats' commands and MCP tool calls wait until it ends, {}. Call {wait}, which returns once the computer is free, then {again}. Meanwhile keep reading and editing files; light commands such as git status, ls and rg still run.",
+            "{what} did not run: {} reserved {reserved} ({}), and {others}, {}. Call {wait}, which returns once the computer is free, then {again}. Meanwhile keep reading and editing files; light commands such as git status, ls and rg still run.",
             self.chat(&first.conversation),
             first.purpose,
             match first.opened {
@@ -2633,8 +2971,13 @@ impl Broker {
     ) -> Result<String, String> {
         let mut changes = self.version.subscribe();
         let began = Instant::now();
-        let (own, slot, turns) = {
-            let state = self.lock();
+        let (own, slot, turns, cars) = {
+            let mut state = self.lock();
+            let cars = has_car(&state, conversation);
+            // An outcome from before this wait began is no news of the car it waits for.
+            if cars {
+                state.outcomes.remove(conversation);
+            }
             (
                 state.queue.iter().any(|r| r.conversation == conversation),
                 state.slots.iter().any(|w| w.conversation == conversation),
@@ -2644,6 +2987,7 @@ impl Broker {
                     .filter(|t| t.conversation == conversation && t.granted.is_none())
                     .map(|t| t.key.clone())
                     .collect::<Vec<_>>(),
+                cars,
             )
         };
         let mut guard = None;
@@ -2665,7 +3009,10 @@ impl Broker {
         let result = loop {
             // A message ends the wait: the agent reads it, and waits again when it must.
             if let Some(messages) = self.deliver(conversation) {
-                break Ok(format!("{messages}\n\n{}", self.wait_status(conversation)));
+                let status = self.wait_status(conversation);
+                // What became of its branch was told now.
+                self.lock().outcomes.remove(conversation);
+                break Ok(format!("{messages}\n\n{status}"));
             }
             let step = {
                 let mut state = self.lock();
@@ -2709,6 +3056,10 @@ impl Broker {
                     // commands, not this wait, which its time report counts as waiting for its
                     // turn and the measurement's report leaves out (until 2026-11-26 the hold came
                     // first: 43 of one chat's 172 minutes in line read as held).
+                    Step::Wait("turn", false)
+                } else if has_car(&state, conversation) {
+                    // Its branch on a merge train, which lands it or gives it back: its time
+                    // report counts this as waiting for its turn at the landing.
                     Step::Wait("turn", false)
                 } else if held {
                     if guard.is_none() {
@@ -2757,6 +3108,11 @@ impl Broker {
                             duration(began.elapsed()),
                             came.join(" and ")
                         )
+                    } else if cars {
+                        match state.outcomes.get(conversation) {
+                            Some(outcome) => capitalized(outcome),
+                            None => "This chat has no branch on a merge train any more.".into(),
+                        }
                     } else if guard.is_some() {
                         format!(
                             "The computer is free again after {}: run your command or tool call now.",
@@ -2839,6 +3195,12 @@ impl Broker {
                     .any(|t| t.conversation == conversation && t.granted.is_none()) =>
                 {
                     "Your turn has not come yet: call pc_wait again to wait for it."
+                }
+                _ if has_car(&state, conversation) => {
+                    "Your branch is still on a merge train: call pc_wait again to wait for what becomes of it."
+                }
+                _ if state.outcomes.contains_key(conversation) => {
+                    "This chat's branch is off the merge train: nothing more to wait for."
                 }
                 _ => "The computer is not reserved: run your command or tool call now.",
             },
@@ -2927,6 +3289,7 @@ impl Broker {
                     id: r.id.clone(),
                     conversation_id: r.conversation.clone(),
                     purpose: r.purpose.clone(),
+                    scope: r.scope.name(),
                     phase: match (index, r.opened, r.holding) {
                         (0, Some(_), _) => "open",
                         (0, None, Some(_)) => "draining",
@@ -2977,11 +3340,45 @@ impl Broker {
                 grants.sort_by_key(|g| g.since);
                 grants
             },
+            trains: {
+                let mut trains: Vec<TrainView> = state
+                    .lines
+                    .iter()
+                    .filter(|(_, line)| line.running.is_some() || !line.waiting.is_empty())
+                    .map(|(id, line)| {
+                        let car = |car: &train::Car, riding: bool| CarView {
+                            id: car.id.clone(),
+                            conversation_id: car.conversation.clone(),
+                            purpose: car.purpose.clone(),
+                            branch: car.branch.clone(),
+                            sha: car.sha.clone(),
+                            queued_at: car.queued_at,
+                            riding,
+                        };
+                        TrainView {
+                            id: id.clone(),
+                            repository: line.repository.clone(),
+                            started_at: line.running.as_ref().map(|r| r.started_at),
+                            cars: line
+                                .running
+                                .iter()
+                                .flat_map(|r| r.cars.iter().map(|c| car(c, true)))
+                                .chain(line.waiting.iter().map(|c| car(c, false)))
+                                .collect(),
+                        }
+                    })
+                    .collect();
+                trains.sort_by(|a, b| a.repository.cmp(&b.repository));
+                trains
+            },
         }
     }
 
-    /// The name a chat goes by in text for agents.
+    /// The name a chat goes by in text for agents: a repository's merge train goes by that.
     fn chat(&self, conversation: &str) -> String {
+        if let Some(repository) = conversation.strip_prefix(train::PREFIX) {
+            return format!("the merge train of {repository}");
+        }
         match (self.titles)(conversation).filter(|t| !t.trim().is_empty()) {
             Some(title) => format!("the chat \"{}\"", title.trim()),
             None => "another chat".into(),
@@ -3016,9 +3413,16 @@ impl Broker {
         } else {
             "Reserved: from now on other chats' commands and MCP tool calls wait, except light commands such as git status. Call pc_wait: it returns once the work below has finished or gone idle and the window opens.".into()
         };
+        if mine.scope == Scope::Gpu {
+            text.push_str(" This reservation is of GPU work alone: only other chats' games, editors, browser tests and MCP tool calls of programs here keep its window closed or wait, and their builds and headless tests run on beside it.");
+        }
         let others: Vec<&Item> = items
             .iter()
-            .filter(|i| i.conversation != conversation && !i.light)
+            .filter(|i| {
+                i.conversation != conversation
+                    && !i.light
+                    && (mine.scope == Scope::Computer || i.renders)
+            })
             .collect();
         let (progress, left): (Vec<&&Item>, Vec<&&Item>) =
             others.iter().partition(|i| i.in_progress);
@@ -3095,6 +3499,9 @@ impl Broker {
                     if first.opened.is_some() { "its window is open" } else { "it waits for other chats' busy commands and tool calls to finish or go idle" }
                 ),
             };
+            if state.queue.first().is_some_and(|r| r.scope == Scope::Gpu) {
+                text.push_str(" It reserved GPU work alone: builds and headless tests run on beside it, and only games, editors, browser tests and MCP tool calls of programs here wait.");
+            }
             if let Some(index) = state
                 .queue
                 .iter()
@@ -3146,6 +3553,7 @@ impl Broker {
                 ));
             }
             text.push_str(&self.turns_text(&state, conversation));
+            text.push_str(&self.trains_text(&state, conversation));
             let builds = running_builds(&state, None, None);
             if !builds.is_empty() || !state.slots.is_empty() {
                 text.push_str(&format!(
@@ -3293,8 +3701,12 @@ impl Broker {
         Some(now)
     }
 
-    /// A chat as tools name it: its title and the start of its id.
+    /// A chat as tools name it: its title and the start of its id. A repository's merge train goes
+    /// by that.
     fn named(&self, conversation: &str) -> String {
+        if conversation.starts_with(train::PREFIX) {
+            return self.chat(conversation);
+        }
         let id: String = conversation.chars().take(8).collect();
         match (self.titles)(conversation).filter(|t| !t.trim().is_empty()) {
             Some(title) => format!("the chat \"{}\" (id {id})", title.trim()),
@@ -3586,6 +3998,7 @@ impl Broker {
             "id": r.id,
             "conversationId": r.conversation,
             "purpose": r.purpose,
+            "scope": r.scope.name(),
             "minutes": r.minutes,
             "askedAt": r.asked_at,
             "openedAt": r.opened_at,
@@ -3705,6 +4118,708 @@ impl Broker {
             })
             .collect::<Vec<_>>()
             .join(", ")
+    }
+
+    /// Queues the branch `conversation`'s folder has checked out on its repository's merge train
+    /// (`pc_land`). The answer says where it stands. The car needs no reply of its chat: it rides
+    /// whether or not one still runs, and what became of it waits for the chat's next tool call.
+    pub fn land(&self, conversation: &str, folder: &Path, purpose: &str) -> Result<String, String> {
+        let repository = named::repository(folder)
+            .ok_or("This chat's folder is not in a Git repository, so it has no branch to land.")?;
+        let main = named::main_checkout(folder).ok_or(
+            "This repository has no main checkout (a bare repository): land with pc_reserve and landing: true.",
+        )?;
+        let config = train::config(&main)?;
+        let head = named::head(folder).ok_or("Cannot read this chat's checkout.")?;
+        let branch = head.branch.ok_or(
+            "This chat's checkout has no branch checked out (its head is detached): check out the branch to land.",
+        )?;
+        if branch == config.branch {
+            return Err(format!(
+                "This chat's checkout is on {branch} itself: a train lands a branch onto {branch}, so commit your work on a branch of its own."
+            ));
+        }
+        let sha = head
+            .sha
+            .ok_or(format!("Branch {branch} has no commit to land yet."))?;
+        let id = format!("{}{}", train::PREFIX, named::key(&repository));
+        let (text, snapshot, reports) = {
+            let mut state = self.lock();
+            let now = Instant::now();
+            // The same commit on the train running now needs no second car.
+            if let Some(running) = state.lines.get(&id).and_then(|line| line.running.as_ref()) {
+                if running
+                    .cars
+                    .iter()
+                    .any(|car| car.conversation == conversation && car.sha == sha)
+                {
+                    return Ok(format!(
+                        "{branch} ({}) is on the merge train of {repository} running now, for {}: call pc_wait, which returns once it landed or came back.",
+                        train::short(&sha),
+                        duration(running.started.elapsed())
+                    ));
+                }
+            }
+            // A landing turn this chat holds or waits for would hold up its own train.
+            let landing = format!("landing:{}", named::key(&repository));
+            let reports = self.end_turns(
+                &mut state,
+                |t| t.conversation == conversation && t.key == landing,
+                now,
+                "train",
+            );
+            state.next += 1;
+            let car_id = format!("car-{}", state.next);
+            let title = (self.titles)(conversation).unwrap_or_default();
+            let line = state
+                .lines
+                .entry(id.clone())
+                .or_insert_with(|| train::Line {
+                    repository: repository.clone(),
+                    main: main.clone(),
+                    config: config.clone(),
+                    waiting: vec![],
+                    turn: None,
+                    running: None,
+                    failures: 0,
+                });
+            line.main = main;
+            line.config = config.clone();
+            let car = train::Car {
+                id: car_id,
+                conversation: conversation.into(),
+                title: title.trim().into(),
+                purpose: purpose.trim().into(),
+                worktree: head.top,
+                branch: branch.clone(),
+                sha: sha.clone(),
+                queued: now,
+                queued_at: epoch_ms(),
+            };
+            let updated = match line
+                .waiting
+                .iter_mut()
+                .find(|c| c.conversation == conversation)
+            {
+                Some(waiting) => {
+                    let place = waiting.queued;
+                    let at = waiting.queued_at;
+                    *waiting = train::Car {
+                        id: waiting.id.clone(),
+                        queued: place,
+                        queued_at: at,
+                        ..car
+                    };
+                    true
+                }
+                None => {
+                    line.waiting.push(car);
+                    false
+                }
+            };
+            let ahead = line
+                .waiting
+                .iter()
+                .position(|c| c.conversation == conversation)
+                .unwrap_or_default();
+            let riding = line.running.as_ref().map(|r| (r.cars.len(), r.started));
+            let mine_riding = line
+                .running
+                .as_ref()
+                .is_some_and(|r| r.cars.iter().any(|c| c.conversation == conversation));
+            self.board(&mut state, now);
+            let mut text = format!(
+                "{} {branch} ({}) on the merge train of {repository}, to land on {}: {}. ",
+                if updated {
+                    "Brought up to date:"
+                } else {
+                    "Queued"
+                },
+                train::short(&sha),
+                config.branch,
+                match (riding, ahead) {
+                    (Some((cars, started)), _) => format!(
+                        "a train landing {} has run {}, and {} before yours",
+                        plural(cars, "branch", "branches"),
+                        duration(started.elapsed()),
+                        if ahead == 0 {
+                            "no car waits".to_string()
+                        } else {
+                            plural(ahead, "car waits", "cars wait")
+                        }
+                    ),
+                    (None, 0) =>
+                        "the next train takes it, once the landing turn and a build slot are free"
+                            .into(),
+                    (None, _) => format!(
+                        "{} before it, and the next train takes up to {}",
+                        plural(ahead, "car waits", "cars wait"),
+                        config.max_cars
+                    ),
+                }
+            );
+            if mine_riding {
+                text.push_str("This chat's earlier car is on the train running now; this one waits for the next. ");
+            }
+            text.push_str("The train merges the cars onto a fresh main branch, runs the repository's pipeline once and pushes, or leaves out a car that conflicts or breaks it, saying why. The car carries this commit: commit work you want landed before calling pc_land, and call it again after a new commit to bring the car up to date. Call pc_wait: it returns once the train landed your branch or gave it back. Meanwhile keep working on what does not change this branch.");
+            if !reports.is_empty() {
+                text.push_str(" The landing turn this chat held or waited for was released: the train takes it.");
+            }
+            (text, self.view(&state), reports)
+        };
+        for report in &reports {
+            self.keep(report);
+        }
+        self.publish(snapshot);
+        self.look();
+        Ok(text)
+    }
+
+    /// Takes `conversation`'s branches waiting for a merge train out of line: the text for its
+    /// agent, or None when none waited. One on its way stays.
+    pub fn withdraw(&self, conversation: &str) -> Option<String> {
+        let (text, snapshot) = {
+            let mut state = self.lock();
+            let mut taken = vec![];
+            for line in state.lines.values_mut() {
+                let (gone, kept): (Vec<train::Car>, Vec<train::Car>) =
+                    std::mem::take(&mut line.waiting)
+                        .into_iter()
+                        .partition(|car| car.conversation == conversation);
+                line.waiting = kept;
+                taken.extend(gone.into_iter().map(|car| (car, line.repository.clone())));
+            }
+            if taken.is_empty() {
+                return None;
+            }
+            self.board(&mut state, Instant::now());
+            let text = taken
+                .iter()
+                .map(|(car, repository)| {
+                    format!(
+                        "Took {} ({}) off the merge train of {repository} before it left.",
+                        car.branch,
+                        train::short(&car.sha)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (text, self.view(&state))
+        };
+        self.publish(snapshot);
+        Some(text)
+    }
+
+    /// Asks the landing turn for each repository whose cars wait and whose train does not run, and
+    /// a build slot once that turn came, unless a measurement holds the whole computer; gives back
+    /// the turn of a line whose cars all left. Returns whether anything changed.
+    fn board(&self, state: &mut State, now: Instant) -> bool {
+        let mut changed = false;
+        let measuring = state
+            .queue
+            .first()
+            .is_some_and(|r| r.holding.is_some() && r.scope == Scope::Computer);
+        let ids: Vec<String> = state.lines.keys().cloned().collect();
+        for id in ids {
+            let line = &state.lines[&id];
+            if line.running.is_some() {
+                continue;
+            }
+            if line.waiting.is_empty() {
+                // Its cars all left: its turn and its slot go.
+                if let Some(turn) = state.lines.get_mut(&id).and_then(|l| l.turn.take()) {
+                    let reports = self.end_turns(state, |t| t.id == turn, now, "train");
+                    state.pending.extend(reports.into_iter().map(|r| r.record));
+                    changed = true;
+                }
+                let waiting = state.slots.len();
+                end_slot_waits(state, |w| w.conversation == id, "reply");
+                changed |= waiting != state.slots.len();
+                continue;
+            }
+            let turn = match &line.turn {
+                Some(turn) => turn.clone(),
+                None => {
+                    state.next += 1;
+                    let turn = format!("turn-{}", state.next);
+                    let repository = line.repository.clone();
+                    let cars = line.waiting.len().min(line.config.max_cars);
+                    state.turns.push(Turn {
+                        id: turn.clone(),
+                        key: format!("landing:{}", named::key(&repository)),
+                        name: format!("the landing of {repository}"),
+                        landing: true,
+                        conversation: id.clone(),
+                        run_id: format!("{id}:{turn}"),
+                        purpose: format!("merge train of {}", plural(cars, "branch", "branches")),
+                        asked: now,
+                        asked_at: epoch_ms(),
+                        granted: None,
+                        granted_at: None,
+                        orphaned: None,
+                        quiet_since: None,
+                        warned: false,
+                    });
+                    grant_turns(&mut state.turns, now);
+                    if let Some(line) = state.lines.get_mut(&id) {
+                        line.turn = Some(turn.clone());
+                    }
+                    changed = true;
+                    turn
+                }
+            };
+            let came = state
+                .turns
+                .iter()
+                .any(|t| t.id == turn && t.granted.is_some());
+            if came
+                && !measuring
+                && !state.slots.iter().any(|w| w.conversation == id)
+                && !state.grants.contains_key(&id)
+            {
+                let label = format!("the merge train of {}", state.lines[&id].repository);
+                state.slots.push(SlotWait {
+                    conversation: id.clone(),
+                    label,
+                    weight: builds::Weight::Build,
+                    since: now,
+                    since_at: epoch_ms(),
+                    granted: None,
+                    bytes: 0,
+                    need: builds::RUN_FREE,
+                    signature: None,
+                    why: "slots",
+                });
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// Starts each train whose turn came and whose build slot was kept: its cars, up to its most,
+    /// are taken off the line and its memory granted. Returns the trains to run.
+    fn depart(&self, state: &mut State, now: Instant) -> Vec<train::Ride> {
+        let mut rides = vec![];
+        let ready: Vec<String> = state
+            .lines
+            .iter()
+            .filter(|(id, line)| {
+                line.running.is_none()
+                    && !line.waiting.is_empty()
+                    && state
+                        .slots
+                        .iter()
+                        .any(|w| w.conversation == **id && w.granted.is_some())
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ready {
+            let Some(index) = state.slots.iter().position(|w| w.conversation == id) else {
+                continue;
+            };
+            let kept = state.slots.remove(index);
+            state.last_build = Some(now);
+            slot_wait_ended(state, &kept, "started");
+            self.hold_grant(state, &id, kept.weight, kept.bytes, now, None, None);
+            state.next += 1;
+            let ride_id = format!("train-{}", state.next);
+            let dir = self
+                .history
+                .as_ref()
+                .map(|history| history.with_file_name(TRAINS))
+                .unwrap_or_else(std::env::temp_dir)
+                .join(file_safe(&id))
+                .join(&ride_id);
+            let grant = self
+                .grants_folder()
+                .map(|folder| folder.join(format!("{}.json", file_safe(&id))));
+            let Some(line) = state.lines.get_mut(&id) else {
+                continue;
+            };
+            let take = line.waiting.len().min(line.config.max_cars);
+            let cars: Vec<train::Car> = line.waiting.drain(..take).collect();
+            line.running = Some(train::Running {
+                id: ride_id.clone(),
+                cars: cars.clone(),
+                started: now,
+                started_at: epoch_ms(),
+                dir: dir.clone(),
+            });
+            let purpose = format!(
+                "merge train of {}",
+                plural(cars.len(), "branch", "branches")
+            );
+            let turn = line.turn.clone();
+            let line = &state.lines[&id];
+            if let Some(turn) = state
+                .turns
+                .iter_mut()
+                .find(|t| Some(&t.id) == turn.as_ref())
+            {
+                turn.purpose = purpose;
+            }
+            let mut env = vec![(CHAT_ENV.to_string(), id.clone())];
+            if let Some(grant) = grant {
+                env.push((GRANT_ENV.to_string(), grant.to_string_lossy().into_owned()));
+            }
+            rides.push(train::Ride {
+                id: ride_id,
+                conversation: id.clone(),
+                repository: line.repository.clone(),
+                main: line.main.clone(),
+                config: line.config.clone(),
+                cars,
+                dir,
+                env,
+            });
+        }
+        rides
+    }
+
+    /// Runs `rides`, each on its own, and takes in what becomes of their cars.
+    fn ride(&self, rides: Vec<train::Ride>) {
+        if rides.is_empty() {
+            return;
+        }
+        let Some(broker) = self.me.upgrade() else {
+            return;
+        };
+        let runner = self
+            .runner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        for ride in rides {
+            let broker = broker.clone();
+            let runner = runner.clone();
+            tauri::async_runtime::spawn(async move {
+                let (id, conversation) = (ride.id.clone(), ride.conversation.clone());
+                let outcome = match runner {
+                    Some(runner) => runner(ride).await,
+                    None => {
+                        let jobs = broker.clone();
+                        train::run(ride, move |child| {
+                            jobs.jobs.adopt(&conversation, child, None)
+                        })
+                        .await
+                    }
+                };
+                broker.arrive(&id, outcome);
+            });
+        }
+    }
+
+    /// Takes in what became of train `id`'s cars: tells each car's chat, puts back those to wait
+    /// for the next train, ends the train's turn and grant and records it.
+    fn arrive(&self, id: &str, outcome: Result<train::Outcome, String>) {
+        let (snapshot, reports) = {
+            let mut state = self.lock();
+            let now = Instant::now();
+            let Some(line_id) = state
+                .lines
+                .iter()
+                .find(|(_, line)| line.running.as_ref().is_some_and(|r| r.id == id))
+                .map(|(line_id, _)| line_id.clone())
+            else {
+                return;
+            };
+            let (running, repository, branch, turn) = {
+                let line = state.lines.get_mut(&line_id).expect("the train's line");
+                let running = line.running.take().expect("the train on its way");
+                (
+                    running,
+                    line.repository.clone(),
+                    line.config.branch.clone(),
+                    line.turn.take(),
+                )
+            };
+            let took = now.saturating_duration_since(running.started);
+            let mut landed = vec![];
+            let mut ejected = vec![];
+            let mut requeued = vec![];
+            let (sha, note, error) = match &outcome {
+                Ok(outcome) => {
+                    for car in &running.cars {
+                        if outcome.landed.contains(&car.id) {
+                            landed.push(car.clone());
+                        } else if let Some(out) = outcome.ejected.iter().find(|e| e.id == car.id) {
+                            ejected.push((car.clone(), out.reason.clone(), out.log.clone(), false));
+                        } else {
+                            requeued.push(car.clone());
+                        }
+                    }
+                    (outcome.sha.clone(), outcome.note.clone(), None)
+                }
+                Err(error) => {
+                    let failures = {
+                        let line = state.lines.get_mut(&line_id).expect("the train's line");
+                        line.failures += 1;
+                        line.failures
+                    };
+                    if failures >= train::FAILURES {
+                        for car in &running.cars {
+                            ejected.push((
+                                car.clone(),
+                                format!(
+                                    "the merge train failed {} in a row, the last time with: {}",
+                                    plural(failures as usize, "time", "times"),
+                                    error.trim().trim_end_matches('.')
+                                ),
+                                None,
+                                true,
+                            ));
+                        }
+                    } else {
+                        requeued.extend(running.cars.iter().cloned());
+                    }
+                    (None, None, Some(error.clone()))
+                }
+            };
+            if outcome.is_ok() {
+                if let Some(line) = state.lines.get_mut(&line_id) {
+                    line.failures = 0;
+                }
+            }
+            if let Some(line) = state.lines.get_mut(&line_id) {
+                if error.is_some() && line.failures >= train::FAILURES {
+                    line.failures = 0;
+                }
+                // Back to the front, in the order they came.
+                let mut back = requeued.clone();
+                back.append(&mut line.waiting);
+                line.waiting = back;
+            }
+            let tell = |state: &mut State, to: &str, text: String| {
+                state.outcomes.insert(to.into(), text.clone());
+                state.messages.push(Message {
+                    from: None,
+                    to: to.into(),
+                    text,
+                    hand_over: false,
+                });
+            };
+            for car in &landed {
+                tell(
+                    &mut state,
+                    &car.conversation,
+                    format!(
+                        "your branch {} ({}) landed on {branch} of {repository}{}, on a merge train of {} that ran {}{}.",
+                        car.branch,
+                        train::short(&car.sha),
+                        sha.as_deref()
+                            .map(|sha| format!(" at {}", train::short(sha)))
+                            .unwrap_or_default(),
+                        plural(running.cars.len(), "branch", "branches"),
+                        duration(took),
+                        note.as_deref()
+                            .filter(|n| !n.trim().is_empty())
+                            .map(|n| format!(" ({})", n.trim()))
+                            .unwrap_or_default()
+                    ),
+                );
+            }
+            for (car, reason, log, failed) in &ejected {
+                tell(
+                    &mut state,
+                    &car.conversation,
+                    format!(
+                        "your branch {} ({}) left the merge train of {repository} without landing: {}{}. {}",
+                        car.branch,
+                        train::short(&car.sha),
+                        reason.trim().trim_end_matches('.'),
+                        log.as_deref()
+                            .map(|log| format!(" (log: {log})"))
+                            .unwrap_or_default(),
+                        if *failed {
+                            "Land by hand with pc_reserve and landing: true, or call pc_land again once the train works."
+                        } else {
+                            "Fix it on your branch, run your pipeline again and call pc_land again."
+                        }
+                    ),
+                );
+            }
+            for car in &requeued {
+                tell(
+                    &mut state,
+                    &car.conversation,
+                    format!(
+                        "your branch {} ({}) waits for the next merge train of {repository}: {}. It goes first.",
+                        car.branch,
+                        train::short(&car.sha),
+                        match (&error, &note) {
+                            (Some(error), _) => format!("the train failed: {}", error.trim().trim_end_matches('.')),
+                            (None, Some(note)) if !note.trim().is_empty() => format!("the train left it for the next ({})", note.trim()),
+                            _ => "the train left it for the next".to_string(),
+                        }
+                    ),
+                );
+            }
+            // Chats landing by hand hear that the main branch moved under them.
+            if !landed.is_empty() {
+                let landing_key = format!("landing:{}", named::key(&repository));
+                let waiting: Vec<String> = state
+                    .turns
+                    .iter()
+                    .filter(|t| t.key == landing_key && t.conversation != line_id)
+                    .map(|t| t.conversation.clone())
+                    .collect();
+                for chat in waiting {
+                    state.messages.push(Message {
+                        from: None,
+                        to: chat,
+                        text: format!(
+                            "{branch} of {repository} moved{}: a merge train landed {}. Fetch it and merge it into your branch before you push.",
+                            sha.as_deref()
+                                .map(|sha| format!(" to {}", train::short(sha)))
+                                .unwrap_or_default(),
+                            plural(landed.len(), "branch", "branches")
+                        ),
+                        hand_over: false,
+                    });
+                }
+                state.landings.push(train::Landing {
+                    repository: repository.clone(),
+                    sha: sha.clone(),
+                    at: now,
+                    cars: landed
+                        .iter()
+                        .map(|car| (car.conversation.clone(), car.purpose.clone()))
+                        .collect(),
+                });
+                let over = state.landings.len().saturating_sub(10);
+                state.landings.drain(..over);
+            }
+            let reports = match turn {
+                Some(turn) => self.end_turns(&mut state, |t| t.id == turn, now, "train"),
+                None => vec![],
+            };
+            // Its command ended, and what it ran with it.
+            if state.grants.contains_key(&line_id) {
+                self.end_grant(&mut state, &line_id);
+            }
+            let car_record = |car: &train::Car, outcome: &str, reason: Option<&String>| {
+                json!({
+                    "id": car.id,
+                    "conversationId": car.conversation,
+                    "branch": car.branch,
+                    "sha": car.sha,
+                    "purpose": car.purpose,
+                    "queuedAt": car.queued_at,
+                    "outcome": outcome,
+                    "reason": reason,
+                })
+            };
+            state.pending.push(json!({
+                "kind": "train",
+                "id": running.id,
+                "repository": repository,
+                "startedAt": running.started_at,
+                "endedAt": epoch_ms(),
+                "heldMs": ms(took),
+                "sha": sha,
+                "note": note,
+                "error": error,
+                "dir": running.dir.to_string_lossy(),
+                "cars": landed.iter().map(|c| car_record(c, "landed", None))
+                    .chain(ejected.iter().map(|(c, reason, _, _)| car_record(c, "ejected", Some(reason))))
+                    .chain(requeued.iter().map(|c| car_record(c, "requeued", None)))
+                    .collect::<Vec<_>>(),
+            }));
+            self.board(&mut state, now);
+            (self.view(&state), reports)
+        };
+        for report in &reports {
+            self.keep(report);
+        }
+        self.flush();
+        self.publish(snapshot);
+        self.look();
+    }
+
+    /// The merge trains and what they landed lately, as text for `conversation`'s agent. Empty when
+    /// there are none.
+    fn trains_text(&self, state: &State, conversation: &str) -> String {
+        let who = |chat: &str| {
+            if chat == conversation {
+                "this chat".to_string()
+            } else {
+                self.named(chat)
+            }
+        };
+        let mut text = String::new();
+        let mut lines: Vec<&train::Line> = state
+            .lines
+            .values()
+            .filter(|line| line.running.is_some() || !line.waiting.is_empty())
+            .collect();
+        lines.sort_by(|a, b| a.repository.cmp(&b.repository));
+        for line in lines {
+            text.push_str(&format!("\nMerge train of {}:", line.repository));
+            if let Some(running) = &line.running {
+                text.push_str(&format!(
+                    " on its way for {}, landing {}",
+                    duration(running.started.elapsed()),
+                    running
+                        .cars
+                        .iter()
+                        .map(|car| format!(
+                            "{} ({}: {})",
+                            car.branch,
+                            who(&car.conversation),
+                            car.purpose
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if !line.waiting.is_empty() {
+                text.push_str(&format!(
+                    "{} waiting: {}",
+                    if line.running.is_some() { ";" } else { "" },
+                    line.waiting
+                        .iter()
+                        .map(|car| format!(
+                            "{} ({}, for {})",
+                            car.branch,
+                            who(&car.conversation),
+                            duration(car.queued.elapsed())
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            text.push('.');
+        }
+        for landing in state.landings.iter().rev().take(3) {
+            text.push_str(&format!(
+                "\nLanded on {} {} ago{}: {}.",
+                landing.repository,
+                duration(landing.at.elapsed()),
+                landing
+                    .sha
+                    .as_deref()
+                    .map(|sha| format!(" at {}", train::short(sha)))
+                    .unwrap_or_default(),
+                landing
+                    .cars
+                    .iter()
+                    .map(|(chat, purpose)| format!("{purpose} ({})", who(chat)))
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ));
+        }
+        text
+    }
+
+    /// Writes the records waiting for the history (`State::pending`).
+    fn flush(&self) {
+        let pending = std::mem::take(&mut self.lock().pending);
+        for record in pending {
+            self.keep(&Report {
+                text: String::new(),
+                record,
+            });
+        }
     }
 
     /// The reservations this computer kept, oldest first, as its history records them.
@@ -3942,12 +5057,32 @@ fn items(state: &State, background: &[BackgroundWork], now: Instant) -> Vec<Item
                 conversation: run.conversation.clone(),
                 label: call.label.clone(),
                 light: call.light,
+                renders: call.renders,
                 in_progress: true,
                 background: false,
                 idle,
             })
         })
         .collect();
+    // A merge train on its way works like a chat's command, rendering nothing.
+    for (id, line) in &state.lines {
+        if let Some(running) = &line.running {
+            items.push(Item {
+                key: running.id.clone(),
+                conversation: id.clone(),
+                label: format!(
+                    "landing {} on {}",
+                    plural(running.cars.len(), "branch", "branches"),
+                    line.config.branch
+                ),
+                light: false,
+                renders: false,
+                in_progress: true,
+                background: false,
+                idle: false,
+            });
+        }
+    }
     let running: HashSet<&str> = state
         .runs
         .values()
@@ -3962,6 +5097,7 @@ fn items(state: &State, background: &[BackgroundWork], now: Instant) -> Vec<Item
             conversation: work.conversation.clone(),
             label: format!("background {}", work.label),
             light: false,
+            renders: builds::renders(&work.label),
             in_progress: running.contains(work.conversation.as_str()),
             background: true,
             idle: idle_now(state, &work.conversation, now),
@@ -4002,9 +5138,15 @@ fn settle(state: &mut State, items: &[Item], now: Instant, lull: Duration) -> bo
         .filter(|a| a.ended.is_some_and(|(_, how)| how == HANDED_OVER))
         .map(|a| a.conversation.as_str())
         .collect();
+    // A measurement of GPU work alone waits for, and reports beside it, only what renders.
+    let scope = first.scope;
     let mut work: Vec<Item> = items
         .iter()
-        .filter(|i| i.conversation != first.conversation && !i.light)
+        .filter(|i| {
+            i.conversation != first.conversation
+                && !i.light
+                && (scope == Scope::Computer || i.renders)
+        })
         .map(|i| {
             let mut item = i.clone();
             item.in_progress &= !(item.background && handed.contains(item.conversation.as_str()));
@@ -4022,6 +5164,7 @@ fn settle(state: &mut State, items: &[Item], now: Instant, lull: Duration) -> bo
                 conversation: a.conversation.clone(),
                 label: HANDING_OVER.into(),
                 light: false,
+                renders: true,
                 in_progress: true,
                 background: false,
                 idle: false,
@@ -4238,6 +5381,12 @@ fn shortened(text: &str, chars: usize) -> String {
 
 /// The file beside the history that keeps which processes wait (`hold::save`).
 const FROZEN: &str = "frozen.json";
+/// The file beside the history that keeps the memory kinds of runs took at their most.
+const PEAKS: &str = "peaks.json";
+/// How long a run must have held its grant for its peak to count: one shorter was never read.
+const PEAK_AFTER: Duration = Duration::from_secs(10);
+/// The folder beside the history where each merge train keeps its cars, result and log.
+const TRAINS: &str = "trains";
 /// The folder beside the history where each chat's grant is written, for its build scripts.
 const GRANTS: &str = "grants";
 /// What a chat's commands find in their environment: the chat, the file its grant is written to,
@@ -4301,16 +5450,9 @@ fn available(
     if state.grants.is_empty() {
         return Some(free);
     }
-    let mut used: HashMap<&str, u64> = HashMap::new();
-    if let Some(owners) = owners {
-        for process in &reading.processes {
-            if let machine::Owner::Chat(chat) = owners.of(process.pid) {
-                if let Some((key, _)) = state.grants.get_key_value(chat.as_str()) {
-                    *used.entry(key.as_str()).or_default() += process.memory;
-                }
-            }
-        }
-    }
+    let used = owners
+        .map(|owners| chat_memory(reading, owners, |chat| state.grants.contains_key(chat)))
+        .unwrap_or_default();
     let untaken: u64 = state
         .grants
         .iter()
@@ -4321,6 +5463,69 @@ fn available(
         })
         .sum();
     Some(free.saturating_sub(untaken))
+}
+
+/// The memory the processes of each chat `wanted` picks out use in `reading`.
+fn chat_memory(
+    reading: &machine::Reading,
+    owners: &machine::Owners,
+    wanted: impl Fn(&str) -> bool,
+) -> HashMap<String, u64> {
+    let mut used: HashMap<String, u64> = HashMap::new();
+    for process in &reading.processes {
+        if let machine::Owner::Chat(chat) = owners.of(process.pid) {
+            if wanted(&chat) {
+                *used.entry(chat).or_default() += process.memory;
+            }
+        }
+    }
+    used
+}
+
+/// Whether `conversation` has a branch on a merge train, waiting or on its way.
+fn has_car(state: &State, conversation: &str) -> bool {
+    state.lines.values().any(|line| {
+        line.waiting
+            .iter()
+            .any(|car| car.conversation == conversation)
+            || line
+                .running
+                .as_ref()
+                .is_some_and(|r| r.cars.iter().any(|car| car.conversation == conversation))
+    })
+}
+
+/// Records for the history that the wait `wait` for a slot or for room ended (requested
+/// 2026-11-27, after a chat's waits for room for its runs left no trace once its reply ended):
+/// `started` once its work ran, `unused` when the slot kept for it went to the next, `reply` or
+/// `closed` when its chat no longer waited.
+fn slot_wait_ended(state: &mut State, wait: &SlotWait, by: &str) {
+    let now = Instant::now();
+    state.pending.push(json!({
+        "kind": "wait",
+        "conversationId": wait.conversation,
+        "weight": wait.weight.name(),
+        "label": wait.label,
+        "signature": wait.signature,
+        "why": wait.why,
+        "needBytes": (wait.weight == builds::Weight::Run).then_some(wait.need),
+        "askedAt": wait.since_at,
+        "grantedAt": wait.granted.map(|at| epoch_ms().saturating_sub(ms(now.saturating_duration_since(at)))),
+        "endedAt": epoch_ms(),
+        "endedBy": by,
+        "waitedMs": ms(wait.granted.unwrap_or(now).saturating_duration_since(wait.since)),
+    }));
+}
+
+/// Takes the waits `ended` picks out of line, each recorded as ended `by`.
+fn end_slot_waits(state: &mut State, ended: impl Fn(&SlotWait) -> bool, by: &str) {
+    let (gone, kept): (Vec<SlotWait>, Vec<SlotWait>) = std::mem::take(&mut state.slots)
+        .into_iter()
+        .partition(ended);
+    state.slots = kept;
+    for wait in &gone {
+        slot_wait_ended(state, wait, by);
+    }
 }
 
 /// Processes held, by chat and program name, in the order they began.

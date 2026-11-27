@@ -35,6 +35,7 @@
     type PcRecord,
     type PcReservation,
     type PcSlot,
+    type PcTrain,
     type PcTurn,
     type PcTurnRecord,
   } from '$lib/pc-reservations';
@@ -46,6 +47,7 @@
     reservations,
     turns = [],
     slots = [],
+    trains = [],
     title,
     opens,
     open,
@@ -57,6 +59,8 @@
     turns?: PcTurn[];
     /** Chats' builds waiting for a slot, first in line first. */
     slots?: PcSlot[];
+    /** Repositories' merge trains, the cars on the train running first. */
+    trains?: PcTrain[];
     /** A chat's title. */
     title: (conversationId: string) => string;
     /** Whether a chat can be opened from here. */
@@ -525,10 +529,47 @@
         {/if}
       {/key}
     {:else}
-      {#if slots.length || groups.length}
+      {#if slots.length || groups.length || trains.length}
         <section class="card" aria-labelledby="pc-queues">
           <h3 id="pc-queues"><Users size={14} aria-hidden="true" />In line</h3>
           <ul class="live">
+            {#each trains as train (train.id)}
+              <li>
+                <div class="live-head">
+                  <span class="tag" class:measuring={train.startedAt != null}
+                    ><GitMerge size={11} aria-hidden="true" />Merge train</span
+                  >
+                  <span class="name"
+                    >{train.repository}<span class="muted"
+                      >{' · '}{train.startedAt != null
+                        ? `landing ${plural(
+                            train.cars.filter((car) => car.riding).length,
+                            'branch',
+                            'branches',
+                          )}`
+                        : 'waits for the landing turn and a build slot'}</span
+                    ></span
+                  >
+                  {#if train.startedAt != null}<span class="time"
+                      >{formatReplyTime(Math.max(0, clock.now - train.startedAt))}</span
+                    >{/if}
+                </div>
+                <ul class="waits">
+                  {#each train.cars as car (car.id)}
+                    <li>
+                      {#if car.riding}<GitMerge size={12} aria-hidden="true" />{:else}<Hourglass
+                          size={12}
+                          aria-hidden="true"
+                        />{/if}{title(car.conversationId)}<span class="muted"
+                        >{' · '}<code>{car.branch}</code> · {car.purpose} · {car.riding
+                          ? 'on the train'
+                          : formatReplyTime(Math.max(0, clock.now - car.queuedAt))}</span
+                      >
+                    </li>
+                  {/each}
+                </ul>
+              </li>
+            {/each}
             {#each groups as group (group.turns[0].id)}
               <li>
                 <div class="live-head">
@@ -613,7 +654,9 @@
                   >
                   <span class="name"
                     >{reservation.purpose}<span class="muted"
-                      >{' · '}{title(reservation.conversationId)}</span
+                      >{' · '}{title(
+                        reservation.conversationId,
+                      )}{#if reservation.scope === 'gpu'}{' · '}GPU work alone{/if}</span
                     ></span
                   >
                   <span class="time">{since(reservation)}</span>

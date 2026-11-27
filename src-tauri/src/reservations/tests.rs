@@ -417,6 +417,7 @@ fn held_time_goes_to_what_kept_the_window_closed() {
         conversation: "bench".into(),
         run_id: "run".into(),
         purpose: "Benchmark".into(),
+        scope: Scope::Computer,
         minutes: None,
         asked: t0,
         asked_at: 0,
@@ -1881,4 +1882,530 @@ async fn a_chat_in_line_for_its_turn_waits_for_its_turn_while_another_measures()
         .unwrap()
         .unwrap();
     assert!(came.starts_with("Your turn came after"), "{came}");
+}
+
+/// A grant a chat's work took `ago` from now, as `hold_grant` makes one.
+fn grant_of(weight: builds::Weight, bytes: u64, ago: Duration, signature: Option<&str>) -> Grant {
+    let now = Instant::now();
+    Grant {
+        weight,
+        bytes,
+        at: now.checked_sub(ago).unwrap_or(now),
+        at_ms: epoch_ms(),
+        call: None,
+        ended: false,
+        train: false,
+        compiled: false,
+        signature: signature.map(String::from),
+        base: Some(0),
+        peak: 0,
+    }
+}
+
+/// Thirty-two cores with five gigabytes free.
+fn five_free() -> Option<machine::Reading> {
+    Some(reading(Instant::now(), 0, 32, 5 << 30, vec![]))
+}
+/// Thirty-two cores with nine gigabytes free: room for one compiler beside what a grant keeps.
+fn nine_free() -> Option<machine::Reading> {
+    Some(reading(Instant::now(), 0, 32, 9 << 30, vec![]))
+}
+
+#[tokio::test]
+async fn a_run_needs_what_runs_of_its_kind_took_at_their_most_and_each_run_s_peak_is_kept() {
+    let folder = tempfile::tempdir().unwrap();
+    let history = folder.path().join("history.jsonl");
+    let broker = broker_with(vec![], Some(history.clone()));
+    broker.read_with(five_free);
+    {
+        let mut state = broker.lock();
+        // Filtered test runs took 2 GB at their most: one needs 3 GB free.
+        state
+            .peaks
+            .insert("run-tests -filter".into(), vec![2 << 30]);
+        // Another chat's work holds memory, so a run needs room of its own.
+        state.grants.insert(
+            "bench".into(),
+            grant_of(builds::Weight::Build, 0, Duration::ZERO, None),
+        );
+    }
+    broker.run_started("run-ui", "ui");
+    assert!(broker
+        .gate(
+            "ui",
+            "pwsh -File Tools/Run-Tests.ps1 -Filter Bluevox.Water -Name water",
+            None,
+            "pc_wait"
+        )
+        .is_none());
+    assert_eq!(broker.lock().grants["ui"].bytes, 3 << 30);
+    assert_eq!(
+        broker.lock().grants["ui"].signature.as_deref(),
+        Some("run-tests -filter")
+    );
+    // A kind of run never measured still asks for 8 GB, and only 2 GB are left beside the first.
+    broker.run_started("run-art", "art");
+    let reason = broker
+        .gate(
+            "art",
+            "pwsh -File Tools/Run-Game.ps1 -Mode net -Timeline t.txt",
+            None,
+            "pc_wait",
+        )
+        .unwrap();
+    assert!(
+        reason
+            .contains("a game or test run needs 8.0 GB of free memory (commit) and 2.0 GB is free"),
+        "{reason}"
+    );
+    // A run's peak, the most its chat used beyond what it used as it began, is kept with its kind
+    // once its grant ends, and saved beside the history.
+    {
+        let mut state = broker.lock();
+        let mut ran = grant_of(
+            builds::Weight::Run,
+            3 << 30,
+            Duration::from_secs(60),
+            Some("run-tests -filter"),
+        );
+        ran.peak = 6 << 30;
+        state.grants.insert("ui".into(), ran);
+        broker.end_grant(&mut state, "ui");
+        assert_eq!(state.peaks["run-tests -filter"], [2 << 30, 6 << 30]);
+        // One that ended at once was never read, and counts for nothing.
+        let mut short = grant_of(
+            builds::Weight::Run,
+            3 << 30,
+            Duration::ZERO,
+            Some("run-editor"),
+        );
+        short.peak = 1 << 30;
+        state.grants.insert("ui".into(), short);
+        broker.end_grant(&mut state, "ui");
+        assert!(!state.peaks.contains_key("run-editor"));
+    }
+    let saved: HashMap<String, Vec<u64>> =
+        serde_json::from_slice(&std::fs::read(folder.path().join(PEAKS)).unwrap()).unwrap();
+    assert_eq!(saved["run-tests -filter"], [2 << 30, 6 << 30]);
+    // A broker started later reads them back.
+    let again = broker_with(vec![], Some(history));
+    assert_eq!(again.lock().peaks["run-tests -filter"].len(), 2);
+}
+
+#[tokio::test]
+async fn a_build_short_of_room_for_two_compilers_waits_a_while_and_its_wait_is_kept() {
+    let folder = tempfile::tempdir().unwrap();
+    let history = folder.path().join("history.jsonl");
+    let broker = broker_with(vec![], Some(history.clone()));
+    broker.read_with(nine_free);
+    // Alone, a build starts with what there is.
+    assert!(broker.gate("ui", "cargo build", None, "pc_wait").is_none());
+    broker.lock().grants.clear();
+    // Beside other chats' work holding memory, one compiler's room makes it wait for a second.
+    broker.lock().grants.insert(
+        "bench".into(),
+        grant_of(builds::Weight::Run, 0, Duration::ZERO, None),
+    );
+    broker.run_started("run-ui", "ui");
+    let reason = broker
+        .gate("ui", "cargo build", Some("claude:b1"), "pc_wait")
+        .unwrap();
+    assert!(
+        reason.contains("it would start with memory for 1 compiler")
+            && reason.contains("waits up to 3m 0s since it first asked for room for two"),
+        "{reason}"
+    );
+    assert_eq!(broker.lock().slots[0].why, "compilers");
+    // Once it has waited that long, it starts with what there is, and its wait is kept.
+    {
+        let mut state = broker.lock();
+        let now = Instant::now();
+        state.slots[0].since = now
+            .checked_sub(builds::FEW_WAIT + Duration::from_secs(1))
+            .unwrap_or(now);
+    }
+    assert!(broker
+        .gate("ui", "cargo build", Some("claude:b2"), "pc_wait")
+        .is_none());
+    assert!(broker.snapshot().slots.is_empty());
+    // Another chat's build waits for room beside the first, and its reply ends.
+    let (build, _) = command("build", "cargo build");
+    broker.tool("run-ui", &build);
+    broker.run_started("run-art", "art");
+    broker.read_with(little_memory);
+    assert!(broker
+        .gate("art", "dotnet build", None, "pc_wait")
+        .is_some());
+    broker.run_ended("run-art");
+    let waits: Vec<Value> = read_history(&history)
+        .into_iter()
+        .filter(|r| r["kind"] == "wait")
+        .collect();
+    assert_eq!(waits.len(), 2, "{waits:?}");
+    assert_eq!(waits[0]["conversationId"], "ui");
+    assert_eq!(waits[0]["why"], "compilers");
+    assert_eq!(waits[0]["endedBy"], "started");
+    assert_eq!(waits[0]["weight"], "build");
+    assert!(waits[0]["waitedMs"].as_u64().unwrap() >= ms(builds::FEW_WAIT));
+    assert_eq!(waits[1]["conversationId"], "art");
+    assert_eq!(waits[1]["why"], "memory");
+    assert_eq!(waits[1]["endedBy"], "reply");
+}
+
+#[tokio::test]
+async fn a_measurement_of_gpu_work_alone_holds_only_what_renders() {
+    let broker = broker_with(vec![], None);
+    broker.read_with(roomy);
+    broker.run_started("run-ui", "ui");
+    let (build, _) = command("build", "cargo build --release");
+    broker.tool("run-ui", &build);
+    broker.run_started("run-bench", "bench");
+    let text = broker.reserve_scoped("run-bench", "bench", "Frame timing", None, Scope::Gpu);
+    assert!(
+        text.contains("This reservation is of GPU work alone"),
+        "{text}"
+    );
+    // Another chat's build renders nothing: the window opens beside it.
+    let first = broker.snapshot().reservations[0].clone();
+    assert_eq!((first.scope, first.phase), ("gpu", "open"));
+    // Builds and headless runs go on; a game waits.
+    assert!(broker.gate("ui", "cargo test", None, "pc_wait").is_none());
+    assert!(broker
+        .gate(
+            "ui",
+            "UnrealEditor-Cmd.exe Game.uproject -ExecCmds=\"Automation RunTests Bluevox\" -nullrhi",
+            None,
+            "pc_wait"
+        )
+        .is_none());
+    let held = broker
+        .gate(
+            "ui",
+            "UnrealEditor.exe Game.uproject -game",
+            None,
+            "pc_wait",
+        )
+        .unwrap();
+    assert!(
+        held.contains("reserved this computer's GPU for a measurement of GPU work"),
+        "{held}"
+    );
+    let status = broker.status("ui", None);
+    assert!(status.contains("It reserved GPU work alone"), "{status}");
+    let report = broker.release("bench").unwrap();
+    assert_eq!(report.record["scope"], "gpu");
+}
+
+/// The repository github.com/simpx-tech/bluevox with a merge train: its main checkout, and a
+/// worktree for each of `branches`, each branch on a commit of its own (`a…`, `b…`).
+fn repository_with_train(root: &Path, branches: &[&str]) -> (PathBuf, Vec<PathBuf>) {
+    let main = root.join("main");
+    let git = main.join(".git");
+    std::fs::create_dir_all(git.join("refs").join("heads")).unwrap();
+    std::fs::write(
+        git.join("config"),
+        "[remote \"origin\"]\n\turl = https://github.com/simpx-tech/bluevox.git\n",
+    )
+    .unwrap();
+    std::fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::create_dir_all(main.join(".agent-studio")).unwrap();
+    std::fs::write(
+        main.join(train::CONFIG),
+        r#"{"branch":"main","command":["land-train"],"maxCars":4}"#,
+    )
+    .unwrap();
+    let worktrees = branches
+        .iter()
+        .enumerate()
+        .map(|(index, branch)| {
+            let own = git.join("worktrees").join(branch);
+            std::fs::create_dir_all(&own).unwrap();
+            std::fs::write(own.join("commondir"), "../..\n").unwrap();
+            std::fs::write(own.join("HEAD"), format!("ref: refs/heads/{branch}\n")).unwrap();
+            std::fs::write(
+                git.join("refs").join("heads").join(branch),
+                format!("{:x}", index + 10).repeat(40),
+            )
+            .unwrap();
+            let worktree = root.join("worktrees").join(branch);
+            std::fs::create_dir_all(&worktree).unwrap();
+            std::fs::write(
+                worktree.join(".git"),
+                format!("gitdir: {}\n", own.display()),
+            )
+            .unwrap();
+            worktree
+        })
+        .collect();
+    (main, worktrees)
+}
+
+/// A runner that hands each train it is given to the test, then reports what the test says.
+struct Rails {
+    rides: tokio::sync::mpsc::UnboundedReceiver<train::Ride>,
+    outcomes: tokio::sync::mpsc::UnboundedSender<Result<train::Outcome, String>>,
+}
+fn rails(broker: &Broker) -> Rails {
+    let (ride_tx, rides) = tokio::sync::mpsc::unbounded_channel();
+    let (outcomes, outcome_rx) = tokio::sync::mpsc::unbounded_channel();
+    let outcome_rx = Arc::new(tokio::sync::Mutex::new(outcome_rx));
+    broker.run_trains_with(Arc::new(move |ride| {
+        let (ride_tx, outcome_rx) = (ride_tx.clone(), outcome_rx.clone());
+        Box::pin(async move {
+            let _ = ride_tx.send(ride);
+            outcome_rx
+                .lock()
+                .await
+                .recv()
+                .await
+                .unwrap_or_else(|| Err("the test ended".into()))
+        })
+    }));
+    Rails { rides, outcomes }
+}
+impl Rails {
+    async fn next(&mut self) -> train::Ride {
+        tokio::time::timeout(Duration::from_secs(10), self.rides.recv())
+            .await
+            .expect("a train left")
+            .unwrap()
+    }
+}
+
+#[tokio::test]
+async fn a_merge_train_lands_the_branches_queued_and_gives_back_the_one_it_left_out() {
+    let folder = tempfile::tempdir().unwrap();
+    let history = folder.path().join("data").join("history.jsonl");
+    let broker = broker_with(vec![], Some(history.clone()));
+    let mut rails = rails(&broker);
+    let (_, worktrees) =
+        repository_with_train(folder.path(), &["worktree-rivers", "worktree-inventory"]);
+    broker.run_started("run-bench", "bench");
+    broker.run_started("run-ui", "ui");
+    let queued = broker
+        .land("bench", &worktrees[0].join("Source"), "Fed rivers")
+        .unwrap();
+    assert!(
+        queued.starts_with("Queued worktree-rivers (aaaaaaaaaa) on the merge train of github.com/simpx-tech/bluevox, to land on main"),
+        "{queued}"
+    );
+    let second = broker
+        .land("ui", &worktrees[1], "Inventory sorting")
+        .unwrap();
+    assert!(second.contains("1 car waits before it"), "{second}");
+    // The train takes the landing turn, then a build slot, then both cars.
+    broker.regrant();
+    let ride = rails.next().await;
+    let train_id = "train:github.com/simpx-tech/bluevox";
+    assert_eq!(ride.conversation, train_id);
+    assert_eq!(ride.config.branch, "main");
+    let cars: Vec<(&str, &str)> = ride
+        .cars
+        .iter()
+        .map(|c| (c.conversation.as_str(), c.branch.as_str()))
+        .collect();
+    assert_eq!(
+        cars,
+        [("bench", "worktree-rivers"), ("ui", "worktree-inventory")]
+    );
+    assert_eq!(ride.cars[0].title, "Chunk benchmark");
+    assert_eq!(ride.cars[1].sha, "b".repeat(40));
+    assert!(ride.env.iter().any(|(name, value)| name == GRANT_ENV
+        && value.ends_with("train_github_com_simpx-tech_bluevox.json")));
+    let snapshot = broker.snapshot();
+    assert_eq!(snapshot.trains.len(), 1);
+    assert!(snapshot.trains[0].started_at.is_some());
+    assert!(snapshot.trains[0].cars.iter().all(|c| c.riding));
+    assert_eq!(snapshot.turns[0].conversation_id, train_id);
+    assert_eq!(snapshot.turns[0].purpose, "merge train of 2 branches");
+    assert!(snapshot
+        .grants
+        .iter()
+        .any(|g| g.conversation_id == train_id));
+    // The same commit again is no second car.
+    let again = broker.land("bench", &worktrees[0], "Fed rivers").unwrap();
+    assert!(
+        again.starts_with("worktree-rivers (aaaaaaaaaa) is on the merge train of github.com/simpx-tech/bluevox running now"),
+        "{again}"
+    );
+    assert_eq!(broker.snapshot().trains[0].cars.len(), 2);
+    // A chat landing by hand waits behind the train.
+    broker.run_started("run-art", "art");
+    let asked = broker.take_turn(
+        "run-art",
+        "art",
+        "landing:github.com/simpx-tech/bluevox",
+        "the landing of github.com/simpx-tech/bluevox",
+        true,
+        "Final check and push",
+    );
+    assert!(
+        asked.contains(
+            "the merge train of github.com/simpx-tech/bluevox holds it (merge train of 2 branches)"
+        ),
+        "{asked}"
+    );
+    let status = broker.status("bench", None);
+    assert!(
+        status.contains("Merge train of github.com/simpx-tech/bluevox: on its way for")
+            && status.contains("worktree-rivers (this chat: Fed rivers)"),
+        "{status}"
+    );
+    // The chat whose branch rides waits for it, as for its turn.
+    let (told, tell) = heard();
+    let waiting = {
+        let broker = broker.clone();
+        tokio::spawn(async move { broker.wait("bench", &CancellationToken::new(), &tell).await })
+    };
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(!waiting.is_finished());
+    assert_eq!(*told.lock().unwrap(), [None, Some("turn")]);
+    rails
+        .outcomes
+        .send(Ok(train::Outcome {
+            landed: vec![ride.cars[0].id.clone()],
+            sha: Some("c".repeat(40)),
+            ejected: vec![train::Ejected {
+                id: ride.cars[1].id.clone(),
+                reason: "it conflicts with main in Source/Inventory.cpp".into(),
+                log: Some("merge.log".into()),
+            }],
+            requeue: vec![],
+            note: Some("1 landed, 1 ejected".into()),
+        }))
+        .unwrap();
+    let landed = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(
+        landed.contains("your branch worktree-rivers (aaaaaaaaaa) landed on main of github.com/simpx-tech/bluevox at cccccccccc, on a merge train of 2 branches")
+            && landed.contains("(1 landed, 1 ejected)")
+            && landed.ends_with("nothing more to wait for."),
+        "{landed}"
+    );
+    let ejected = broker.deliver("ui").unwrap();
+    assert!(
+        ejected.contains("your branch worktree-inventory (bbbbbbbbbb) left the merge train of github.com/simpx-tech/bluevox without landing: it conflicts with main in Source/Inventory.cpp (log: merge.log)"),
+        "{ejected}"
+    );
+    // The chat landing by hand has the turn now, and hears that main moved.
+    let moved = broker.deliver("art").unwrap();
+    assert!(
+        moved.contains("main of github.com/simpx-tech/bluevox moved to cccccccccc"),
+        "{moved}"
+    );
+    let snapshot = broker.snapshot();
+    assert!(snapshot.trains.is_empty());
+    assert_eq!(snapshot.turns.len(), 1);
+    assert_eq!(snapshot.turns[0].conversation_id, "art");
+    assert!(snapshot.grants.is_empty());
+    assert!(broker
+        .status("art", None)
+        .contains("Landed on github.com/simpx-tech/bluevox"));
+    // The history keeps the train, its turn and its wait for a slot.
+    let records = read_history(&history);
+    let train = records.iter().find(|r| r["kind"] == "train").unwrap();
+    assert_eq!(train["repository"], "github.com/simpx-tech/bluevox");
+    assert_eq!(train["cars"][0]["outcome"], "landed");
+    assert_eq!(train["cars"][1]["outcome"], "ejected");
+    assert!(records.iter().any(|r| r["kind"] == "turn"
+        && r["conversationId"] == train_id
+        && r["endedBy"] == "train"));
+    assert!(records.iter().any(|r| r["kind"] == "wait"
+        && r["conversationId"] == train_id
+        && r["endedBy"] == "started"));
+}
+
+#[tokio::test]
+async fn a_train_that_fails_gives_its_cars_back_and_twice_in_a_row_to_their_chats() {
+    let folder = tempfile::tempdir().unwrap();
+    let broker = broker_with(vec![], None);
+    let mut rails = rails(&broker);
+    let (_, worktrees) = repository_with_train(folder.path(), &["worktree-rivers"]);
+    broker.run_started("run-bench", "bench");
+    broker.land("bench", &worktrees[0], "Fed rivers").unwrap();
+    broker.regrant();
+    let _ = rails.next().await;
+    rails.outcomes.send(Err("git fetch failed".into())).unwrap();
+    // It goes first on the next train.
+    let ride = rails.next().await;
+    assert_eq!(ride.cars[0].conversation, "bench");
+    let back = broker.deliver("bench").unwrap();
+    assert!(
+        back.contains("waits for the next merge train of github.com/simpx-tech/bluevox: the train failed: git fetch failed. It goes first."),
+        "{back}"
+    );
+    rails.outcomes.send(Err("git fetch failed".into())).unwrap();
+    for _ in 0..50 {
+        if broker.snapshot().trains.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let given = broker.deliver("bench").unwrap();
+    assert!(
+        given.contains("the merge train failed 2 times in a row")
+            && given.contains("Land by hand with pc_reserve and landing: true"),
+        "{given}"
+    );
+    assert!(broker.snapshot().trains.is_empty());
+    assert!(broker.snapshot().turns.is_empty());
+}
+
+#[tokio::test]
+async fn a_car_waiting_for_its_train_can_be_brought_up_to_date_or_taken_off() {
+    let folder = tempfile::tempdir().unwrap();
+    let broker = broker_with(vec![], None);
+    let (main, worktrees) = repository_with_train(folder.path(), &["worktree-rivers"]);
+    broker.run_started("run-bench", "bench");
+    // A chat holding the landing turn of the repository gives it to its own train.
+    broker.take_turn(
+        "run-bench",
+        "bench",
+        "landing:github.com/simpx-tech/bluevox",
+        "the landing of github.com/simpx-tech/bluevox",
+        true,
+        "Push",
+    );
+    let queued = broker.land("bench", &worktrees[0], "Fed rivers").unwrap();
+    assert!(
+        queued.contains("The landing turn this chat held or waited for was released"),
+        "{queued}"
+    );
+    // A new commit: the car carries it, in its place.
+    std::fs::write(
+        main.join(".git")
+            .join("refs")
+            .join("heads")
+            .join("worktree-rivers"),
+        "d".repeat(40),
+    )
+    .unwrap();
+    let again = broker
+        .land("bench", &worktrees[0], "Fed rivers, banks")
+        .unwrap();
+    assert!(
+        again.starts_with("Brought up to date: worktree-rivers (dddddddddd)"),
+        "{again}"
+    );
+    let cars = broker.snapshot().trains[0].cars.clone();
+    assert_eq!(cars.len(), 1);
+    assert_eq!(cars[0].purpose, "Fed rivers, banks");
+    // Taken off before it left, the train gives back its turn.
+    let off = broker.withdraw("bench").unwrap();
+    assert!(
+        off.starts_with("Took worktree-rivers (dddddddddd) off the merge train"),
+        "{off}"
+    );
+    assert!(broker.snapshot().trains.is_empty());
+    assert!(broker.snapshot().turns.is_empty());
+    assert!(broker.withdraw("bench").is_none());
+    // A branch on main itself, or a repository without a train, is refused.
+    let on_main = broker.land("bench", &main, "x").unwrap_err();
+    assert!(on_main.contains("is on main itself"), "{on_main}");
+    std::fs::remove_file(main.join(train::CONFIG)).unwrap();
+    let none = broker.land("bench", &worktrees[0], "x").unwrap_err();
+    assert!(none.contains("has no merge train"), "{none}");
 }
