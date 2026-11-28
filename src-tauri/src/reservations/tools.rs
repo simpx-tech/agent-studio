@@ -233,10 +233,13 @@ impl Session {
                 let tool = input["tool_name"].as_str().unwrap_or_default();
                 let wait = "mcp__agent_studio__pc_wait";
                 match crate::protocol::activity::mcp_tool(tool) {
-                    Some((server, _)) => {
-                        self.broker
-                            .gate_call(&self.conversation, server, call.as_deref(), wait)
-                    }
+                    Some((server, called)) => self.broker.gate_call(
+                        &self.conversation,
+                        server,
+                        called,
+                        call.as_deref(),
+                        wait,
+                    ),
                     // Agent Studio's own tools, pc_wait among them, answer for themselves.
                     None if tool.starts_with("mcp__") => None,
                     None => {

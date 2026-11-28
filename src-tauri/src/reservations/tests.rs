@@ -377,15 +377,17 @@ async fn other_chats_mcp_calls_wait_and_keep_the_window_closed_while_they_run() 
     assert_eq!(broker.snapshot().reservations[0].phase, "open");
     // New calls wait like commands, but for the holder's own, Agent Studio's and connectors'.
     let reason = broker
-        .gate_call("ui", "unreal-mcp", None, "pc_wait")
+        .gate_call("ui", "unreal-mcp", "execute_python", None, "pc_wait")
         .unwrap();
     assert!(reason.starts_with("This tool call did not run: the chat \"Chunk benchmark\""));
     assert!(reason.contains("then make the same call again"), "{reason}");
     assert!(broker
-        .gate_call("bench", "unreal-mcp", None, "pc_wait")
+        .gate_call("bench", "unreal-mcp", "execute_python", None, "pc_wait")
         .is_none());
     for server in ["agent_studio", "claude_ai_Linear", "codex_apps"] {
-        assert!(broker.gate_call("ui", server, None, "pc_wait").is_none());
+        assert!(broker
+            .gate_call("ui", server, "list_issues", None, "pc_wait")
+            .is_none());
     }
     let report = broker.release("bench").unwrap();
     assert!(
@@ -429,6 +431,7 @@ fn held_time_goes_to_what_kept_the_window_closed() {
         others: vec![],
         refused: 0,
         refused_calls: HashSet::new(),
+        wanted: HashMap::new(),
         asks: vec![],
         stopped: vec![],
         frozen: vec![],
@@ -1831,6 +1834,98 @@ async fn the_window_names_the_chats_waiting_for_the_computer() {
     let free = waiting.await.unwrap().unwrap();
     assert!(free.starts_with("The computer is free again"), "{free}");
     assert!(broker.snapshot().waiting.is_empty());
+    assert!(broker.snapshot().waits.is_empty());
+}
+
+#[tokio::test]
+async fn the_window_says_what_waits_and_on_whose_work() {
+    // Requested 2026-11-28: "I can't know what they're waiting or who they're waiting".
+    let broker = broker_with(vec![], None);
+    broker.run_started("run-ui", "ui");
+    let (build, built) = command("build", "cargo build --release");
+    broker.tool("run-ui", &build);
+    let before = epoch_ms();
+    broker.reserve("run-bench", "bench", "Frame timing", None);
+    // The window waits for the build, since it began.
+    let view = broker.snapshot();
+    let blocker = &view.reservations[0].waiting_for[0];
+    assert_eq!(
+        (blocker.conversation_id.as_str(), blocker.label.as_str()),
+        ("ui", "`cargo build --release`")
+    );
+    assert!(blocker.since >= before.saturating_sub(1000) && blocker.since <= epoch_ms());
+    // A chat whose command waits says which: as Claude Code reported it, with its description,
+    // or as the gate read it.
+    broker.run_started("run-art", "art");
+    let mut decoder = ToolDecoder::default();
+    let tests = decoder
+        .decode(
+            "claude",
+            &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"npm test","description":"Run the unit tests"}}]}}),
+        )
+        .pop()
+        .unwrap();
+    broker.tool("run-art", &tests);
+    assert!(broker
+        .gate("art", "npm test", Some(&tests.id), "pc_wait")
+        .is_some());
+    let waiting = {
+        let broker = broker.clone();
+        tokio::spawn(async move { broker.wait("art", &CancellationToken::new(), &quiet).await })
+    };
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    let view = broker.snapshot();
+    assert_eq!(view.waits.len(), 1);
+    assert_eq!(view.waits[0].conversation_id, "art");
+    assert_eq!(
+        view.waits[0].label.as_deref(),
+        Some("Run the unit tests `npm test`")
+    );
+    assert!(view.waits[0].since >= before.saturating_sub(1000));
+    // A tool call names its tool and server.
+    assert!(broker
+        .gate_call("art", "unreal-mcp", "execute_python", None, "pc_wait")
+        .is_some());
+    assert_eq!(
+        broker.snapshot().waits[0].label.as_deref(),
+        Some("execute_python of unreal-mcp")
+    );
+    broker.tool("run-ui", &built);
+    broker.release("bench");
+    waiting.await.unwrap().unwrap();
+    assert!(broker.snapshot().waits.is_empty());
+}
+
+#[tokio::test]
+async fn a_build_waiting_for_a_slot_says_why_and_which_builds_hold_them() {
+    let broker = broker_with(vec![], None);
+    broker.read_with(eight_cores);
+    broker.run_started("run-ui", "ui");
+    let (build, _) = command("build", "cargo build --release");
+    broker.tool("run-ui", &build);
+    broker.run_started("run-art", "art");
+    assert!(broker
+        .gate(
+            "art",
+            "pwsh -File Tools/Build.ps1 -Target Bluevox",
+            None,
+            "pc_wait"
+        )
+        .is_some());
+    let view = broker.snapshot();
+    let slot = &view.slots[0];
+    assert_eq!(slot.label, "`pwsh -File Tools/Build.ps1 -Target Bluevox`");
+    assert_eq!((slot.why, slot.need), ("slots", None));
+    let builds = view.builds.as_ref().unwrap();
+    assert_eq!(builds.slots, 1);
+    assert_eq!(
+        builds
+            .running
+            .iter()
+            .map(|b| (b.conversation_id.as_deref(), b.label.as_str()))
+            .collect::<Vec<_>>(),
+        [(Some("ui"), "`cargo build --release`")]
+    );
 }
 
 #[tokio::test]
@@ -1899,6 +1994,7 @@ fn grant_of(weight: builds::Weight, bytes: u64, ago: Duration, signature: Option
         signature: signature.map(String::from),
         base: Some(0),
         peak: 0,
+        label: None,
     }
 }
 

@@ -1320,49 +1320,6 @@ pre {
   flex: none;
   color: var(--text-muted);
 }
-/* A reply waiting on this computer -- for the computer another chat reserved, a build slot, room
-   for a game or test run, or its turn -- says so in a card of its own under its heading, in the
-   warning colour, with how long it has waited where that is known (requested 2026-11-26: "make
-   the waiting for the computer card inside the chat itself more visible"). */
-.hold-card {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin: 6px 0 10px;
-  padding: 12px 14px;
-  border: 1px solid var(--warning-border);
-  border-left: 4px solid var(--warning);
-  border-radius: var(--radius-lg);
-  background: var(--warning-soft);
-  color: var(--text);
-}
-.hold-card > svg {
-  flex: none;
-  color: var(--warning);
-}
-.hold-card .hold-text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.hold-card strong {
-  font-size: var(--text-md);
-  font-weight: 600;
-}
-.hold-card .hold-text span {
-  color: var(--text-secondary);
-  font-size: var(--text-sm);
-  overflow-wrap: anywhere;
-}
-.hold-card .hold-time {
-  flex: none;
-  margin-left: auto;
-  color: var(--warning);
-  font-size: var(--text-md);
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
 /* Screens sit under their computer, each marked by a page in the gutter; one whose jobs run
    ends with a spinner in the accent. */
 .screen-item > svg {

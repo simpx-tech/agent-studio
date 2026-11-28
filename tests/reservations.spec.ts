@@ -12,10 +12,12 @@ test('the reservations window shows the computer now and each past measurement w
   const at = '2026-11-24T10:00:00.000Z';
   const bench = crypto.randomUUID();
   const art = crypto.randomUUID();
+  const physics = crypto.randomUUID();
   const gone = crypto.randomUUID();
   for (const [id, title] of [
     [bench, 'Chunk benchmark'],
     [art, 'Level art'],
+    [physics, 'Physics tuning'],
   ])
     workspace.conversations.push({
       id,
@@ -158,12 +160,39 @@ test('the reservations window shows the computer now and each past measurement w
         phase: 'draining',
         askedAt: Date.now() - 5000,
         waitingFor: [
-          { conversationId: art, label: '`npm test`' },
+          { conversationId: art, label: '`npm test`', since: Date.now() - 5000 },
           { conversationId: art, label: 'handing over', handOver: true },
         ],
         held: 1,
       },
     ],
+    // A chat waits for it, with the command it asked to run.
+    waiting: [physics],
+    waits: [
+      {
+        conversationId: physics,
+        since: Date.now() - 4000,
+        label: 'Run the physics tests `npm test -- physics`',
+      },
+    ],
+    // A build runs on its grant beside one outside Agent Studio, and leaves no slot.
+    grants: [
+      {
+        conversationId: bench,
+        weight: 'build',
+        bytes: 12 * gb,
+        since: Date.now() - 120_000,
+        label: 'Build the editor `Tools/Build.ps1 -Editor`',
+      },
+    ],
+    builds: {
+      running: [
+        { conversationId: bench, label: 'Build the editor `Tools/Build.ps1 -Editor`' },
+        { label: 'A build of yours: cl.exe with 6 compilers' },
+      ],
+      slots: 1,
+      available: 6 * gb,
+    },
     // A repository's landing turn with a chat in line for it, and a build waiting for a slot.
     turns: [
       {
@@ -184,7 +213,14 @@ test('the reservations window shows the computer now and each past measurement w
         askedAt: Date.now() - 30_000,
       },
     ],
-    slots: [{ conversationId: art, label: '`Tools/Build.ps1`', since: Date.now() - 10_000 }],
+    slots: [
+      {
+        conversationId: art,
+        label: '`Tools/Build.ps1`',
+        since: Date.now() - 10_000,
+        why: 'slots',
+      },
+    ],
   };
   // A landing turn that ended.
   const landed = {
@@ -231,30 +267,41 @@ test('the reservations window shows the computer now and each past measurement w
   await gauge.click();
   const dialog = page.getByRole('dialog', { name: 'Reservations' });
   await expect(dialog).toBeVisible();
-  // What waits in line: a landing turn and its next chat, and a build for a slot.
-  const queues = dialog.getByLabel('In line');
-  await expect(queues.locator('.live-head').nth(0)).toContainText(
-    'Landing of github.com/simpx-tech/bluevox',
+  // What is waited for now, one card each, saying who holds it, what that holder waits on, and
+  // who waits for it with what they asked to run (requested 2026-11-28).
+  const computer = dialog.getByLabel('The computer');
+  await expect(computer.locator('.live-head .tag')).toHaveText('Waiting to start');
+  await expect(computer.locator('.live-head .name')).toHaveText(
+    /^\s*Reserved by Chunk benchmark\s*$/,
   );
-  await expect(queues.locator('.live-head .name').nth(0)).toHaveText(
-    /^\s*Final pipeline and push\s*· Chunk benchmark\s*$/,
+  await expect(computer.locator('.purpose-line')).toHaveText('Benchmark again');
+  await expect(computer.locator('.state-line')).toHaveText(
+    "Other chats' new commands and tool calls wait. It measures once the work below ends.",
   );
-  // Each with how long it has waited, by the clock.
-  await expect(queues.locator('.waits li')).toHaveText([
-    /Level art\s*· Final pipeline and push · \d/,
-    /Level art\s*· Tools\/Build\.ps1 · \d/,
+  await expect(computer.locator('h4')).toHaveText([
+    'Its measurement waits for',
+    'Waiting for it · 1',
   ]);
-  await expect(queues.locator('.live-head').nth(1)).toContainText('1 build waits for a slot');
-  const live = dialog.getByLabel('Now');
-  await expect(live.locator('.live-head')).toContainText('Holding');
-  await expect(live.locator('.live-head .name')).toHaveText(
-    /^\s*Benchmark again\s*· Chunk benchmark\s*$/,
-  );
-  await expect(live.locator('.waits li')).toHaveText([
-    /Level art\s*· npm test/,
-    /Level art\s*· handing over/,
-    /1 chat waits/,
+  // Each with how long it has run or waited, by the clock.
+  await expect(computer.locator('.entry')).toHaveText([
+    /^\s*Level art\s*npm test\s*\d+s\s*$/,
+    /^\s*Level art\s*Asked to hand over what it holds\s*$/,
+    /^\s*Physics tuning\s*Run the physics tests npm test -- physics\s*\d+s\s*$/,
   ]);
+  await expect(computer.locator('.entry.waits-here')).toHaveCount(1);
+  // Builds: which run, on how much memory, and why the one waiting waits.
+  const work = dialog.getByLabel('Builds and runs');
+  await expect(work.locator('h3')).toHaveText(/Builds and runs\s*· 1 build at once · 6\.0 GB free/);
+  await expect(work.locator('.entry')).toHaveText([
+    /Chunk benchmark\s*Build the editor Tools\/Build\.ps1 -Editor\s*12 GB\s*2m/,
+    /^\s*A build of yours: cl\.exe with 6 compilers\s*$/,
+    /Level art\s*Tools\/Build\.ps1\s*One build runs at a time here\s*\d+s/,
+  ]);
+  // A landing turn: who holds it and who is next.
+  const turn = dialog.getByLabel('Landing of github.com/simpx-tech/bluevox');
+  await expect(turn.locator('.live-head .name')).toHaveText(/^\s*By Chunk benchmark\s*$/);
+  await expect(turn.locator('.purpose-line')).toHaveText('Final pipeline and push');
+  await expect(turn.locator('.entry')).toHaveText(/Level art\s*Final pipeline and push\s*\d+s/);
 
   // What the measurements took together, then each one, newest first.
   await expect(dialog.locator('.tiles li')).toHaveText([
@@ -355,8 +402,7 @@ test('the reservations window shows the computer now and each past measurement w
   );
   await expect(rows).toHaveCount(3);
   await expect(rows.nth(0).locator('.name')).toContainText('Benchmark again');
-  await expect(dialog.getByLabel('Now')).toHaveCount(0);
-  await expect(dialog.getByLabel('In line')).toHaveCount(0);
+  await expect(dialog.locator('.resource')).toHaveCount(0);
   await expect(gauge).toHaveCount(0);
 
   // A chat it names opens from it.
@@ -413,7 +459,8 @@ test('rows and the running reply show who reserves and who waits, and the gauge 
   await mockDesktop(page, 'capabilities');
   await page.goto('/');
   const gauge = page.locator('.pc-button');
-  await expect(gauge).toBeVisible();
+  // Shown once the app loaded, which a busy computer takes a while for.
+  await expect(gauge).toBeVisible({ timeout: 15_000 });
   await expect(gauge).toHaveAttribute('title', 'Reservations');
   await expect(gauge).not.toHaveClass(/pc-reserved/);
 
@@ -437,43 +484,137 @@ test('rows and the running reply show who reserves and who waits, and the gauge 
       { reservations: [], turns: [], slots: [], waiting: [], grants: [], ...snapshot },
     );
   const row = page.locator('.conversation-item', { hasText: 'Waiting chat' });
-  const card = page.locator('.hold-card');
-
-  // Another chat reserves the computer and this one waits for it.
-  await send({
-    reservations: [
+  const card = page.locator('.pc-hold');
+  const reply = page.getByTestId('message').last();
+  const holder = crypto.randomUUID();
+  const reserved = {
+    id: 'pc-1',
+    conversationId: holder,
+    purpose: 'Frame timing',
+    phase: 'draining',
+    askedAt: Date.now(),
+    waitingFor: [
       {
-        id: 'pc-1',
         conversationId: crypto.randomUUID(),
-        purpose: 'Frame timing',
-        phase: 'draining',
-        askedAt: Date.now(),
-        waitingFor: [],
-        held: 1,
+        label: 'Rebuild the candidate `Build.ps1 -Candidate`',
+        since: Date.now() - 90_000,
       },
     ],
+    held: 1,
+  };
+
+  // The reply has worked a little.
+  await page.evaluate(() =>
+    (window as any).emitCapability({
+      kind: 'tool',
+      tool: {
+        id: 'claude:status',
+        name: 'Run command',
+        category: 'tool',
+        operation: 'command',
+        commandRun: true,
+        command: 'git status',
+        revision: 2,
+        status: 'complete',
+        facts: [],
+        sources: [],
+        agents: [],
+      },
+    }),
+  );
+  await expect(reply.locator('.tool-activity')).toBeVisible();
+
+  // Another chat reserves the computer and this one waits for it: a card in the warning colour
+  // says who reserved it, what that measurement still waits for and what this chat waits to run,
+  // at the end of the reply's live work, never above it (requested 2026-11-28).
+  await send({
+    reservations: [reserved],
     waiting: [me],
+    waits: [{ conversationId: me, since: Date.now() - 30_000, label: 'Run the tests `npm test`' }],
   });
   await expect(row.locator('.conversation-held')).toBeVisible();
   await expect(row).toHaveAttribute(
     'title',
     /Waiting for the computer: Another chat reserved it: Frame timing/,
   );
-  await expect(card).toHaveText(
-    /^\s*Waiting for the computer\s*Another chat reserved it: Frame timing\s*$/,
+  await expect(card.locator('.pc-hold-head strong')).toHaveText('Waiting for the computer');
+  await expect(card.locator('.pc-hold-time')).toHaveText(/^3\ds$/);
+  await expect(card.locator('.pc-holder')).toHaveText(
+    /^\s*Another chat\s*reserved the computer to measure:\s*Frame timing\s*$/,
   );
+  await expect(card.locator('.pc-status')).toHaveCount(0);
+  await expect(card.locator('.pc-label')).toHaveText('Its measurement waits for');
+  await expect(card.locator('.pc-work li')).toHaveText(
+    /Another chat\s*Rebuild the candidate Build\.ps1 -Candidate\s*1m 3\ds/,
+  );
+  await expect(card.locator('.pc-facts')).toHaveText(/Waiting to run\s*Run the tests npm test/);
   await expect(page.locator('.live-label')).toHaveText(/Waiting for the computer/);
   await expect(gauge).toHaveClass(/pc-reserved/);
+  // Nothing above the reply's work: the card follows it.
+  const order = () =>
+    reply.evaluate((message) => {
+      const card = message.querySelector('.pc-hold');
+      const work = message.querySelector('.tool-activity');
+      return !!card && !!work && !!(work.compareDocumentPosition(card) & 4);
+    });
+  await expect.poll(order).toBe(true);
 
-  // Its build waits for a slot: the card says how long it has waited.
+  // Its agent waits with pc_wait: the card takes that call's row.
+  await page.evaluate(() =>
+    (window as any).emitCapability({
+      kind: 'tool',
+      tool: {
+        id: 'claude:wait',
+        name: 'Wait for the computer',
+        category: 'tool',
+        operation: 'pcWait',
+        revision: 1,
+        status: 'running',
+        facts: [],
+        sources: [],
+        agents: [],
+      },
+    }),
+  );
+  await expect(reply.locator('.live-item .pc-hold')).toBeVisible();
+  await expect(card).toHaveCount(1);
+  await expect(reply.locator('.live-row')).toHaveCount(0);
+
+  // Its own measurement waits for its window: the card says for whose work.
+  await send({ reservations: [{ ...reserved, conversationId: me, held: 0 }] });
+  await expect(card.locator('.pc-hold-head strong')).toHaveText(
+    'Waiting for other chats to finish',
+  );
+  await expect(card.locator('.pc-label')).toHaveText('Its measurement waits for');
+  await expect(card.locator('.pc-facts')).toHaveText(/To measure\s*Frame timing/);
+  await expect(row.locator('.conversation-reserving')).toBeVisible();
+
+  // Its build waits for a slot: the card says how long it has waited, why, and on which builds.
   await send({
     slots: [
-      { conversationId: me, label: '`Tools/Build.ps1`', weight: 'build', since: Date.now() - 65_000 },
+      {
+        conversationId: me,
+        label: '`Tools/Build.ps1`',
+        weight: 'build',
+        since: Date.now() - 65_000,
+        why: 'slots',
+      },
     ],
+    builds: {
+      running: [{ label: 'A build of yours: cl.exe with 6 compilers' }],
+      slots: 1,
+    },
   });
-  await expect(card.locator('strong')).toHaveText('Waiting for a build slot');
-  await expect(card).toContainText('First in line · Tools/Build.ps1');
-  await expect(card.locator('.hold-time')).toHaveText(/^1m/);
+  await expect(card.locator('.pc-hold-head strong')).toHaveText('Waiting for a build slot');
+  await expect(card.locator('.pc-hold-time')).toHaveText(/^1m/);
+  await expect(card.locator('.pc-status')).toHaveText('One build runs at a time here');
+  await expect(card.locator('.pc-label')).toHaveText('Builds running');
+  await expect(card.locator('.pc-work li')).toHaveText(
+    /A build of yours: cl\.exe with 6 compilers/,
+  );
+  await expect(card.locator('.pc-facts')).toHaveText(
+    /Waiting to run\s*Tools\/Build\.ps1\s*Place\s*First/,
+  );
   await expect(row.locator('.conversation-held')).toBeVisible();
 
   // It reserves the computer itself and measures: the gauge in the accent, on its row too.

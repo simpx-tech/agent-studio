@@ -3,7 +3,9 @@ import {
   pcBesideText,
   pcBusy,
   pcChatState,
+  pcHold,
   pcName,
+  pcSlotReason,
   pcOutcome,
   pcOwner,
   pcQueueTitle,
@@ -32,6 +34,7 @@ const reservation = (overrides: Partial<PcReservation> = {}): PcReservation => (
   ...overrides,
 });
 const title = (id: string) => (id === 'bench' ? 'Chunk benchmark' : 'Another chat');
+const GB = 2 ** 30;
 
 describe('lulls, turns, build slots and what ran beside a measurement', () => {
   it('reads a reservation waiting for a lull, the turns and the builds waiting for a slot', () => {
@@ -77,6 +80,7 @@ describe('lulls, turns, build slots and what ran beside a measurement', () => {
       turns: [],
       slots: [],
       waiting: [],
+      waits: [],
       grants: [],
       trains: [],
     });
@@ -367,6 +371,184 @@ describe('where each chat stands, for its row in the sidebar and its running rep
     expect(pcTurnEnd(record('stalled'))).toBe('its work used no CPU');
     expect(pcTurnEnd(record('closed'))).toBe('its chat was closed');
     expect(pcTurnEnd(record('release'))).toBeUndefined();
+  });
+
+  it('says why a chat waits for the computer, on whose work, and what it waits to run', () => {
+    // Requested 2026-11-28: "render a full card in warning, with the reason and what is waiting".
+    const holding = pcSnapshotSchema.parse({
+      reservations: [
+        reservation({
+          held: 2,
+          scope: 'gpu',
+          waitingFor: [
+            {
+              conversationId: 'stamina',
+              label: 'Rebuild the merged candidate `Build.ps1 -Candidate`',
+              since: 40,
+            },
+            { conversationId: 'editor', label: 'handing over', handOver: true, since: 50 },
+          ],
+        }),
+      ],
+      waiting: ['held', 'other'],
+      waits: [
+        { conversationId: 'held', since: 60, label: 'Run the unit tests `npm test`' },
+        { conversationId: 'other', since: 70 },
+      ],
+    });
+    const hold = pcHold(holding, 'held', titles);
+    expect(hold).toMatchObject({
+      kind: 'computer',
+      heading: 'Waiting for the computer',
+      detail: 'Chunk benchmark reserved it: Benchmark of chunk meshing',
+      since: 60,
+      holder: {
+        conversationId: 'bench',
+        does: 'reserved the GPU to measure',
+        purpose: 'Benchmark of chunk meshing',
+      },
+      measure: { phase: 'draining' },
+      workHeading: 'Its measurement waits for',
+      facts: [
+        { label: 'Waiting to run', value: 'Run the unit tests `npm test`' },
+        { label: 'Also waiting', value: '1 chat' },
+      ],
+    });
+    // The chain: this chat waits for the reservation, which waits for another chat's build.
+    expect(hold?.work).toEqual([
+      {
+        conversationId: 'stamina',
+        label: 'Rebuild the merged candidate `Build.ps1 -Candidate`',
+        since: 40,
+        handOver: undefined,
+      },
+      { conversationId: 'editor', label: 'handing over', since: 50, handOver: true },
+    ]);
+    // Once it measures, nothing else holds the wait up.
+    const open = { ...holding, reservations: [reservation({ phase: 'open', openedAt: 80 })] };
+    expect(pcHold(open, 'held', titles)).toMatchObject({
+      measure: { phase: 'open', openedAt: 80 },
+      work: [],
+      holder: { since: 80 },
+    });
+    // The chat that reserved waits for its own window only, which the sidebar shows as reserving.
+    expect(pcHold(holding, 'bench', titles)).toMatchObject({
+      kind: 'window',
+      heading: 'Waiting for other chats to finish',
+      facts: [
+        { label: 'To measure', value: 'Benchmark of chunk meshing' },
+        { label: 'Holds', value: 'GPU work only' },
+        { label: 'Chats waiting', value: '2' },
+      ],
+    });
+    expect(pcHold(holding, 'bench', titles)?.work).toHaveLength(2);
+    expect(
+      pcHold(
+        { ...holding, reservations: [reservation({ phase: 'lull', holdsAt: 9 })] },
+        'bench',
+        titles,
+      )?.heading,
+    ).toBe('Waiting for a lull to measure');
+    expect(pcWaitCard(holding, 'bench', titles)).toBeUndefined();
+    expect(pcChatState(holding, 'bench', titles)?.kind).toBe('reserving');
+    // One in line names the reservation ahead of it and what that one waits for.
+    expect(pcHold(snapshot, 'next', titles)).toMatchObject({
+      kind: 'line',
+      holder: { conversationId: 'bench' },
+      facts: [
+        { label: 'Place', value: 'Next' },
+        { label: 'To measure', value: 'Profile the build' },
+      ],
+    });
+  });
+
+  it('says why a build or run waits for room, and whose builds and memory hold it', () => {
+    const waiting = pcSnapshotSchema.parse({
+      reservations: [],
+      slots: [
+        {
+          conversationId: 'builder',
+          label: 'Rebuild `Build.ps1`',
+          since: 7,
+          why: 'slots',
+        },
+        {
+          conversationId: 'gamer',
+          label: '`Run-Game.ps1`',
+          weight: 'run',
+          since: 8,
+          why: 'room',
+          need: 8 * GB,
+        },
+      ],
+      grants: [
+        {
+          conversationId: 'stamina',
+          weight: 'build',
+          bytes: 12 * GB,
+          since: 3,
+          label: 'Rebuild the candidate `Build.ps1 -Candidate`',
+        },
+      ],
+      builds: {
+        running: [
+          { conversationId: 'stamina', label: 'Rebuild the candidate `Build.ps1 -Candidate`' },
+          { label: 'A build of yours: cl.exe with 20 compilers' },
+        ],
+        slots: 1,
+        available: 5 * GB,
+      },
+    });
+    expect(pcHold(waiting, 'builder', titles)).toMatchObject({
+      kind: 'slot',
+      heading: 'Waiting for a build slot',
+      reason: 'One build runs at a time here',
+      workHeading: 'Builds running',
+      work: [
+        { conversationId: 'stamina', label: 'Rebuild the candidate `Build.ps1 -Candidate`' },
+        { label: 'A build of yours: cl.exe with 20 compilers' },
+      ],
+      facts: [
+        { label: 'Waiting to run', value: 'Rebuild `Build.ps1`' },
+        { label: 'Place', value: 'First' },
+      ],
+    });
+    expect(pcHold(waiting, 'gamer', titles)).toMatchObject({
+      kind: 'room',
+      reason: 'It needs 8.0 GB of free memory to start',
+      workHeading: 'Memory held by',
+      work: [{ conversationId: 'stamina', bytes: 12 * GB, since: 3 }],
+      facts: [
+        { label: 'Waiting to run', value: '`Run-Game.ps1`' },
+        { label: 'Place', value: '1 ahead' },
+        { label: 'Free now', value: '5.0 GB' },
+      ],
+    });
+    const [build, game] = waiting.slots;
+    expect(pcSlotReason({ ...build, why: 'line' }, waiting.slots, waiting.builds)).toBe(
+      '1 build waits ahead of it',
+    );
+    expect(pcSlotReason({ ...build, why: 'ramp' }, waiting.slots, waiting.builds)).toBe(
+      'The last build started is still taking its memory',
+    );
+    expect(pcSlotReason({ ...game, granted: true }, waiting.slots, waiting.builds)).toBeUndefined();
+    // A slot kept for it is ready, not a wait.
+    expect(
+      pcHold({ ...waiting, slots: [{ ...build, granted: true }] }, 'builder', titles),
+    ).toMatchObject({ ready: true, heading: 'A build slot is free', work: [] });
+  });
+
+  it('names the holder of the turn a chat waits for, and the place it waits in', () => {
+    expect(pcHold(snapshot, 'queued', titles)).toMatchObject({
+      kind: 'turn',
+      holder: { conversationId: 'lander', does: 'holds the landing turn', since: 2 },
+      turn: { id: 't1' },
+      facts: [
+        { label: 'Lands on', value: 'github.com/simpx-tech/bluevox' },
+        { label: 'Place', value: 'Next' },
+        { label: 'For', value: 'Final pipeline and push' },
+      ],
+    });
   });
 
   it('reads a snapshot from before grants and waiting chats', () => {

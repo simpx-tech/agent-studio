@@ -73,8 +73,9 @@ Reservations (`Settings::lull_minutes`, three minutes unless changed, kept on th
 data `reservations/settings.json`, never synced) does it hold their new work, from then on, and
 the work already running is the last its window waits for. A window that opens holds their new
 work from then on, a hand-over that closes it again included. Zero holds at once, as before
-2026-11-25. The Reservations window and the gauge show the phase as Waiting for a lull, Holding or
-Measuring, and the report says whether the window opened at a lull or how long it waited for one
+2026-11-25. The Reservations window shows the phase as Waiting for a lull, Waiting to start (Holding
+until 2026-11-28) or Measuring, the gauge says it on hover, and the report says whether the window
+opened at a lull or how long it waited for one
 before holding the others (`lullMs` in the history).
 
 ### Idle work
@@ -512,21 +513,43 @@ reserves the computer, in the accent once it measures; an hourglass in the warni
 waits for the computer another chat reserved, a place in line to reserve it, a build slot, room for
 a game or test run, its turn, or its branch's merge train, waiting or on its way (`waiting` in
 `pc_state` names the chats waiting in `pc_wait` for the computer, `trains` the trains and their
-cars); a quiet flag while it holds a landing turn. Its hover and accessible name say which. And
-the running reply of a chat that waits shows a card of its own under its heading, in the warning
-colour, with what it waits for, behind whom, and how long it has waited where that is known
-(`pcWaitCard`, `MessageView`'s `onHold`); its heading's live label says the same in place of
-Responding.
+cars); a quiet flag while it holds a landing turn. Its hover and accessible name say which.
+
+The running reply of a chat that waits shows a card in the warning colour (requested 2026-11-28:
+"render a full card in warning, with the reason and what is waiting"; `pcHold`,
+`PcHoldCard.svelte`, `MessageView`'s `onHold`) where its wait shows: in place of the live row of its
+running `pc_wait` call, else at the end of its live work, and never above the work, which a reader
+following the chat would not see (a card under the reply's heading did until then). It says what
+the chat waits for and since when; whose reservation, turn or train that is and what for, the chat
+named opening on a click; where that measurement stands (measuring for how long, of about how many
+minutes, or what work in progress its window still waits for, with whose it is and since when);
+for a build or a run, why it waits (every slot taken, too little free memory, the last build still
+growing, builds ahead of it) beside the builds running or the work holding memory; and the facts:
+what the chat waits to run (the command or MCP tool call the reservation refused it last, with its
+description), its place in line, the other chats waiting. The chat whose own reservation waits for
+its window gets one too while it calls `pc_wait`, saying for whose work, and Reservations opens the
+window. Its heading's live label says what it waits for in place of Responding. `pc_state` carries
+what this needs: `waits` (each chat waiting for the computer, since when and what it asked to run,
+`Reservation::wanted`), each window blocker's `since`, each slot's `why` and `need`, each grant's
+`label`, and, while builds or runs wait for room, `builds` (the builds running, chats' and others',
+how many run at once here and the memory free for new work, `note_builds`).
 
 The Reservations window and the Time report close on a click on their backdrop as they do on Escape
 and their close button, through the page's own close: until 2026-11-26 the backdrop closed the
 `<dialog>` alone, the page went on holding it open, and the next click opened nothing.
 
 The gauge opens the Reservations window (`ReservationsDialog.svelte`), which `/reservations` also
-opens at any time. It shows what waits In line (each merge train with its cars, each name with its
-holder and the chats waiting for it, and the builds waiting for a slot), the reservations now, each
-with its scope when it is of GPU work alone and what its window waits
-for and the chats waiting, then every reservation this computer's history kept (`pc_history`,
+opens at any time. It shows what is waited for now, one card each, so that who waits, for what and
+on whom reads at a glance (requested 2026-11-28: "I can't know what they're waiting or who they're
+waiting"): The computer (the chat that reserved it and where its measurement stands, its scope when
+it holds GPU work alone, what it means for other chats, the work in progress its window waits for,
+the chats waiting for it with what each asked to run, and the reservations next in line); Builds and
+runs (how many build at once and the memory free, the builds and runs running with their memory,
+then those waiting with why); each named reservation (its holder, how long it has held it and
+whether its reply ended or its work may have stalled, and the chats waiting for it); and each merge
+train (the branches on it and those waiting for the next). Each row names its chat, what it runs or
+waits to run, and for how long, and opens the chat; rows that wait are in the warning colour. Then
+every reservation this computer's history kept (`pc_history`,
 read whole, newest first): together, how many measurements, how many ran beside other work, how
 long they waited to start and how long other chats waited; and each one with how long it waited
 and measured, whether it ran beside other work and what that was, what kept its window closed,

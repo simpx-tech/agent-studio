@@ -526,7 +526,9 @@ async fn call(context: &Context, args: &Value, activity: Option<&str>) -> Result
         } else {
             "pc_wait"
         };
-        if let Some(reason) = broker.gate_call(&context.conversation_id, &server, activity, wait) {
+        if let Some(reason) =
+            broker.gate_call(&context.conversation_id, &server, &tool, activity, wait)
+        {
             return Err(reason);
         }
     }

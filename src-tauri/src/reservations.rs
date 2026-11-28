@@ -150,10 +150,48 @@ pub struct Snapshot {
     /// Chats waiting in `pc_wait` for a reservation of the computer to end, which their rows in
     /// the sidebar mark (requested 2026-11-26).
     pub waiting: Vec<String>,
+    /// The same waits, each with when it began and what its chat asked to run that waits for the
+    /// reservation to end, which the waiting chat's card and the Reservations window say
+    /// (requested 2026-11-28: "I can't know what they're waiting or who they're waiting").
+    pub waits: Vec<WaitView>,
     /// The memory chats' builds and runs hold now (`builds::grant`).
     pub grants: Vec<GrantView>,
     /// Repositories' merge trains: the cars waiting and the train running (`train`).
     pub trains: Vec<TrainView>,
+    /// While builds or runs wait for room: the builds running now, how many run at once here and
+    /// the memory new work may start on, which say what they wait for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub builds: Option<BuildsView>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitView {
+    pub conversation_id: String,
+    /// When its wait began.
+    pub since: u64,
+    /// The command or MCP tool call the reservation refused the chat last, which it runs again
+    /// once the reservation ends.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuildsView {
+    /// Chats' builds running now, then builds of others their compilers show.
+    pub running: Vec<RunningView>,
+    /// How many builds run at once here (`builds::slots`).
+    pub slots: usize,
+    /// Free memory less what the work granted and not started yet will take, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available: Option<u64>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunningView {
+    /// The chat whose build it is; none for a build outside Agent Studio, which `label` names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    pub label: String,
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -188,6 +226,9 @@ pub struct GrantView {
     pub weight: &'static str,
     pub bytes: u64,
     pub since: u64,
+    /// The work that took it: its call's description and command.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -222,6 +263,14 @@ pub struct SlotView {
     /// A slot is free for it, until its build starts.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub granted: bool,
+    /// Why it waits, as it was last refused: `line` (builds before it), `slots` (as many builds
+    /// run as run at once here), `memory` (too little free beside them), `ramp` (the last build
+    /// is still taking its memory), `compilers` (room for two compilers) or `room` (what a run or
+    /// a build of a few files needs free).
+    pub why: &'static str,
+    /// The free memory it needs to start, where it waits for memory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub need: Option<u64>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -257,6 +306,8 @@ pub struct Blocker {
     /// A chat asked to hand over what it holds, rather than a command.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub hand_over: bool,
+    /// Since when it keeps the window closed.
+    pub since: u64,
 }
 
 /// A report on a reservation that ended, for the chat that held it and the history.
@@ -356,6 +407,9 @@ struct State {
     outcomes: HashMap<String, String>,
     /// Records for the history that the next `flush` writes: waits for a slot that ended.
     pending: Vec<Value>,
+    /// While builds or runs wait for room: what the last look found builds running, for the
+    /// window (`note_builds`).
+    building: Option<BuildsView>,
     next: u64,
     ticking: bool,
 }
@@ -457,6 +511,8 @@ struct Grant {
     signature: Option<String>,
     base: Option<u64>,
     peak: u64,
+    /// The work that took it, for the window: its command, then its call's label once reported.
+    label: Option<String>,
 }
 /// A build running on the computer now.
 struct Running {
@@ -550,6 +606,8 @@ struct Reservation {
     refused: u32,
     /// Those commands' calls, which its report leaves out of what ran.
     refused_calls: HashSet<String>,
+    /// What each chat it refused asked to run last, which the window shows beside its wait.
+    wanted: HashMap<String, String>,
     /// Chats it asked to hand over what they hold.
     asks: Vec<Ask>,
     /// Programs chats stopped while it held the computer.
@@ -991,14 +1049,13 @@ impl Broker {
                         read,
                     },
                 );
-                // The call that took its chat's grant holds it.
+                // The call that took its chat's grant holds it, and names it.
                 if weight.is_some() {
-                    if let Some(grant) = state
-                        .grants
-                        .get_mut(&run.conversation)
-                        .filter(|g| g.call.is_none() && !g.ended)
-                    {
+                    if let Some(grant) = state.grants.get_mut(&run.conversation).filter(|g| {
+                        (g.call.is_none() && !g.ended) || g.call.as_deref() == Some(&tool.id)
+                    }) {
                         grant.call = Some(tool.id.clone());
+                        grant.label = Some(label_of(tool));
                     }
                 }
             } else {
@@ -1078,6 +1135,17 @@ impl Broker {
             let available = available(state, reading, owners);
             let cores = reading.map_or_else(cores, |r| r.cores);
             changed |= Self::grant_slots(state, running.len(), available, cores, now);
+            // What the slots kept will take is not free for the work still waiting.
+            let kept: u64 = state
+                .slots
+                .iter()
+                .filter(|w| w.granted.is_some())
+                .map(|w| w.bytes)
+                .sum();
+            let left = available.map(|a| a.saturating_sub(kept));
+            changed |= note_builds(state, &running, cores, left);
+        } else if state.building.take().is_some() {
+            changed = true;
         }
         let rides = self.depart(state, now);
         changed |= !rides.is_empty();
@@ -1701,6 +1769,7 @@ impl Broker {
                     others: vec![],
                     refused: 0,
                     refused_calls: HashSet::new(),
+                    wanted: HashMap::new(),
                     asks: vec![],
                     stopped: prepared,
                     frozen: vec![],
@@ -2334,7 +2403,16 @@ impl Broker {
         let own = light::own(command);
         let light = light::is_light(&own);
         let renders = !light && builds::renders(&own);
-        if let Some(reason) = self.hold(conversation, light, renders, Asked::Command, call, wait) {
+        let asked = || command_label(&own);
+        if let Some(reason) = self.hold(
+            conversation,
+            light,
+            renders,
+            Asked::Command,
+            call,
+            wait,
+            asked,
+        ) {
             return Some(reason);
         }
         let weight = (!light).then(|| builds::weight(&own)).flatten()?;
@@ -2386,6 +2464,7 @@ impl Broker {
                     kept.signature,
                     None,
                 );
+                name_grant(&mut state, conversation, call, command);
                 let snapshot = self.view(&state);
                 drop(state);
                 self.flush();
@@ -2469,6 +2548,7 @@ impl Broker {
                     signature,
                     base,
                 );
+                name_grant(&mut state, conversation, call, command);
                 let snapshot = self.view(&state);
                 drop(state);
                 self.flush();
@@ -2476,13 +2556,10 @@ impl Broker {
                 self.look();
                 return None;
             }
-            // It never ran, though Claude Code reported it as started.
-            if let Some(call) = call {
-                state.refused.insert(call.into());
-                for run in state.runs.values_mut() {
-                    run.calls.remove(call);
-                }
-            }
+            // It never ran, though Claude Code reported it as started, its description with it.
+            let label = refused_call(&mut state, call)
+                .filter(|reported| reported.contains('`'))
+                .unwrap_or_else(|| command_label(command));
             // What the work started before it holds and has not taken yet, which is not free.
             let held = free
                 .zip(available)
@@ -2575,10 +2652,11 @@ impl Broker {
                 Some(waiting) => {
                     waiting.why = code;
                     waiting.need = need;
+                    waiting.label = label;
                 }
                 None => state.slots.push(SlotWait {
                     conversation: conversation.into(),
-                    label: command_label(command),
+                    label,
                     weight,
                     since: now,
                     since_at: epoch_ms(),
@@ -2589,6 +2667,7 @@ impl Broker {
                     why: code,
                 }),
             }
+            note_builds(&mut state, &running, cores, available);
             let list = running
                 .iter()
                 .map(|build| match &build.conversation {
@@ -2658,6 +2737,7 @@ impl Broker {
                 signature,
                 base,
                 peak: 0,
+                label: None,
             },
         );
         if let Some(folder) = self.grants_folder() {
@@ -2872,14 +2952,20 @@ impl Broker {
         &self,
         conversation: &str,
         server: &str,
+        tool: &str,
         call: Option<&str>,
         wait: &str,
     ) -> Option<String> {
         let light = server == "agent_studio" || light::remote_server(server);
+        let asked = || format!("{} of {}", shortened(tool, 80), shortened(server, 80));
         // A server here may drive a program that renders, as unreal-mcp drives an editor's.
-        self.hold(conversation, light, !light, Asked::Tool, call, wait)
+        self.hold(conversation, light, !light, Asked::Tool, call, wait, asked)
     }
 
+    /// Whether `conversation`'s command or tool call waits for the reservation holding the
+    /// computer: the reason to give, or None. `label` names what it asked to run, where its call
+    /// was not reported before the gate.
+    #[allow(clippy::too_many_arguments)]
     fn hold(
         &self,
         conversation: &str,
@@ -2888,6 +2974,7 @@ impl Broker {
         asked: Asked,
         call: Option<&str>,
         wait: &str,
+        label: impl FnOnce() -> String,
     ) -> Option<String> {
         let (reason, snapshot) = {
             let mut state = self.lock();
@@ -2910,12 +2997,11 @@ impl Broker {
             if call.is_none_or(|call| first.refused_calls.insert(call.into())) {
                 first.refused += 1;
             }
-            if let Some(call) = call {
-                state.refused.insert(call.into());
-                for run in state.runs.values_mut() {
-                    run.calls.remove(call);
-                }
-            }
+            // As Claude Code reported it before it asked: a first report may lack its command.
+            let label = refused_call(&mut state, call)
+                .filter(|reported| matches!(asked, Asked::Tool) || reported.contains('`'))
+                .unwrap_or_else(label);
+            state.queue[0].wanted.insert(conversation.into(), label);
             let reason = self.refusal(&state.queue[0], asked, wait);
             (reason, self.settled(&mut state, Instant::now()))
         };
@@ -3249,7 +3335,36 @@ impl Broker {
             .map(|w| w.conversation.as_str())
             .collect();
         let lull = self.settings().lull();
+        let now = Instant::now();
+        let now_ms = epoch_ms();
+        // When something that began at `at` began, on the window's clock.
+        let at_ms = |at: Instant| now_ms.saturating_sub(ms(now.saturating_duration_since(at)));
         Snapshot {
+            waits: {
+                // Each chat's earliest wait, with what the reservation refused it last.
+                let mut waits: Vec<WaitView> = vec![];
+                for wait in state.waits.iter().filter(|w| w.until.is_none()) {
+                    let since = at_ms(wait.from);
+                    match waits
+                        .iter_mut()
+                        .find(|w| w.conversation_id == wait.conversation)
+                    {
+                        Some(known) => known.since = known.since.min(since),
+                        None => waits.push(WaitView {
+                            conversation_id: wait.conversation.clone(),
+                            since,
+                            label: state
+                                .queue
+                                .first()
+                                .and_then(|first| first.wanted.get(&wait.conversation))
+                                .cloned(),
+                        }),
+                    }
+                }
+                waits.sort_by_key(|w| w.since);
+                waits
+            },
+            builds: state.building.clone().filter(|_| !state.slots.is_empty()),
             turns: state
                 .turns
                 .iter()
@@ -3279,6 +3394,12 @@ impl Broker {
                     weight: w.weight.name(),
                     since: w.since_at,
                     granted: w.granted.is_some(),
+                    why: w.why,
+                    need: match w.weight {
+                        builds::Weight::Run => Some(w.need),
+                        builds::Weight::Light => Some(builds::LIGHT_FREE),
+                        builds::Weight::Build => (w.why == "memory").then_some(builds::BESIDE_FREE),
+                    },
                 })
                 .collect(),
             reservations: state
@@ -3313,6 +3434,7 @@ impl Broker {
                                 conversation_id: s.conversation.clone(),
                                 label: s.label.clone(),
                                 hand_over: s.key.starts_with("ask:"),
+                                since: at_ms(s.from),
                             })
                             .collect()
                     } else {
@@ -3335,6 +3457,7 @@ impl Broker {
                         weight: grant.weight.name(),
                         bytes: grant.bytes,
                         since: grant.at_ms,
+                        label: grant.label.clone(),
                     })
                     .collect();
                 grants.sort_by_key(|g| g.since);
@@ -4421,6 +4544,9 @@ impl Broker {
             state.last_build = Some(now);
             slot_wait_ended(state, &kept, "started");
             self.hold_grant(state, &id, kept.weight, kept.bytes, now, None, None);
+            if let Some(grant) = state.grants.get_mut(&id) {
+                grant.label = Some(kept.label.clone());
+            }
             state.next += 1;
             let ride_id = format!("train-{}", state.next);
             let dir = self
@@ -4973,6 +5099,55 @@ fn running_builds(
 /// The computer's cores, where no reading tells them.
 fn cores() -> u32 {
     std::thread::available_parallelism().map_or(1, |n| n.get() as u32)
+}
+
+/// A call the gate refused, which Claude Code reported as started before it asked the gate: it
+/// never ran, so it counts for nothing until it ends. Returns the label it was reported with.
+fn refused_call(state: &mut State, call: Option<&str>) -> Option<String> {
+    let call = call?;
+    state.refused.insert(call.into());
+    let mut label = None;
+    for run in state.runs.values_mut() {
+        if let Some(removed) = run.calls.remove(call) {
+            label = Some(removed.label);
+        }
+    }
+    label
+}
+
+/// Names the grant `conversation`'s work just took, for the window: by its call when Claude Code
+/// reported it before asking the gate, with its description, else by `command`.
+fn name_grant(state: &mut State, conversation: &str, call: Option<&str>, command: &str) {
+    let reported = call
+        .and_then(|call| state.runs.values().find_map(|run| run.calls.get(call)))
+        .map(|call| call.label.clone())
+        .filter(|label| label.contains('`'));
+    if let Some(grant) = state.grants.get_mut(conversation) {
+        grant.label = Some(reported.unwrap_or_else(|| command_label(command)));
+    }
+}
+
+/// Notes the builds running now, how many run at once here and the memory new work may start on
+/// (`available`), which the window shows while builds or runs wait for room. Returns whether that
+/// changed enough to show again: memory moves all the time, so only by half a gigabyte.
+fn note_builds(state: &mut State, running: &[Running], cores: u32, available: Option<u64>) -> bool {
+    let view = BuildsView {
+        running: running
+            .iter()
+            .map(|build| RunningView {
+                conversation_id: build.conversation.clone(),
+                label: build.label.clone(),
+            })
+            .collect(),
+        slots: builds::slots(cores),
+        available,
+    };
+    let step = |view: &BuildsView| view.available.map(|bytes| bytes / (512 << 20));
+    let changed = state.building.as_ref().is_none_or(|was| {
+        was.running != view.running || was.slots != view.slots || step(was) != step(&view)
+    });
+    state.building = Some(view);
+    changed
 }
 
 /// A command as a label: its first line of its own, in backticks.

@@ -391,7 +391,7 @@ fn decide(
     call: Option<&str>,
 ) -> Option<String> {
     match crate::protocol::activity::mcp_tool(tool) {
-        Some((server, _)) => broker.gate_call(chat, server, call, "pc_wait"),
+        Some((server, called)) => broker.gate_call(chat, server, called, call, "pc_wait"),
         None if tool.starts_with("mcp__") => None,
         None => broker.gate(chat, command, call, "pc_wait"),
     }

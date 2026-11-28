@@ -27,18 +27,23 @@
     pcHandingOver,
     pcOutcome,
     pcOwner,
+    pcSlotReason,
     pcTotals,
     pcTurnEnd,
     pcTurnGroups,
     pcTurnNote,
     pcWaited,
+    type PcBuilds,
+    type PcGrant,
     type PcRecord,
     type PcReservation,
     type PcSlot,
     type PcTrain,
     type PcTurn,
     type PcTurnRecord,
+    type PcWait,
   } from '$lib/pc-reservations';
+  import { toolElapsed } from '$lib/activity';
   import { formatReplyTime } from '$lib/replies';
   import { formatBytes } from '$lib/tool-output';
   import { readPcHistory } from '$lib/transport';
@@ -48,6 +53,10 @@
     turns = [],
     slots = [],
     trains = [],
+    waiting = [],
+    waits = [],
+    grants = [],
+    builds,
     title,
     opens,
     open,
@@ -61,6 +70,12 @@
     slots?: PcSlot[];
     /** Repositories' merge trains, the cars on the train running first. */
     trains?: PcTrain[];
+    /** Chats waiting in pc_wait for the computer, and the same with what each asked to run. */
+    waiting?: string[];
+    waits?: PcWait[];
+    /** The memory builds and runs hold, and the builds running while others wait for room. */
+    grants?: PcGrant[];
+    builds?: PcBuilds;
     /** A chat's title. */
     title: (conversationId: string) => string;
     /** Whether a chat can be opened from here. */
@@ -142,10 +157,52 @@
     reservation.phase === 'open'
       ? 'Measuring'
       : reservation.phase === 'draining'
-        ? 'Holding'
+        ? 'Waiting to start'
         : reservation.phase === 'lull'
           ? 'Waiting for a lull'
           : 'In line';
+  // How long ago something began, as a running reply counts it.
+  const ago = (at?: number) => (at == null ? '' : toolElapsed(Math.max(0, clock.now - at)));
+  const plain = (label: string) => label.replace(/`/g, '');
+  const clockTime = (at: number) =>
+    new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  // What the measurement holding the computer means for other chats now.
+  const stateText = (reservation: PcReservation) => {
+    const held =
+      reservation.scope === 'gpu'
+        ? "Other chats' games, editors and browser tests wait"
+        : "Other chats' new commands and tool calls wait";
+    if (reservation.phase === 'open')
+      return `${held} until it releases the computer${reservation.minutes ? `, in about ${Math.round(reservation.minutes)} min` : ''}.`;
+    if (reservation.phase === 'draining') return `${held}. It measures once the work below ends.`;
+    return reservation.holdsAt != null
+      ? `Other chats work on until none runs heavy work, or until ${clockTime(reservation.holdsAt)}.`
+      : 'Other chats work on until none runs heavy work.';
+  };
+  const weights = {
+    build: 'A build',
+    light: 'A build of a few files',
+    run: 'A game or test run',
+  } as const;
+  // The chats waiting for the computer, with what each asked to run, earliest first.
+  const computerWaits = $derived<{ conversationId: string; since?: number; label?: string }[]>(
+    waits.length ? waits : waiting.map((conversationId) => ({ conversationId })),
+  );
+  // What builds and runs hold now: the work granted memory, then the builds no grant stands for,
+  // such as one outside Agent Studio.
+  const running = $derived.by(() => {
+    const list: { conversationId?: string; label: string; since?: number; bytes?: number }[] =
+      grants.map((grant) => ({
+        conversationId: grant.conversationId,
+        label: grant.label ?? weights[grant.weight],
+        since: grant.since,
+        bytes: grant.bytes,
+      }));
+    for (const build of builds?.running ?? [])
+      if (!build.conversationId || !grants.some((g) => g.conversationId === build.conversationId))
+        list.push({ conversationId: build.conversationId, label: build.label });
+    return list;
+  });
   const turnName = (turn: { name: string; landing: boolean }) =>
     turn.landing ? turn.name.replace(/^the landing of /, 'Landing of ') : turn.name;
   const since = (reservation: PcReservation) =>
@@ -187,6 +244,35 @@
     onclick={() => open(conversationId)}
     ><MessageSquare size={13} aria-hidden="true" />Open chat</button
   >
+{/snippet}
+
+<!-- One chat's work or wait in a live card: whose, what it runs or waits to run, for how long. -->
+{#snippet entry(
+  kind: 'wait' | 'work',
+  conversationId: string | undefined,
+  what: string | undefined,
+  since?: number,
+  extra?: string,
+)}
+  <li class="entry" class:waits-here={kind === 'wait'}>
+    {#if kind === 'wait'}<Hourglass size={13} aria-hidden="true" />{:else}<Cpu
+        size={13}
+        aria-hidden="true"
+      />{/if}
+    {#if conversationId}<span class="who" title={title(conversationId)}
+        >{title(conversationId)}</span
+      >{/if}
+    {#if what}<span class="what" title={plain(what)}>{@render label(what)}</span>{/if}
+    {#if extra}<span class="extra">{extra}</span>{/if}
+    {#if since != null}<span class="time">{ago(since)}</span>{/if}
+    {#if conversationId && opens(conversationId)}<button
+        type="button"
+        class="icon-button row-open"
+        title="Open chat"
+        aria-label={`Open ${title(conversationId)}`}
+        onclick={() => open(conversationId)}><MessageSquare size={13} /></button
+      >{/if}
+  </li>
 {/snippet}
 
 <dialog
@@ -529,168 +615,182 @@
         {/if}
       {/key}
     {:else}
-      {#if slots.length || groups.length || trains.length}
-        <section class="card" aria-labelledby="pc-queues">
-          <h3 id="pc-queues"><Users size={14} aria-hidden="true" />In line</h3>
-          <ul class="live">
-            {#each trains as train (train.id)}
-              <li>
-                <div class="live-head">
-                  <span class="tag" class:measuring={train.startedAt != null}
-                    ><GitMerge size={11} aria-hidden="true" />Merge train</span
-                  >
-                  <span class="name"
-                    >{train.repository}<span class="muted"
-                      >{' · '}{train.startedAt != null
-                        ? `landing ${plural(
-                            train.cars.filter((car) => car.riding).length,
-                            'branch',
-                            'branches',
-                          )}`
-                        : 'waits for the landing turn and a build slot'}</span
-                    ></span
-                  >
-                  {#if train.startedAt != null}<span class="time"
-                      >{formatReplyTime(Math.max(0, clock.now - train.startedAt))}</span
-                    >{/if}
-                </div>
-                <ul class="waits">
-                  {#each train.cars as car (car.id)}
-                    <li>
-                      {#if car.riding}<GitMerge size={12} aria-hidden="true" />{:else}<Hourglass
-                          size={12}
-                          aria-hidden="true"
-                        />{/if}{title(car.conversationId)}<span class="muted"
-                        >{' · '}<code>{car.branch}</code> · {car.purpose} · {car.riding
-                          ? 'on the train'
-                          : formatReplyTime(Math.max(0, clock.now - car.queuedAt))}</span
-                      >
-                    </li>
-                  {/each}
-                </ul>
-              </li>
-            {/each}
-            {#each groups as group (group.turns[0].id)}
-              <li>
-                <div class="live-head">
-                  <span class="tag" class:measuring={group.turns[0].grantedAt != null}
-                    >{#if group.turns[0].landing}<GitMerge
-                        size={11}
-                        aria-hidden="true"
-                      />{/if}{turnName(group.turns[0])}</span
-                  >
-                  <span class="name"
-                    >{group.turns[0].purpose}<span class="muted"
-                      >{' · '}{title(group.turns[0].conversationId)}</span
-                    >{#if pcTurnNote(group.turns[0], clock.now)}<span
-                        class="turn-note"
-                        class:stalled={group.turns[0].stalledAt != null &&
-                          group.turns[0].keptUntil == null}
-                        >{#if group.turns[0].keptUntil == null}<TriangleAlert
-                            size={11}
-                            aria-hidden="true"
-                          />{/if}{pcTurnNote(group.turns[0], clock.now)}</span
-                      >{/if}</span
-                  >
-                  <span class="time"
-                    >{formatReplyTime(
-                      Math.max(0, clock.now - (group.turns[0].grantedAt ?? group.turns[0].askedAt)),
-                    )}</span
-                  >
-                  {@render chat(group.turns[0].conversationId)}
-                </div>
-                {#if group.turns.length > 1}
-                  <ul class="waits">
-                    {#each group.turns.slice(1) as turn (turn.id)}
-                      <li>
-                        <Hourglass size={12} aria-hidden="true" />{title(turn.conversationId)}<span
-                          class="muted"
-                          >{' · '}{turn.purpose} · {formatReplyTime(
-                            Math.max(0, clock.now - turn.askedAt),
-                          )}</span
-                        >
-                      </li>
-                    {/each}
-                  </ul>
-                {/if}
-              </li>
-            {/each}
-            {#if slots.length}
-              <li>
-                <div class="live-head">
-                  <span class="tag"><Hammer size={11} aria-hidden="true" />Builds</span>
-                  <span class="name"
-                    >{slots.length}
-                    {slots.length === 1 ? 'build waits' : 'builds wait'} for a slot</span
-                  >
-                </div>
-                <ul class="waits">
-                  {#each slots as slot (slot.conversationId)}
-                    <li>
-                      <Hourglass size={12} aria-hidden="true" />{title(slot.conversationId)}<span
-                        class="muted"
-                        >{' · '}{@render label(slot.label)} · {slot.granted
-                          ? 'slot kept'
-                          : formatReplyTime(Math.max(0, clock.now - slot.since))}</span
-                      >
-                    </li>
-                  {/each}
-                </ul>
-              </li>
-            {/if}
-          </ul>
+      <!-- What is waited for now, one card each: who holds it, what that holder waits on, and
+           who waits for it with what they asked to run (requested 2026-11-28: "I can't know what
+           they're waiting or who they're waiting"). -->
+      {#if reservations.length}
+        {@const first = reservations[0]}
+        {@const queued = reservations.slice(1)}
+        <section class="card resource" aria-labelledby="pc-computer">
+          <h3 id="pc-computer"><Gauge size={14} aria-hidden="true" />The computer</h3>
+          <div class="live-head">
+            <span class="tag" class:measuring={first.phase === 'open'}>{phase(first)}</span>
+            <span class="name" title={title(first.conversationId)}
+              ><span class="muted">{'Reserved by '}</span>{title(
+                first.conversationId,
+              )}{#if first.scope === 'gpu'}<span class="muted">{' · '}GPU work only</span
+                >{/if}</span
+            >
+            <span class="time" title={first.phase === 'open' ? 'Measuring for' : 'Reserved for'}
+              >{since(first)}</span
+            >
+            {@render chat(first.conversationId)}
+          </div>
+          <p class="purpose-line">{first.purpose}</p>
+          <p class="state-line">{stateText(first)}</p>
+          {#if first.phase !== 'open' && first.waitingFor.length}
+            <h4>Its measurement waits for</h4>
+            <ul class="entries">
+              {#each first.waitingFor as blocker, index (index)}
+                {@render entry(
+                  'work',
+                  blocker.conversationId,
+                  blocker.handOver ? undefined : blocker.label,
+                  blocker.since,
+                  blocker.handOver ? 'Asked to hand over what it holds' : undefined,
+                )}
+              {/each}
+            </ul>
+          {/if}
+          {#if computerWaits.length}
+            <h4>Waiting for it · {computerWaits.length}</h4>
+            <ul class="entries">
+              {#each computerWaits as wait (wait.conversationId)}
+                {@render entry('wait', wait.conversationId, wait.label, wait.since)}
+              {/each}
+            </ul>
+          {/if}
+          {#if queued.length}
+            <h4>Next to reserve it · {queued.length}</h4>
+            <ul class="entries">
+              {#each queued as reservation (reservation.id)}
+                {@render entry(
+                  'wait',
+                  reservation.conversationId,
+                  reservation.purpose,
+                  reservation.askedAt,
+                )}
+              {/each}
+            </ul>
+          {/if}
         </section>
       {/if}
 
-      {#if reservations.length}
-        <section class="card" aria-labelledby="pc-now">
-          <h3 id="pc-now"><Gauge size={14} aria-hidden="true" />Now</h3>
-          <ul class="live">
-            {#each reservations as reservation (reservation.id)}
-              <li>
-                <div class="live-head">
-                  <span class="tag" class:measuring={reservation.phase === 'open'}
-                    >{phase(reservation)}</span
-                  >
-                  <span class="name"
-                    >{reservation.purpose}<span class="muted"
-                      >{' · '}{title(
-                        reservation.conversationId,
-                      )}{#if reservation.scope === 'gpu'}{' · '}GPU work alone{/if}</span
-                    ></span
-                  >
-                  <span class="time">{since(reservation)}</span>
-                  {@render chat(reservation.conversationId)}
-                </div>
-                {#if reservation.waitingFor.length || reservation.held}
-                  <ul class="waits">
-                    {#each reservation.waitingFor as blocker, index (index)}
-                      <li>
-                        <Hourglass size={12} aria-hidden="true" />{title(
-                          blocker.conversationId,
-                        )}<span class="muted"
-                          >{#if blocker.handOver}{' · '}handing over{:else}{' · '}{@render label(
-                              blocker.label,
-                            )}{/if}</span
-                        >
-                      </li>
-                    {/each}
-                    {#if reservation.held}
-                      <li>
-                        <Users size={12} aria-hidden="true" />{plural(
-                          reservation.held,
-                          'chat waits',
-                          'chats wait',
-                        )}
-                      </li>
-                    {/if}
-                  </ul>
-                {/if}
-              </li>
-            {/each}
-          </ul>
+      {#if slots.length || running.length}
+        <section class="card resource" aria-labelledby="pc-builds">
+          <h3 id="pc-builds">
+            <Hammer size={14} aria-hidden="true" />Builds and runs{#if builds}<span
+                class="muted heading-facts"
+                >{' · '}{plural(builds.slots, 'build', 'builds')} at once{#if builds.available != null}{' · '}{formatBytes(
+                    builds.available,
+                  )} free{/if}</span
+              >{/if}
+          </h3>
+          {#if running.length}
+            <h4>Running · {running.length}</h4>
+            <ul class="entries">
+              {#each running as work, index (index)}
+                {@render entry(
+                  'work',
+                  work.conversationId,
+                  work.label,
+                  work.since,
+                  work.bytes ? formatBytes(work.bytes) : undefined,
+                )}
+              {/each}
+            </ul>
+          {/if}
+          {#if slots.length}
+            <h4>Waiting · {slots.length}</h4>
+            <ul class="entries">
+              {#each slots as slot (slot.conversationId)}
+                {@render entry(
+                  'wait',
+                  slot.conversationId,
+                  slot.label,
+                  slot.since,
+                  slot.granted ? 'Room kept for it' : pcSlotReason(slot, slots, builds),
+                )}
+              {/each}
+            </ul>
+          {/if}
         </section>
       {/if}
+
+      {#each groups as group (group.turns[0].id)}
+        {@const holder = group.turns.find((turn) => turn.grantedAt != null)}
+        {@const queuedTurns = group.turns.filter((turn) => turn.grantedAt == null)}
+        {@const note = holder ? pcTurnNote(holder, clock.now) : undefined}
+        <section class="card resource" aria-label={turnName(group.turns[0])}>
+          <h3><GitMerge size={14} aria-hidden="true" />{turnName(group.turns[0])}</h3>
+          {#if holder}
+            <div class="live-head">
+              <span class="tag measuring">Held</span>
+              <span class="name" title={title(holder.conversationId)}
+                ><span class="muted">{'By '}</span>{title(holder.conversationId)}</span
+              >
+              <span class="time" title="Held for">{ago(holder.grantedAt)}</span>
+              {@render chat(holder.conversationId)}
+            </div>
+            <p class="purpose-line">{holder.purpose}</p>
+            {#if note}<p
+                class="turn-note"
+                class:stalled={holder.stalledAt != null && holder.keptUntil == null}
+              >
+                {#if holder.keptUntil == null}<TriangleAlert
+                    size={12}
+                    aria-hidden="true"
+                  />{/if}{note.charAt(0).toUpperCase() + note.slice(1)}
+              </p>{/if}
+          {/if}
+          {#if queuedTurns.length}
+            <h4>Waiting for it · {queuedTurns.length}</h4>
+            <ul class="entries">
+              {#each queuedTurns as turn (turn.id)}
+                {@render entry('wait', turn.conversationId, turn.purpose, turn.askedAt)}
+              {/each}
+            </ul>
+          {/if}
+        </section>
+      {/each}
+
+      {#each trains as train (train.id)}
+        {@const riding = train.cars.filter((car) => car.riding)}
+        {@const next = train.cars.filter((car) => !car.riding)}
+        <section class="card resource" aria-label={`Merge train of ${train.repository}`}>
+          <h3>
+            <GitMerge size={14} aria-hidden="true" />Merge train<span class="muted heading-facts"
+              >{' · '}{train.repository}</span
+            >
+          </h3>
+          <p class="state-line">
+            {train.startedAt != null
+              ? `Landing ${plural(riding.length, 'branch', 'branches')}: one merge, one pipeline, one push.`
+              : 'The next train waits for the landing turn and a build slot.'}
+          </p>
+          {#if riding.length}
+            <h4>On the train · {ago(train.startedAt)}</h4>
+            <ul class="entries">
+              {#each riding as car (car.id)}
+                {@render entry('work', car.conversationId, `\`${car.branch}\` ${car.purpose}`)}
+              {/each}
+            </ul>
+          {/if}
+          {#if next.length}
+            <h4>Waiting for the next · {next.length}</h4>
+            <ul class="entries">
+              {#each next as car (car.id)}
+                {@render entry(
+                  'wait',
+                  car.conversationId,
+                  `\`${car.branch}\` ${car.purpose}`,
+                  car.queuedAt,
+                )}
+              {/each}
+            </ul>
+          {/if}
+        </section>
+      {/each}
 
       {#if records.length}
         {@const top = longest(records.map(spent))}
@@ -780,7 +880,7 @@
           {@render more('turns', turnRecords.length, 10)}
         </section>
       {/if}
-      {#if !records.length && !turnRecords.length && loaded && !reservations.length && !turns.length && !slots.length}
+      {#if !records.length && !turnRecords.length && loaded && !reservations.length && !turns.length && !slots.length && !running.length && !trains.length}
         <p class="empty">{failed ? 'The history could not be read.' : 'No reservations yet.'}</p>
       {/if}
       {#if failed && records.length}<p class="empty">The history could not be read.</p>{/if}
@@ -1084,11 +1184,6 @@
     color: var(--text);
     font-variant-numeric: tabular-nums;
   }
-  .live {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
   .live-head {
     display: flex;
     align-items: center;
@@ -1097,6 +1192,87 @@
   }
   .live-head .name {
     flex: 1 1 auto;
+  }
+  /* What is waited for now, one card each: its holder, then who waits. */
+  .resource h3 {
+    flex-wrap: wrap;
+  }
+  .heading-facts {
+    font-size: var(--text-sm);
+  }
+  .purpose-line {
+    margin: 6px 0 0;
+    color: var(--text);
+    overflow-wrap: anywhere;
+  }
+  .state-line {
+    margin: 4px 0 0;
+    color: var(--text-secondary);
+  }
+  .resource h4 {
+    margin: 12px 0 5px;
+  }
+  .entries {
+    display: grid;
+    gap: 3px;
+  }
+  .entry {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+    min-height: 30px;
+    padding: 3px 4px 3px 9px;
+    border-radius: var(--radius-md);
+    background: var(--surface-2);
+  }
+  .entry > :global(svg) {
+    flex: none;
+    color: var(--text-muted);
+  }
+  /* A chat waiting, in the warning colour; work it waits on stays quiet. */
+  .entry.waits-here {
+    background: var(--warning-soft);
+  }
+  .entry.waits-here > :global(svg) {
+    color: var(--warning);
+  }
+  .who {
+    flex: 0 1 auto;
+    max-width: 38%;
+    overflow: hidden;
+    color: var(--text);
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .what {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-secondary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .extra {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: var(--text-xs);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .entry .time {
+    flex: none;
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+  }
+  .row-open {
+    flex: none;
+    width: 26px;
+    height: 26px;
+    color: var(--text-muted);
   }
   .tag {
     flex: 0 0 auto;
@@ -1119,35 +1295,15 @@
   }
   /* A held turn whose reply ended, or whose holder's work may have stalled. */
   .turn-note {
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    gap: 4px;
-    margin-inline-start: 8px;
+    gap: 5px;
+    margin: 4px 0 0;
     color: var(--text-secondary);
-    font-size: var(--text-xs);
   }
   .turn-note.stalled {
     color: var(--warning);
     font-weight: 600;
-  }
-  .waits {
-    display: flex;
-    flex-direction: column;
-    gap: 3px;
-    margin: 6px 0 0;
-    padding-inline-start: 4px;
-    color: var(--text-secondary);
-    font-size: var(--text-xs);
-  }
-  .waits li {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-  }
-  .waits :global(svg) {
-    flex: 0 0 auto;
-    color: var(--text-muted);
   }
   .show-more {
     margin-top: 10px;
@@ -1189,6 +1345,25 @@
     }
     .live-head {
       flex-wrap: wrap;
+    }
+    /* A row's chat and time first, what it runs and why below them. */
+    .entry {
+      flex-wrap: wrap;
+      row-gap: 0;
+      padding-block: 5px;
+    }
+    .who {
+      max-width: none;
+      flex: 1 1 auto;
+    }
+    .what,
+    .extra {
+      flex-basis: 100%;
+      order: 3;
+      padding-left: 21px;
+    }
+    .extra {
+      order: 4;
     }
   }
 </style>

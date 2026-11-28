@@ -31,7 +31,6 @@
   import { replyUsageLimit, savedLimitComment } from '$lib/usage-limits';
   import { continueLabel } from '$lib/auto-continue';
   import { clock as ticks } from '$lib/clock';
-  import { toolElapsed } from '$lib/activity';
   import { modelMark } from '$lib/model-marks';
   import ModelMark from './ModelMark.svelte';
   import { separateMemory, summarizeFileChanges, type SeparatedChanges } from '$lib/file-changes';
@@ -46,6 +45,8 @@
   import VisualizationView from './VisualizationView.svelte';
   import SentFilesView from './SentFilesView.svelte';
   import { messageFiles } from '$lib/sent-files';
+  import type { PcHold } from '$lib/pc-reservations';
+  import PcHoldCard from './PcHoldCard.svelte';
   import QuestionForm from './QuestionForm.svelte';
   import PlanApproval from './PlanApproval.svelte';
   import ProposedPlan from './ProposedPlan.svelte';
@@ -79,6 +80,7 @@
     openedSubagent,
     idle = false,
     onHold,
+    holdChats,
     switchAccount,
     continuation,
     openScreen,
@@ -118,11 +120,21 @@
     /** It runs, but its turn ended and it only waits for background work. */
     idle?: boolean;
     /**
-     * It waits on this computer: for the computer another chat reserved, a build slot, room for
-     * a game or test run, or its turn (src/lib/pc-reservations.ts, `pcWaitCard`), which a card
-     * of its own says under its heading (requested 2026-11-26).
+     * It waits on this computer: for the computer another chat reserved, its own measurement's
+     * window, a build slot, room for a game or test run, or its turn (src/lib/pc-reservations.ts,
+     * `pcHold`). A card in the warning colour says why and on whose work, in place of the row of
+     * the call that waits (pc_wait), else at the end of its live work, where a reader following
+     * the chat sees it; never above the work (requested 2026-11-28).
      */
-    onHold?: { heading: string; detail: string; since?: number };
+    onHold?: PcHold;
+    /** The chats such a card names: their titles, and opening one. */
+    holdChats?: {
+      self: string;
+      title: (conversationId: string) => string;
+      opens: (conversationId: string) => boolean;
+      open: (conversationId: string) => void;
+      openReservations?: () => void;
+    };
     /** Opens the Agent picker to choose another account for the next message. */
     switchAccount?: () => void;
     /**
@@ -165,6 +177,25 @@
         : ''),
   );
   const tools = $derived(replyTools(message));
+  // The call of the reply's own agent that waits on this computer now (pc_wait), whose row the
+  // card of what it waits for takes.
+  const waitCall = $derived(
+    onHold && message.status === 'running'
+      ? tools.findLast(
+          (tool) =>
+            tool.status === 'running' &&
+            !tool.parentId &&
+            (tool.operation === 'pcWait' || tool.name === 'Wait for the computer'),
+        )?.id
+      : undefined,
+  );
+  // A chat whose own measurement waits for its window waits only while it calls pc_wait; before
+  // that it may still build what it measures.
+  const hold = $derived(
+    onHold && message.status === 'running' && (onHold.kind !== 'window' || waitCall)
+      ? onHold
+      : undefined,
+  );
   // A /compact reply is its compaction; any other reply's are entries of its work.
   const parts = $derived(
     replyParts(blocks, tools, text, message.compact ? undefined : message.compactions, steers),
@@ -263,13 +294,13 @@
 {#snippet liveLabel()}
   <span
     class="live-label"
-    class:waiting={waiting || !!onHold}
-    class:idle={!waiting && !onHold && idle}
-    title={!waiting && !onHold && idle ? 'A message sent now goes at once.' : undefined}
-    >{#if waiting}<MessageCircleQuestionMark size={13} aria-hidden="true" />Waiting for you{:else if onHold}<Hourglass
+    class:waiting={waiting || (!!hold && !hold.ready)}
+    class:idle={!waiting && !hold && idle}
+    title={!waiting && !hold && idle ? 'A message sent now goes at once.' : undefined}
+    >{#if waiting}<MessageCircleQuestionMark size={13} aria-hidden="true" />Waiting for you{:else if hold}<Hourglass
         size={13}
         aria-hidden="true"
-      />{onHold.heading}{:else if idle}<Hourglass
+      />{hold.heading}{:else if idle}<Hourglass
         size={13}
         aria-hidden="true"
       />Waiting for background work{:else}<LoaderCircle
@@ -280,6 +311,17 @@
         ? 'Compacting context'
         : 'Responding'}{/if}</span
   >
+{/snippet}
+
+{#snippet holdCard()}
+  {#if hold}<PcHoldCard
+      {hold}
+      self={holdChats?.self}
+      title={holdChats?.title ?? (() => 'Another chat')}
+      opens={holdChats?.opens}
+      open={holdChats?.open}
+      openReservations={holdChats?.openReservations}
+    />{/if}
 {/snippet}
 
 <!-- What a reply shows after its work: its answer and everything that came with it. -->
@@ -567,20 +609,6 @@
             <strong>{replyModelName(message)}</strong>{#if began}<span>{began}</span
               >{/if}{#if last && message.status === 'running'}{@render liveLabel()}{/if}
           </div>
-          {#if last && message.status === 'running' && onHold}<div
-              class="hold-card"
-              role="status"
-              aria-label={`${onHold.heading}: ${onHold.detail}`}
-            >
-              <Hourglass size={20} aria-hidden="true" />
-              <div class="hold-text">
-                <strong>{onHold.heading}</strong>
-                <span>{onHold.detail}</span>
-              </div>
-              {#if onHold.since}<span class="hold-time"
-                  >{toolElapsed(Math.max(0, ticks.now - onHold.since))}</span
-                >{/if}
-            </div>{/if}
           {#if mismatch && index === opening}<p class="model-mismatch">
               <CircleAlert size={13} aria-hidden="true" />Ran {mismatch.ran} instead of {mismatch.picked}
             </p>{/if}
@@ -599,7 +627,11 @@
             openedSubagent={opened}
             {writing}
             scope={`${message.id}/${part.steer?.id ?? ''}`}
+            hold={hold && waitCall ? holdCard : undefined}
+            holdCall={waitCall}
           />
+          <!-- With no call of its own agent waiting, the card ends the reply's live work. -->
+          {#if last && hold && !waitCall}{@render holdCard()}{/if}
           {#if last}{@render outcome()}{/if}
         </div>
       {/if}

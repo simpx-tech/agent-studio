@@ -112,14 +112,17 @@
   import {
     pcBusy,
     pcChatState,
+    pcHold,
     pcName,
     pcQueueTitle,
     pcReservationTitle,
-    pcWaitCard,
+    type PcBuilds,
+    type PcGrant,
     type PcReservation,
     type PcSlot,
     type PcTrain,
     type PcTurn,
+    type PcWait,
   } from '$lib/pc-reservations';
   import {
     abandonedReplyError,
@@ -2131,10 +2134,14 @@
   // Named reservations, such as a repository's landing turn, and builds waiting for a slot.
   let pcTurns = $state<PcTurn[]>([]);
   let pcSlots = $state<PcSlot[]>([]);
-  // Chats waiting in pc_wait for a reservation of the computer to end.
+  // Chats waiting in pc_wait for a reservation of the computer to end, with what each asked to run.
   let pcWaiting = $state<string[]>([]);
+  let pcWaits = $state<PcWait[]>([]);
   // Repositories' merge trains: the branches chats queued with pc_land.
   let pcTrains = $state<PcTrain[]>([]);
+  // The memory builds and runs hold, and the builds running while others wait for room.
+  let pcGrants = $state<PcGrant[]>([]);
+  let pcBuilds = $state<PcBuilds>();
   // A chat's title, or a repository's merge train where its id stands for a chat's.
   const pcChatTitle = (id: string) =>
     pcName(id, (id) => workspace.conversations.find((c) => c.id === id)?.title || 'Another chat');
@@ -2144,10 +2151,28 @@
     turns: pcTurns,
     slots: pcSlots,
     waiting: pcWaiting,
+    waits: pcWaits,
     trains: pcTrains,
+    grants: pcGrants,
+    builds: pcBuilds,
   });
   // What the open chat waits for on this computer, a card in its running reply.
-  const activeHold = $derived(active ? pcWaitCard(pcNow, active.id, pcChatTitle) : undefined);
+  const activeHold = $derived(active ? pcHold(pcNow, active.id, pcChatTitle) : undefined);
+  // The chats that card names, which open from it.
+  const holdChats = $derived(
+    active
+      ? {
+          self: active.id,
+          title: pcChatTitle,
+          opens: (id: string) => workspace.conversations.some((c) => c.id === id),
+          open: (id: string) => {
+            const conversation = workspace.conversations.find((c) => c.id === id);
+            if (conversation) openConversation(conversation);
+          },
+          openReservations: () => (reservationsOpen = true),
+        }
+      : undefined,
+  );
   const pcShown = $derived(
     pcBusy({ reservations: pcReservations, turns: pcTurns, slots: pcSlots, trains: pcTrains }),
   );
@@ -3415,7 +3440,10 @@
       pcTurns = snapshot.turns;
       pcSlots = snapshot.slots;
       pcWaiting = snapshot.waiting;
+      pcWaits = snapshot.waits;
       pcTrains = snapshot.trains;
+      pcGrants = snapshot.grants;
+      pcBuilds = snapshot.builds;
     });
     const stopUsageRefresh = watchUsageRefresh(refreshUsageConnection);
     const stopNotificationView = watchNotificationView(
@@ -9113,6 +9141,7 @@
                     questionDrafts={m.runId ? questionDrafts[m.runId] : undefined}
                     idle={waitsForWork(m)}
                     onHold={m.status === 'running' ? activeHold : undefined}
+                    {holdChats}
                     background={messageBackgroundWork(m, hostBackground[active.id])}
                     {chatChanges}
                     folder={active.location?.path}
@@ -9785,6 +9814,10 @@
     turns={pcTurns}
     slots={pcSlots}
     trains={pcTrains}
+    waiting={pcWaiting}
+    waits={pcWaits}
+    grants={pcGrants}
+    builds={pcBuilds}
     title={pcChatTitle}
     opens={(id) => workspace.conversations.some((c) => c.id === id)}
     open={(id) => {

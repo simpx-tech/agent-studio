@@ -13,6 +13,7 @@
     Layers,
     PanelRightOpen,
   } from '@lucide/svelte';
+  import type { Snippet } from 'svelte';
   import { cubicOut } from 'svelte/easing';
   import type { TransitionConfig } from 'svelte/transition';
   import { SvelteSet } from 'svelte/reactivity';
@@ -71,6 +72,8 @@
     openedSubagent,
     writing,
     scope,
+    hold,
+    holdCall,
   }: {
     tools: ToolActivity[];
     replyStatus: Message['status'];
@@ -103,6 +106,12 @@
     writing?: ReadonlySet<string>;
     /** Names this work within its chat, which recalls what the reader opened in it. */
     scope?: string;
+    /**
+     * What the reply waits for on this computer, a card shown in place of the row of the call
+     * that waits for it (`holdCall`, a running pc_wait) while that call runs.
+     */
+    hold?: Snippet;
+    holdCall?: string;
   } = $props();
   let linkError = $state('');
   const labels = {
@@ -585,6 +594,7 @@
     {#each items as item (item.key)}
       <div class="live-item" out:fold>
         {#if item.kind === 'summary'}{@render groupRow(key, item.tools, item.tools, true)}
+        {:else if item.kind === 'call' && hold && item.tool.id === holdCall && toolDisplayStatus(item.tool, replyStatus) === 'running'}{@render hold()}
         {:else if item.kind === 'call'}{@render liveRow(item.tool)}
         {:else}<p class="live-more">{item.count} more running</p>{/if}
       </div>
