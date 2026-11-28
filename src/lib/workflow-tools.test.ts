@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { readDefinition } from './workflow-model';
-import { generalCall, type StoreAccess } from './workflow-tools';
+import { generalCall, statusWait, type StoreAccess } from './workflow-tools';
 import type { WorkflowHost } from './workflow-engine';
 
 // The general workflow tools as an agent calls them (docs/WORKFLOWS.md), on a store in memory.
@@ -86,5 +86,18 @@ describe('workflow_save', () => {
       saved,
       new Date('2026-10-19T13:00:00Z').toISOString(),
     ]);
+  });
+});
+
+describe('workflow_status', () => {
+  it('waits for its run only when asked to, with input it accepts', () => {
+    const id = crypto.randomUUID();
+    expect(statusWait({ id, wait: true })).toBe(id);
+    expect(statusWait({ id })).toBeUndefined();
+    expect(statusWait({ id, wait: false })).toBeUndefined();
+    // Input the tool refuses is answered as an error, never held.
+    expect(statusWait({ id, wait: 'yes' })).toBeUndefined();
+    expect(statusWait({ id, wait: true, extra: 1 })).toBeUndefined();
+    expect(statusWait(undefined)).toBeUndefined();
   });
 });

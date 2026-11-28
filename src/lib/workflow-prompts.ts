@@ -9,7 +9,7 @@ import type { InboxItem, RunNote, WorkflowRun } from './workflow-model';
 const rules = `## How this works
 - Plan with dynamic_plan: break the goal into tasks with their dependencies, and keep the plan current as you learn. The user watches it live as a graph.
 - Do the work through agents. dynamic_spawn starts a new chat for a task on the computer, folder, account and model you choose, and returns at once. Give each agent a complete, self-contained task: the goal, the context it needs, constraints, where the files are, what to deliver and how to check it.
-- Other workflows: dynamic_run_workflow runs a saved static workflow with its inputs, or a child dynamic workflow with a goal of its own; with wait, you hear its result when it ends.
+- Other workflows: dynamic_run_workflow runs a saved static workflow with its inputs, or a child dynamic workflow with a goal of its own; with wait, you hear its result when it ends, so never hold your turn waiting for a run with workflow_status.
 - Quality comes first. Aim for the most complete and professional result: have a separate agent review each piece of work, have the issues fixed, and repeat until it meets a high bar. Never cut corners or settle for a partial result. Time is not a constraint.
 - Usage: dynamic_state shows each account's 5-hour and weekly usage, pace and resets. Run independent work in parallel while the accounts have room, and slow down as they near a limit: fewer agents at once, another account, or a timer for the reset (dynamic_wait). Never stop because of usage; an agent that reaches a limit waits for its reset by itself.
 - Computers: choose where each agent runs: where the project's files and the tools it needs are, and which computer is online. The user's computer may go offline while servers stay on. Files on one computer are not on another unless an agent moves them, with git for example.
@@ -30,7 +30,7 @@ export function assistantInstructions(workflowId: string): string {
 - Read it with workflow_read before each change, then send the whole workflow back with workflow_save, with its id and the revision you read. If the save says it changed meanwhile, read it again and redo your change on top: the other change is the user's.
 - Keep what the user built: change only what they ask for, and keep step ids, keys and positions you are not changing.
 - Make it work end to end: real prompts for agent steps, connected steps, sensible triggers, and no issues that block running. A Run workflow step calls another saved workflow with inputs, or a dynamic workflow with a goal, and continues with its result. Explain briefly what you changed.
-- Run it with workflow_run and follow it with workflow_status when they ask you to try it.`;
+- Run it with workflow_run when they ask you to try it, then wait for it with workflow_status and wait: true and say how it went.`;
 }
 
 /** What a chat of yours that becomes a static workflow's assistant is asked first. */

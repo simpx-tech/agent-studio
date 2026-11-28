@@ -291,6 +291,19 @@ async function host(
             localStorage.setItem('fixture-sync', JSON.stringify(w.studioCheckpoint(before, args)));
             return;
           }
+          // This computer's own workflow store (src-tauri/src/workflow_files.rs).
+          if (command.startsWith('workflow_file_')) {
+            const files: Record<string, string> = JSON.parse(
+              localStorage.getItem('fixture-workflow-files') ?? '{}',
+            );
+            if (command === 'workflow_file_names') return Object.keys(files);
+            if (command === 'workflow_file_read') return files[args.name] ?? null;
+            if (command === 'workflow_file_write') files[args.name] = args.text;
+            if (command === 'workflow_file_remove') delete files[args.name];
+            localStorage.setItem('fixture-workflow-files', JSON.stringify(files));
+            return;
+          }
+          if (command === 'pending_workflow_calls') return [];
           if (command === 'relay_resume') return localStorage.getItem('fixture-relay-origin');
           if (command === 'relay_connect') {
             localStorage.setItem('fixture-relay-origin', args.url);
@@ -1777,6 +1790,65 @@ test('an account’s color is the same on every computer, and a choice made on o
   } finally {
     await a.close();
     await b.close();
+    await new Promise((resolve) => relay.close(resolve));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('a desktop that reaches the relay after it started reads the relay’s workflows', async ({
+  browser,
+}) => {
+  // 2026-11-28: the store was named while the connection was being made, when the page still
+  // found no relay, so a desktop that paired, or reconnected after starting without its relay,
+  // answered workflow_list from its own empty store until the relay's store changed.
+  test.setTimeout(60_000);
+  const directory = mkdtempSync(join(tmpdir(), 'agent-studio-e2e-'));
+  const token = 'synthetic-relay-key-for-browser-checks-123456';
+  const relay = createRelay({ token, directory });
+  await new Promise<void>((resolve) => relay.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(relay.address() as { port: number }).port}`;
+  const context = await browser.newContext();
+  try {
+    // A workflow another device saved on the relay, which nothing changes afterwards.
+    const at = new Date().toISOString();
+    const saved = await fetch(`${url}/v1/workflows/${crypto.randomUUID()}`, {
+      method: 'PUT',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'x-environment-id': crypto.randomUUID(),
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        kind: 'definition',
+        expected: null,
+        body: {
+          name: 'Quarter logs',
+          description: '',
+          graph: { nodes: [], edges: [] },
+          runsOn: '',
+          elsewhere: true,
+          createdAt: at,
+          updatedAt: at,
+          createdBy: { kind: 'user' },
+          updatedBy: { kind: 'user' },
+        },
+        events: [],
+      }),
+    });
+    expect(saved.status).toBe(200);
+    const page = await context.newPage();
+    await host(page, url, token, 'Desktop', 'windows');
+    await page.getByRole('button', { name: 'Set up sync', exact: true }).click();
+    await page.getByLabel('Relay URL', { exact: true }).fill(url);
+    await page.getByLabel('Relay pairing key', { exact: true }).fill(token);
+    await page.getByRole('button', { name: 'Pair & sync', exact: true }).click();
+    await expect(page.getByText(/^Synced /)).toBeVisible({ timeout: 15_000 });
+    await page.getByRole('tab', { name: /^Workflow/ }).click();
+    await expect(page.getByRole('list', { name: 'Workflows' })).toContainText('Quarter logs', {
+      timeout: 15_000,
+    });
+  } finally {
+    await context.close();
     await new Promise((resolve) => relay.close(resolve));
     rmSync(directory, { recursive: true, force: true });
   }

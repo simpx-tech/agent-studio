@@ -900,6 +900,9 @@ export function toolVisual(
   )
     return { icon: 'question', title: tool.name };
   if (tool.name === 'Workflow') return { icon: 'workflow', title: tool.name, detail: tool.detail };
+  // Agent Studio's own workflows, which a chat builds, runs and waits for.
+  if (tool.operation === 'workflow' || tool.operation === 'workflowWait')
+    return { icon: 'workflow', title: tool.name, detail: tool.detail };
   if (['visualize', 'mcp__agent_studio__visualize'].includes(tool.name))
     return { icon: 'chart', title: 'Visualize' };
   // The files a reply shows, alone or side by side.

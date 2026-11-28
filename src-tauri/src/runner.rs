@@ -1080,6 +1080,8 @@ async fn stream_turn(
                     process.healthy = false; break Err(send_failed.into());
                 }
                 steering.insert(delivery.input.id.clone(), delivery);
+                // The CLI reads it once the running call returns: a wait for a workflow run ends.
+                questions.as_ref().unwrap().workflow.end_waits(crate::providers::workflow_calls::WAIT_INTERRUPTED);
             },
             Some(delivery) = async { match workflow_rx { Some(rx) => rx.recv().await, None => std::future::pending().await } }, if !interrupting => {
                 let q = &questions.as_ref().unwrap().workflow;

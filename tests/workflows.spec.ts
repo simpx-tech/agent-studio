@@ -26,8 +26,8 @@ async function reply(page: Page, runId: string, text: string, status = 'complete
     { runId, text, status },
   );
 }
-/** Sends a workflow tool call as the host would, and waits for the page's answer. */
-async function call(page: Page, request: Request, tool: string, input: unknown) {
+/** Sends a workflow tool call as the host would, without waiting for its answer. */
+async function emitCall(page: Page, request: Request, tool: string, input: unknown) {
   const id = crypto.randomUUID();
   await page.evaluate((call) => (window as any).emitTauriEvent('studio-workflow-call', call), {
     id,
@@ -38,18 +38,19 @@ async function call(page: Page, request: Request, tool: string, input: unknown) 
     input,
     mission: request.mission ?? null,
   });
-  await expect
-    .poll(() =>
-      page.evaluate(
-        (id) => ((window as any).workflowAnswers ?? []).find((a: any) => a.id === id),
-        id,
-      ),
-    )
-    .toBeTruthy();
-  return page.evaluate(
+  return id;
+}
+/** The page's answer to a call, once it gave one. */
+const answerOf = (page: Page, id: string) =>
+  page.evaluate(
     (id) => ((window as any).workflowAnswers ?? []).find((a: any) => a.id === id),
     id,
-  ) as Promise<{ text: string; error: boolean }>;
+  ) as Promise<{ text: string; error: boolean } | undefined>;
+/** Sends a workflow tool call as the host would, and waits for the page's answer. */
+async function call(page: Page, request: Request, tool: string, input: unknown) {
+  const id = await emitCall(page, request, tool, input);
+  await expect.poll(() => answerOf(page, id)).toBeTruthy();
+  return (await answerOf(page, id))!;
 }
 async function send(page: Page, text: string) {
   await page.getByLabel('Message', { exact: true }).fill(text);
@@ -451,6 +452,64 @@ test('a workflow runs in its graph, through an agent and a Confirm step, with it
   await agentMode(page).click();
   await expect(page.getByRole('tab', { name: /^Active/ })).toBeVisible();
   await expect(page.locator('.workflow-run-item')).toHaveCount(0);
+});
+
+test('a reply waits for a workflow run it started and goes on with what the run did', async ({
+  page,
+}) => {
+  // Requested 2026-11-28, after a reply ended its turn saying it waited for its art agent's run,
+  // which nothing woke it from.
+  await mockDesktop(page, 'capabilities');
+  await page.goto('/');
+  await expect(page.getByLabel('Message', { exact: true })).toBeVisible();
+  const { workflowId } = await savedWorkflow(
+    page,
+    'Quarter logs',
+    (start) => [
+      start,
+      { key: 'art', type: 'agent', title: 'Art', config: { prompt: 'Make the quarters.' } },
+      { key: 'done', type: 'end', config: { output: 'made' } },
+    ],
+    (start) => [
+      { source: start, target: 'art' },
+      { source: 'art', target: 'done' },
+    ],
+  );
+  await send(page, 'Run it and go on once its art is made.');
+  await expect.poll(async () => (await requests(page)).length).toBe(2);
+  const reply2 = (await requests(page))[1];
+  // Starting a run says how to wait for it, since nothing reports its end.
+  const started = await call(page, reply2, 'workflow_run', { id: workflowId });
+  expect(started.error).toBe(false);
+  expect(started.text).toContain('workflow_status with this id and wait: true');
+  const runId = started.text.match(/Started run ([0-9a-f-]{36})/)![1];
+  await expect.poll(async () => (await requests(page)).length).toBe(3);
+  const art = (await requests(page))[2];
+  // A wait answers nothing while the run's agent works, where a look answers at once.
+  const wait = await emitCall(page, reply2, 'workflow_status', { id: runId, wait: true });
+  const look = await call(page, reply2, 'workflow_status', { id: runId });
+  expect(JSON.parse(look.text).status).toBe('running');
+  await page.waitForTimeout(2_500);
+  expect(await answerOf(page, wait)).toBeUndefined();
+  // Once the run ends, the wait answers with what it did.
+  await reply(page, art.runId, 'Made all seven quarters.');
+  await expect.poll(() => answerOf(page, wait), { timeout: 20_000 }).toBeTruthy();
+  const answer = (await answerOf(page, wait))!;
+  expect(answer.error).toBe(false);
+  const report = JSON.parse(answer.text);
+  expect(report.status).toBe('completed');
+  expect(report.steps.find((s: { step: string }) => s.step === 'art').output).toBe(
+    'Made all seven quarters.',
+  );
+  // A run that has ended answers a wait at once, and a workflow's id is no run's.
+  const again = await call(page, reply2, 'workflow_status', { id: runId, wait: true });
+  expect(JSON.parse(again.text).status).toBe('completed');
+  const wrong = await call(page, reply2, 'workflow_status', { id: workflowId, wait: true });
+  expect(wrong).toMatchObject({
+    error: true,
+    text: 'No run has that id. workflow_list lists them.',
+  });
+  await reply(page, reply2.runId, 'The quarters are in.');
 });
 
 test('the graph has right-click menus, and step settings colour the values they name @webkit', async ({

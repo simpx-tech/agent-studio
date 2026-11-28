@@ -16,7 +16,9 @@ use std::collections::HashMap;
 
 pub const TOOL: &str = "await_background_tasks";
 const CLAUDE_NAME: &str = "mcp__agent_studio__await_background_tasks";
-pub const DESCRIPTION: &str = "Keep your reply open while you wait for background tasks you started. Agent Studio tells the user that a reply is finished when your turn ends, so call this right before ending a turn in which you wait for finite background work whose results you still need: tests, builds, type checks, installs, migrations or CI polling started with run_in_background or Monitor. Pass their IDs in task_ids, then end your turn: you are re-invoked when each task finishes, and the reply completes after your final turn. Never pass servers, watchers or an app you launched for the user to try; they keep running after the reply ends. Background agents and workflows are awaited automatically.";
+pub const DESCRIPTION: &str = "Keep your reply open while you wait for background tasks you started. Agent Studio tells the user that a reply is finished when your turn ends, so call this right before ending a turn in which you wait for finite background work whose results you still need: tests, builds, type checks, installs, migrations or CI polling started with run_in_background or Monitor. Pass their IDs in task_ids, then end your turn: you are re-invoked when each task finishes, and the reply completes after your final turn. Never pass servers, watchers or an app you launched for the user to try; they keep running after the reply ends. Background agents and Workflow tool runs are awaited automatically. An Agent Studio workflow run (workflow_run, dynamic_start) is not: wait for one with workflow_status and wait: true before you end your turn.";
+/// Said of an ID that is an Agent Studio workflow run's rather than a background task's.
+const WORKFLOW_RUN: &str = "An Agent Studio workflow run is waited for with workflow_status and wait: true, which answers once the run has ended.";
 
 pub fn tool() -> Value {
     json!({"name":TOOL,"description":DESCRIPTION,"inputSchema":{
@@ -283,6 +285,10 @@ impl AwaitedTasks {
                 unknown.join(", "),
                 if running.is_empty() { "none".into() } else { running.join(", ") }
             ));
+            // Workflow runs are named by UUIDs, which no task ID of the CLI is.
+            if unknown.iter().any(|id| uuid::Uuid::parse_str(id).is_ok()) {
+                text.push(WORKFLOW_RUN.into());
+            }
         }
         (waiting.is_empty(), text.join(" "))
     }
@@ -557,6 +563,23 @@ mod tests {
         assert!(state
             .claude_response(&json!({"request":{"subtype":"mcp_message","server_name":"agent_studio","message":{"method":"tools/call","params":{"name":"visualize"}}}}))
             .is_none());
+    }
+
+    #[test]
+    fn a_workflow_run_s_id_is_pointed_to_its_own_wait() {
+        let mut state = AwaitedTasks::default();
+        let run = "3ed997f3-ff48-426c-9f80-dfc889a51b11";
+        let refused = declare(&mut state, "await", json!({ "task_ids": [run] }));
+        assert_eq!(refused["isError"], true);
+        let text = refused["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("workflow_status and wait: true"), "{text}");
+        // A CLI task's ID gets no such note.
+        let refused = declare(&mut state, "await-2", json!({ "task_ids": ["b43tu3ps3"] }));
+        let text = refused["content"][0]["text"].as_str().unwrap();
+        assert!(!text.contains("workflow"), "{text}");
+        assert!(!state.holds_reply());
+        // The tool's own description says so before it is called.
+        assert!(DESCRIPTION.contains("workflow_status and wait: true"));
     }
 
     #[test]

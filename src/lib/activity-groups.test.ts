@@ -577,6 +577,28 @@ describe('activity groups', () => {
     ).toBe("Stopping a chat's programs");
   });
 
+  it('says a reply waits for a workflow run it started, and what its other workflow calls did', () => {
+    // src-tauri/src/protocol/activity.rs names Agent Studio's workflow calls.
+    const wait = tool('wait', { name: 'Wait for a workflow run', operation: 'workflowWait' });
+    expect(liveAction(wait, 'running')).toEqual({
+      icon: 'workflow',
+      verb: 'Waiting for a workflow run',
+    });
+    expect(liveAction(wait, 'complete').verb).toBe('Waited for a workflow run');
+    const save = tool('save', {
+      name: 'Save a workflow',
+      operation: 'workflow',
+      detail: 'Quarter logs',
+    });
+    expect(liveAction(save, 'complete')).toMatchObject({
+      icon: 'workflow',
+      verb: 'Saved the workflow',
+      target: 'Quarter logs',
+    });
+    const run = tool('run', { name: 'Run a workflow', operation: 'workflow', status: 'complete' });
+    expect(liveAction(run, 'complete').verb).toBe('Started a workflow run');
+  });
+
   it('shows an older reply’s activity limit as a note after its calls, not as a call', () => {
     const run = tool('run', { name: 'Run command' });
     const limit = tool('activity-limit', { name: 'Activity limit reached', status: 'unknown' });

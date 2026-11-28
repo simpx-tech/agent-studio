@@ -513,6 +513,9 @@ pub async fn run(
                         if let Some(delivery) = steering.remove(&id) {
                             let result = if value["result"]["turnId"] == turn && value.get("error").is_none() { Ok(()) }
                             else { Err("Codex did not accept steering for this reply. It may have ended, or this CLI version may not support steering.".into()) };
+                            // The model reads it once the running call returns: a wait for a
+                            // workflow run ends.
+                            if result.is_ok() { questions.workflow.end_waits(super::workflow_calls::WAIT_INTERRUPTED); }
                             questions.steering.delivered(delivery, result);
                         }
                         continue;

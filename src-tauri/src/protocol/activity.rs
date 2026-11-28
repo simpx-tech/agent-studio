@@ -135,6 +135,8 @@ impl ToolActivity {
                 .then_some(Wait::Agents),
             _ if self.status != "running" || self.background => None,
             _ if self.operation.as_deref() == Some("pcWait") => Some(Wait::Held),
+            // A workflow run's agents do the work the reply waits for.
+            _ if self.operation.as_deref() == Some("workflowWait") => Some(Wait::Agents),
             "hook" => Some(Wait::Hook),
             _ if self.command_run => Some(Wait::Command),
             _ => Some(Wait::Tool),
@@ -291,6 +293,46 @@ fn pc_tool(tool: &mut ToolActivity, name: &str, input: &Value) {
         if input["hand_over"] == true {
             fact(tool, "Asks", "To hand over what it holds");
         }
+    }
+}
+/// A tool every chat uses on workflows (`providers::workflow_calls::GENERAL`), by its name
+/// without Claude's server prefix.
+fn workflow_name(name: &str) -> Option<&str> {
+    let name = name.strip_prefix("mcp__agent_studio__").unwrap_or(name);
+    crate::providers::workflow_calls::GENERAL
+        .contains(&name)
+        .then_some(name)
+}
+/// What a workflow call does. A run's status read with `wait` waits for the run to end, which
+/// its row says while it runs (requested 2026-11-28, after a reply ended saying it waited for a
+/// workflow it had started, which nothing let it do). Its answer is kept as other calls' are.
+fn workflow_tool(tool: &mut ToolActivity, name: &str, input: &Value) {
+    let waits = crate::providers::workflow_calls::waits_for_end(name, input);
+    tool.name = match name {
+        "workflow_list" => "List workflows",
+        "workflow_read" => "Read a workflow",
+        "workflow_save" => "Save a workflow",
+        "workflow_run" => "Run a workflow",
+        "workflow_status" if waits => "Wait for a workflow run",
+        "workflow_status" => "Check a workflow run",
+        _ => "Start a dynamic workflow",
+    }
+    .into();
+    tool.operation = Some(if waits { "workflowWait" } else { "workflow" }.into());
+    // A saved workflow's name, or the title a dynamic workflow is given.
+    if let Some(detail) = field(input, "name").or_else(|| field(input, "title")) {
+        tool.detail = Some(detail);
+    }
+    if let Some(id) = field(input, "id") {
+        fact(
+            tool,
+            if name == "workflow_status" {
+                "Run"
+            } else {
+                "Workflow"
+            },
+            id,
+        );
     }
 }
 /// What a reservation's release says of its measurement (`reservations`): its report's
@@ -531,6 +573,9 @@ impl ToolDecoder {
                 }
                 if let Some(pc) = pc_name(&name) {
                     pc_tool(&mut tool, pc, &item["arguments"]);
+                }
+                if let Some(workflow) = workflow_name(&name) {
+                    workflow_tool(&mut tool, workflow, &item["arguments"]);
                 }
                 // Agent Studio's own tools show their arguments and results in other panels.
                 if studio_tool(&name) {
@@ -1078,6 +1123,13 @@ impl ToolDecoder {
         }
         if let Some(pc) = pc_name(name) {
             pc_tool(&mut tool, pc, input);
+            self.publish(tool, out);
+            return;
+        }
+        if let Some(workflow) =
+            workflow_name(name).filter(|_| name.starts_with("mcp__agent_studio__"))
+        {
+            workflow_tool(&mut tool, workflow, input);
             self.publish(tool, out);
             return;
         }
@@ -1826,6 +1878,64 @@ mod tests {
             .facts
             .iter()
             .any(|f| f.label == "Message" && f.value == "Close the editor when you can."));
+    }
+    #[test]
+    fn a_wait_for_a_workflow_run_reads_as_one_and_waits_on_its_agents() {
+        let run = "3ed997f3-ff48-426c-9f80-dfc889a51b11";
+        let mut d = ToolDecoder::default();
+        for (id, name, input) in [
+            (
+                "run",
+                "mcp__agent_studio__workflow_run",
+                json!({"id":"9719a691-0f5d-4244-8d89-de5f9780e75f"}),
+            ),
+            (
+                "check",
+                "mcp__agent_studio__workflow_status",
+                json!({ "id": run }),
+            ),
+            (
+                "wait",
+                "mcp__agent_studio__workflow_status",
+                json!({"id": run, "wait": true}),
+            ),
+            (
+                "save",
+                "mcp__agent_studio__workflow_save",
+                json!({"name":"Quarter logs","nodes":[],"edges":[]}),
+            ),
+        ] {
+            d.decode("claude", &json!({"type":"assistant","message":{"content":[{"type":"tool_use","id":id,"name":name,"input":input}]}}));
+        }
+        let names: Vec<_> = d.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Run a workflow",
+                "Check a workflow run",
+                "Wait for a workflow run",
+                "Save a workflow"
+            ]
+        );
+        let wait = &d.tools[2];
+        assert_eq!(wait.operation.as_deref(), Some("workflowWait"));
+        assert!(wait
+            .facts
+            .iter()
+            .any(|f| f.label == "Run" && f.value == run));
+        // The reply's time goes to the run's agents while it waits, never to a tool.
+        assert_eq!(wait.wait(), Some(Wait::Agents));
+        assert_eq!(d.tools[1].wait(), Some(Wait::Tool));
+        assert_eq!(d.tools[3].detail(), Some("Quarter logs"));
+        // The run's report the wait returns is kept, as other calls' results are.
+        d.decode("claude", &json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"wait","content":"{\"status\":\"completed\"}"}]}}));
+        assert!(d.tools[2].output.is_some());
+        assert_eq!(d.tools[2].wait(), None);
+        // Codex reports the same calls by their bare names.
+        let mut codex = ToolDecoder::default();
+        let started = codex.codex_server(&json!({"method":"item/started","params":{"threadId":"root","turnId":"turn","item":{"type":"dynamicToolCall","id":"call","tool":"workflow_status","arguments":{"id":run,"wait":true},"status":"inProgress"}}}), "root");
+        assert_eq!(started[0].name, "Wait for a workflow run");
+        assert_eq!(started[0].wait(), Some(Wait::Agents));
     }
     #[test]
     fn a_release_shows_whether_its_measurement_ran_beside_other_work() {

@@ -26,7 +26,14 @@ import {
   tickMission,
   type MissionTool,
 } from './workflow-mission';
-import { generalCall, generalTools, type GeneralTool, type StoreAccess } from './workflow-tools';
+import {
+  generalCall,
+  generalTools,
+  runStatus,
+  statusWait,
+  type GeneralTool,
+  type StoreAccess,
+} from './workflow-tools';
 import {
   mayContinue,
   nodeConfig,
@@ -114,6 +121,22 @@ function relayBackend(): Backend {
   };
 }
 
+/**
+ * A workflow_status call that waits for its run to end (`statusWait`), held until it has. A
+ * reloaded page takes it up again from the calls the app still holds.
+ */
+type RunWait = {
+  call: WorkflowCall;
+  runId: string;
+  /** When the store was first found without its run, which a store still being chosen explains. */
+  missing?: number;
+  /** Its run was found once, so one missing later was deleted. */
+  seen?: boolean;
+  busy?: boolean;
+};
+/** How long a waited run may be missing before the wait says so. */
+const MISSING_MS = 60_000;
+
 /** How long a lease lasts, and how often its driver renews it. */
 const LEASE_MS = 60_000;
 const RENEW_MS = 15_000;
@@ -159,6 +182,8 @@ export class WorkflowClient {
   private supervising = false;
   private firstPass: Promise<void>;
   private settleFirst = () => {};
+  /** The calls waiting for their run to end, by call id. */
+  private waits = new Map<string, RunWait>();
   private fired = new Map<string, number>();
   /** What this computer keeps of its triggers: what Watch triggers saw, runs, waiting events. */
   private memory: TriggerMemory | undefined;
@@ -359,6 +384,7 @@ export class WorkflowClient {
     this.leases = list.leases;
     this.revision = list.revision;
     if (alerts.length) this.alertOnce(alerts);
+    if (this.waits.size) void this.checkWaits();
     // Open documents and runs driven elsewhere that moved.
     const stale = [...this.watched.keys()].filter((id) => {
       const summary = this.summaries.get(id);
@@ -789,6 +815,8 @@ export class WorkflowClient {
           entry.busy = false;
         }
       }
+      // A run driven here that just ended answers the calls waiting for it.
+      if (this.waits.size) void this.checkWaits();
       await this.fireSchedules(host, backend);
       await this.fireTriggers(host, backend);
       await this.fireWatches(host, backend);
@@ -1363,6 +1391,12 @@ export class WorkflowClient {
   async answer(call: WorkflowCall) {
     await this.firstPass;
     const host = this.options.host();
+    // A wait for a run's end is answered once it has ended, however long that takes.
+    const waited = call.tool === 'workflow_status' ? statusWait(call.input) : undefined;
+    if (waited && host && this.backend) {
+      if (!this.waits.has(call.id)) this.waits.set(call.id, { call, runId: waited });
+      return this.checkWaits();
+    }
     let text: string;
     let error = false;
     try {
@@ -1406,5 +1440,52 @@ export class WorkflowClient {
       error = true;
     }
     await answerWorkflowCall(call, text, error).catch(() => {});
+  }
+
+  /**
+   * Answers the calls whose run has ended with what workflow_status reports of it (requested
+   * 2026-11-28, after a reply that started a workflow ended its turn to wait for it, which no
+   * one woke it from). A call whose reply ended meanwhile refuses the answer, which ends it too.
+   */
+  private async checkWaits() {
+    const host = this.options.host();
+    if (!host || !this.backend) return;
+    for (const [id, wait] of this.waits) {
+      if (wait.busy) continue;
+      const status =
+        this.drivers.get(wait.runId)?.driver.run.status ?? this.summaries.get(wait.runId)?.status;
+      if (runActive(status)) {
+        wait.seen = true;
+        wait.missing = undefined;
+        continue;
+      }
+      wait.busy = true;
+      try {
+        // It ended, or the list does not hold it (yet): its document says which.
+        const doc = await this.access.read(wait.runId, 0);
+        const run = doc?.kind === 'run' ? readRun(doc.body) : undefined;
+        if (run && runActive(run.status)) {
+          wait.seen = true;
+          wait.missing = undefined;
+          continue;
+        }
+        if (!doc) {
+          wait.missing ??= this.now;
+          if (this.now - wait.missing < MISSING_MS) continue;
+        }
+        if (!this.waits.delete(id)) continue;
+        const text =
+          doc && run
+            ? JSON.stringify(runStatus(host, run, doc.events), null, 2)
+            : wait.seen && !doc
+              ? 'This run is no longer saved.'
+              : 'No run has that id. workflow_list lists them.';
+        await answerWorkflowCall(wait.call, text, !run).catch(() => {});
+      } catch {
+        // The store did not answer: the next look tries again.
+      } finally {
+        wait.busy = false;
+      }
+    }
   }
 }

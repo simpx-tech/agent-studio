@@ -219,6 +219,7 @@ const waitsOnOthers = new Set([
   'await_background_tasks',
   'mcp__agent_studio__await_background_tasks',
   'Wait for the computer',
+  'Wait for a workflow run',
 ]);
 
 const commandNames: Record<CommandKind, string> = {

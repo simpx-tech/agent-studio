@@ -639,6 +639,22 @@ const namedForms: Record<string, Forms> = {
     "Stopped a chat's programs",
     "Stop of a chat's programs",
   ],
+  // Agent Studio's own workflows (src-tauri/src/providers/workflow_calls.rs).
+  'List workflows': ['Listing workflows', 'Listed workflows', 'Workflow list'],
+  'Read a workflow': ['Reading a workflow', 'Read a workflow', 'Workflow read'],
+  'Save a workflow': ['Saving the workflow', 'Saved the workflow', 'Workflow save'],
+  'Run a workflow': ['Starting a workflow run', 'Started a workflow run', 'Workflow run'],
+  'Check a workflow run': ['Checking a workflow run', 'Checked a workflow run', 'Run check'],
+  'Wait for a workflow run': [
+    'Waiting for a workflow run',
+    'Waited for a workflow run',
+    'Wait for a workflow run',
+  ],
+  'Start a dynamic workflow': [
+    'Starting a dynamic workflow',
+    'Started a dynamic workflow',
+    'Dynamic workflow',
+  ],
 };
 const iconForms: Partial<Record<ToolIconKey, Forms>> = {
   monitor: ['Watching', 'Watched', 'Watch'],

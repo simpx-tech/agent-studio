@@ -43,8 +43,15 @@ pub const DYNAMIC: [&str; 13] = [
 pub fn known(name: &str) -> bool {
     GENERAL.contains(&name) || DYNAMIC.contains(&name)
 }
+/// A workflow_status call that answers only once its run has ended, which the window holds.
+pub fn waits_for_end(tool: &str, input: &Value) -> bool {
+    tool == "workflow_status" && input["wait"] == true
+}
 
-pub const GUIDANCE: &str = "To automate a sequence of steps across chats, agents and computers, build a workflow with workflow_save (Claude: mcp__agent_studio__workflow_save) and run it with workflow_run; workflow_list and workflow_read find and open saved ones, and workflow_status follows a run. For a goal an agent should pursue by itself over many steps, sessions or days, start a dynamic workflow with dynamic_start: an orchestrator agent then plans it, starts agents on the computers and accounts it chooses and drives it to completion. Both kinds appear on the Workflows page of Agent Studio, static and dynamic.";
+pub const GUIDANCE: &str = "To automate a sequence of steps across chats, agents and computers, build a workflow with workflow_save (Claude: mcp__agent_studio__workflow_save) and run it with workflow_run; workflow_list and workflow_read find and open saved ones, and workflow_status follows a run. For a goal an agent should pursue by itself over many steps, sessions or days, start a dynamic workflow with dynamic_start: an orchestrator agent then plans it, starts agents on the computers and accounts it chooses and drives it to completion. Both kinds appear on the Workflows page of Agent Studio, static and dynamic. workflow_run and dynamic_start return at once, nothing tells you when a run ends, and your reply ends with your turn: when you need a run's result, call workflow_status with its id and wait: true once nothing else is left to do, rather than ending your turn to wait.";
+
+/// What a call waiting for a run's end answers when a message reaches the reply meanwhile.
+pub const WAIT_INTERRUPTED: &str = "The user wrote to you, so this wait ended early; the run goes on. Read their message, then call workflow_status with wait: true again if you still need the run's result.";
 
 const STEPS: &str = "Steps (type: settings in config; outputs):
 - start (a trigger; a workflow may have several, each starting its own runs): trigger manual|schedule|chat|workflow|webhook|computer|usage|watch. manual: inputs [{name, label, default, multiline}] (Run and workflow_run). schedule: schedules [{id, every: minutes|hours|days|weeks, interval, at: HH:MM, days: [0-6], timezone}]. chat: chat {events: [completed|failed|stopped|question], environmentId, path (folder prefix), provider, title (contains), workflowChats} for a reply ending or asking in a matching chat (empty filters match any). workflow: workflow {workflowId ('' for any other workflow, static or dynamic), statuses: [completed|failed|stopped]}. webhook: webhook {secret (leave it empty; the editor makes one), signing (an optional secret the request's body must be signed with as X-Hub-Signature-256)}, started by a POST to its URL; a delivery sent again (X-GitHub-Delivery) starts no second run. computer: computer {environmentId ('' for any), event: online|offline}. usage: usage {connectionId or provider ('' for any)} when an account's 5-hour or weekly limit reset after it was reached. watch: watch {location {computerId, environmentId, path} (omit for the computer that runs the workflow, empty path for its home folder), shell bash|powershell, script, timeout (seconds, 0 for none), every, unit minutes|hours, id (the path of each item's id, default id), version (the path of what changes, '' for the whole item), initial (also start runs for the items listed when watching begins)}: runs the script every so often, reads the JSON list (or one JSON object a line) it prints and starts a run for each item that is new or changed since the last look. Every trigger but manual may set overlap parallel|skip|queue: while a run it started (for watch, one for the same item) still goes on, start another, start none (a watched item is looked at again), or start it once that run ended. Its output is what fired it (a chat's reply, a run's output, the webhook's body, the watched item); out.
@@ -110,14 +117,17 @@ pub fn tools(enabled: bool, orchestrator: bool) -> Vec<Value> {
             "nodes":{"type":"array","items":{"type":"object"}},
             "edges":{"type":"array","items":{"type":"object"}}
         }), &["name","nodes","edges"]),
-        tool("workflow_run", "Start a run of a saved workflow with its inputs, at its first manual trigger or at the trigger step whose key you name. computer names the computer that drives it (an id or name); it defaults to this one. Returns the run's id; follow it with workflow_status.", json!({
+        tool("workflow_run", "Start a run of a saved workflow with its inputs, at its first manual trigger or at the trigger step whose key you name. computer names the computer that drives it (an id or name); it defaults to this one. Returns the run's id at once while the run goes on by itself. Nothing tells you when it ends, and your reply ends with your turn: to continue with its result, call workflow_status with its id and wait: true once nothing else is left to do.", json!({
             "id":{"type":"string"},
             "inputs":{"type":"object","additionalProperties":{"type":"string"}},
             "trigger":{"type":"string"},
             "computer":{"type":"string"}
         }), &["id"]),
-        tool("workflow_status", "Read a run, static or dynamic: its status, what it waits for, each step or agent with its status and output, open questions and recent history.", json!({"id":{"type":"string"}}), &["id"]),
-        tool("dynamic_start", "Start a dynamic workflow: an orchestrator agent pursues the goal by itself, planning, starting agents on the computers and accounts it chooses, reviewing their work and asking the user when needed, until it is done, across sessions, computers and days. The user watches it live in the Workflows view. Returns its run id.", json!({
+        tool("workflow_status", "Read a run, static or dynamic: its status, what it waits for, each step or agent with its status and output, open questions and recent history. With wait: true it answers only once the run has ended (completed, failed or stopped), however long that takes, or earlier when the user writes to you; call it instead of ending your turn to wait for a run, since your reply ends with your turn.", json!({
+            "id":{"type":"string"},
+            "wait":{"type":"boolean","description":"Answer once the run has ended."}
+        }), &["id"]),
+        tool("dynamic_start", "Start a dynamic workflow: an orchestrator agent pursues the goal by itself, planning, starting agents on the computers and accounts it chooses, reviewing their work and asking the user when needed, until it is done, across sessions, computers and days. The user watches it live in the Workflows view. Returns its run id at once; workflow_status with wait: true waits for its end.", json!({
             "goal":{"type":"string","minLength":1,"description":"The goal, with everything the orchestrator should know."},
             "title":{"type":"string"},
             "folder":{"type":"object","description":"The project's folder: computer (id or name) and its absolute path.","properties":{"computer":{"type":"string"},"path":{"type":"string"}},"required":["path"],"additionalProperties":false},
@@ -498,6 +508,32 @@ impl Session {
         }
         Some(self.forward(name, &p["arguments"], wire))
     }
+    /// A message reached the reply: calls waiting for a run's end answer at once with `text`, so
+    /// the agent reads it now, and waits again when it still needs the run. The window's answer
+    /// to them later is refused.
+    pub fn end_waits(&self, text: &str) {
+        let Ok(mut runs) = self.hub.0.lock() else {
+            return;
+        };
+        let Some(run) = runs.get_mut(&self.run_id).filter(|r| r.active) else {
+            return;
+        };
+        for (id, pending) in run.calls.iter_mut() {
+            if pending.sending || !waits_for_end(&pending.call.tool, &pending.call.input) {
+                continue;
+            }
+            // Nobody waits for the delivery's acknowledgement: the call simply ends.
+            let (ack, _) = oneshot::channel();
+            let delivery = Delivery {
+                payload: pending.wire.respond(text, false),
+                id: id.clone(),
+                ack,
+            };
+            if run.tx.send(delivery).is_ok() {
+                pending.sending = true;
+            }
+        }
+    }
     pub fn can_deliver(&self, delivery: &Delivery) -> bool {
         self.hub.0.lock().is_ok_and(|runs| {
             runs.get(&self.run_id)
@@ -681,6 +717,71 @@ mod tests {
             chat.codex(&namespaced("mcp"), "root").unwrap().unwrap()["result"]["success"],
             false
         );
+    }
+
+    #[tokio::test]
+    async fn a_message_ends_a_wait_for_a_run_and_refuses_the_window_s_late_answer() {
+        let hub = Hub::default();
+        let (mut session, calls) = open_session(&hub, false);
+        session.observe_claude(&json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[
+            {"type":"tool_use","id":"t-wait","name":"mcp__agent_studio__workflow_status","input":{"id":"r","wait":true}},
+            {"type":"tool_use","id":"t-list","name":"mcp__agent_studio__workflow_list","input":{}}
+        ]}}));
+        let request = |id: &str, name: &str, input: Value| json!({"type":"control_request","request_id":id,"request":{"subtype":"mcp_message","server_name":"agent_studio","message":{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":name,"arguments":input}}}});
+        assert!(session
+            .claude(&request(
+                "wait-request",
+                "workflow_status",
+                json!({"id":"r","wait":true})
+            ))
+            .unwrap()
+            .is_none());
+        assert!(session
+            .claude(&request("list-request", "workflow_list", json!({})))
+            .unwrap()
+            .is_none());
+        let wait = calls.lock().unwrap()[0].clone();
+        assert!(waits_for_end(&wait.tool, &wait.input));
+        assert!(!waits_for_end("workflow_status", &json!({"id":"r"})));
+        session.end_waits(WAIT_INTERRUPTED);
+        let delivery = session.rx.recv().await.unwrap();
+        assert!(session.can_deliver(&delivery));
+        assert_eq!(delivery.payload["response"]["request_id"], "wait-request");
+        assert_eq!(
+            delivery.payload["response"]["response"]["mcp_response"]["result"]["content"][0]
+                ["text"],
+            WAIT_INTERRUPTED
+        );
+        session.delivered(delivery, Ok(()));
+        // Only the wait ended: the list call still waits for the window, which a second message
+        // leaves alone.
+        session.end_waits(WAIT_INTERRUPTED);
+        assert!(session.rx.try_recv().is_err());
+        assert_eq!(hub.pending().len(), 1);
+        assert_eq!(hub.pending()[0].tool, "workflow_list");
+        assert!(hub
+            .answer("run-1", None, &wait.id, "ended".into(), false)
+            .await
+            .is_err());
+    }
+
+    #[test]
+    fn a_run_s_status_can_wait_for_its_end() {
+        let tools = tools(true, false);
+        let status = tools
+            .iter()
+            .find(|t| t["name"] == "workflow_status")
+            .unwrap();
+        assert_eq!(
+            status["inputSchema"]["properties"]["wait"]["type"],
+            "boolean"
+        );
+        // The tools that start runs, and the guidance every chat reads, say how to wait.
+        for name in ["workflow_run", "dynamic_start"] {
+            let tool = tools.iter().find(|t| t["name"] == name).unwrap();
+            assert!(tool["description"].as_str().unwrap().contains("wait: true"));
+        }
+        assert!(GUIDANCE.contains("workflow_status with its id and wait: true"));
     }
 
     #[tokio::test]

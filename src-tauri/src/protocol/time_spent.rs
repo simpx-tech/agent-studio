@@ -824,6 +824,15 @@ mod tests {
     }
 
     #[test]
+    fn a_wait_for_a_workflow_run_is_time_its_agents_took() {
+        let mut run = Run::new();
+        run.claude(prompt());
+        run.wait(500).claude(json!({"type":"assistant","parent_tool_use_id":null,"message":{"content":[{"type":"tool_use","id":"w","name":"mcp__agent_studio__workflow_status","input":{"id":"3ed997f3-ff48-426c-9f80-dfc889a51b11","wait":true}}]}}));
+        run.wait(60_000).claude(result("w"));
+        assert_eq!(run.spent(), [("agents", 60_000), ("waiting", 500)]);
+    }
+
+    #[test]
     fn a_call_running_while_the_model_writes_on_holds_nothing_up() {
         // Claude Code runs a call as soon as it is written, while the model writes the next.
         let mut run = Run::new();

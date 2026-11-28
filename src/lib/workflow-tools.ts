@@ -103,7 +103,7 @@ const inputs = {
       computer: z.string().optional(),
     })
     .strict(),
-  workflow_status: z.object({ id: z.string() }).strict(),
+  workflow_status: z.object({ id: z.string(), wait: z.boolean().optional() }).strict(),
   dynamic_start: z
     .object({
       goal: z.string().trim().min(1),
@@ -213,6 +213,20 @@ function findComputer(host: WorkflowHost, text?: string) {
     computers.find((c) => c.name.toLowerCase() === wanted)
   );
 }
+
+/**
+ * The run a workflow_status call waits for: with `wait`, the call answers only once its run has
+ * ended (`WorkflowClient` holds it until then), so that a reply that needs a run's result goes on
+ * when it ends instead of ending its turn to wait, which nothing would have woken it from.
+ */
+export function statusWait(raw: unknown): string | undefined {
+  const parsed = inputs.workflow_status.safeParse(raw ?? {});
+  return parsed.success && parsed.data.wait ? parsed.data.id : undefined;
+}
+
+/** What a run started by a tool says of how to wait for it. */
+const waitHint =
+  'Nothing tells you when it ends: to continue with its result, call workflow_status with this id and wait: true once nothing else is left to do.';
 
 /** Answers a general workflow tool for the chat `conversationId`. */
 export async function generalCall(
@@ -380,7 +394,7 @@ export async function generalCall(
       );
       const id = crypto.randomUUID();
       await host.createRun(id, run);
-      return `Started run ${id} of "${definition.name}". Follow it with workflow_status.`;
+      return `Started run ${id} of "${definition.name}". ${waitHint}`;
     }
     case 'workflow_status': {
       const { id } = parsed.data as z.infer<typeof inputs.workflow_status>;
@@ -434,7 +448,7 @@ export async function generalCall(
       });
       const id = crypto.randomUUID();
       await host.createRun(id, run);
-      return `Started the dynamic workflow ${id} "${run.title}". The user follows it under Workflows; workflow_status reads it.`;
+      return `Started the dynamic workflow ${id} "${run.title}". The user follows it under Workflows. ${waitHint}`;
     }
   }
 }

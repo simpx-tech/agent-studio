@@ -1087,6 +1087,9 @@ export function watchRelayConnection(listener: (ready: boolean) => void): () => 
 function notifyRelayConnection(ready: boolean) {
   if (!ready) accountUpdateGate.clear();
   if (!ready) noteWorkflows(undefined);
+  // The revision answer named the workflow store before the connection counted as made, so the
+  // page chose this computer's own store then: it chooses again now.
+  else announceWorkflows();
   for (const listener of relayConnectionListeners) listener(ready);
 }
 
@@ -4513,6 +4516,16 @@ function noteWorkflows(value: unknown) {
   if (next === relayWorkflows) return;
   relayWorkflows = next;
   for (const listener of workflowRevisionListeners) listener(next);
+}
+/**
+ * Tells the listeners of the store again once the connection is made: they heard of it while it
+ * was being made, when `relayWorkflowRevision` still said there was none, and it stays the same
+ * until the store changes (2026-11-28, after a desktop that reached the relay a while after it
+ * started answered workflow_list from its own empty store).
+ */
+function announceWorkflows() {
+  if (relayWorkflows === undefined) return;
+  for (const listener of workflowRevisionListeners) listener(relayWorkflows);
 }
 /** The revision of the relay's workflow store, while this device reaches one that has it. */
 export const relayWorkflowRevision = () => (relayConnected ? relayWorkflows : undefined);
