@@ -1,38 +1,75 @@
 import type { ChatSettings, Conversation } from './domain';
-import { isStale, resetTime, type LimitWindow, type UsageSnapshot, type contextFor } from './usage';
+import {
+  isStale,
+  percentage,
+  resetTime,
+  type LimitWindow,
+  type UsageSnapshot,
+  type contextFor,
+} from './usage';
 
 export type PaceTone = 'good' | 'steady' | 'watch' | 'danger' | 'muted';
+
+const day = 86_400_000;
+
+/**
+ * Even use of a limit at the time of a reading. A limit longer than a day is shared out by day
+ * (requested 2026-11-28: "it should be calculated per day, rather than the exact amount, since
+ * I'm not going to be using it 24h"): its window splits into days that each end at the reset's
+ * time of day, each with an equal share of the limit, so a night without use costs nothing.
+ * Even use then stands anywhere from what the earlier days' shares add up to (`from`) to those
+ * shares with today's (`to`). A shorter limit, such as the 5-hour one, is even use at the
+ * reading itself, `from` and `to` alike.
+ */
+export type PaceGuide = {
+  /** Whether the limit is shared out by day, being longer than one. */
+  daily: boolean;
+  from: number;
+  to: number;
+  /** When today's share ends, in milliseconds, for a limit shared out by day. */
+  until: number | null;
+};
+
 export type QuotaPace = {
   state: 'below' | 'on-track' | 'ahead' | 'exhausted' | 'unknown';
   label: string;
   tone: PaceTone;
   detail: string;
   advice: string;
+  /**
+   * The share even use reaches, the bars' recommended fill: by the end of today's share for a
+   * limit shared out by day, by the reading for a shorter one.
+   */
   expectedPercent: number | null;
+  guide: PaceGuide | null;
   projectedPercent: number | null;
+  /**
+   * What is left for each day until the reset, today's included, or for each hour of a limit
+   * shorter than a day.
+   */
   allowance: number | null;
   allowanceUnit: 'hour' | 'day';
 };
 
 /**
- * How a share used compares with the even-use guide: more than 5 percentage points above it is
- * ahead of pace, more than 5 below it below pace, and a limit used up is reached.
+ * How a share used compares with even use (`guide`). A limit shared out by day is ahead of pace
+ * past the shares of the days so far, today's included, and below pace short of the earlier
+ * days' shares. A shorter one is ahead more than 5 percentage points above even use and below
+ * more than 5 under it. A limit used up is reached.
  */
 export function guidePace(
   used: number,
-  expected: number,
+  guide: Pick<PaceGuide, 'daily' | 'from' | 'to'>,
 ): Pick<QuotaPace, 'state' | 'label' | 'tone' | 'detail' | 'advice'> & {
   state: Exclude<QuotaPace['state'], 'unknown'>;
 } {
-  const difference = used - expected;
-  const state =
-    used >= 100
-      ? 'exhausted'
-      : difference > 5 + 1e-6
-        ? 'ahead'
-        : difference < -5 - 1e-6
-          ? 'below'
-          : 'on-track';
+  const margin = guide.daily ? 0 : 5;
+  const over = used - guide.to;
+  const under = guide.from - used;
+  const past = over > margin + 1e-6;
+  const short = under > margin + 1e-6;
+  const state = used >= 100 ? 'exhausted' : past ? 'ahead' : short ? 'below' : 'on-track';
+  const points = (value: number) => `${Math.abs(value).toFixed(1)} percentage points`;
   return {
     state,
     label: {
@@ -49,10 +86,15 @@ export function guidePace(
           : state === 'on-track'
             ? 'steady'
             : 'good',
-    detail:
-      state === 'on-track'
-        ? 'Within 5 percentage points of the even-use guide.'
-        : `${Math.abs(difference).toFixed(1)} percentage points ${difference > 0 ? 'above' : 'below'} the even-use guide.`,
+    detail: guide.daily
+      ? past
+        ? `${points(over)} past today's share.`
+        : short
+          ? `${points(under)} of earlier days' shares unused.`
+          : "Within today's share."
+      : past || short
+        ? `${points(over)} ${over > 0 ? 'above' : 'below'} the even-use guide.`
+        : 'Within 5 percentage points of the even-use guide.',
     advice:
       state === 'exhausted'
         ? 'Wait for reset or switch provider.'
@@ -60,7 +102,9 @@ export function guidePace(
           ? ''
           : state === 'below'
             ? 'Room to spare compared with evenly spread usage.'
-            : 'Keep usage close to the guide to last until reset.',
+            : guide.daily
+              ? "Stay within a day's share a day to last until reset."
+              : 'Keep usage close to the guide to last until reset.',
   };
 }
 
@@ -77,6 +121,7 @@ export function quotaPace(
     detail,
     advice: '',
     expectedPercent: null,
+    guide: null,
     projectedPercent: null,
     allowance: null,
     allowanceUnit: window.windowMinutes === 300 ? 'hour' : 'day',
@@ -104,19 +149,74 @@ export function quotaPace(
 
   // Match the time budget to the timestamp of the quota reading, not the ticking
   // clock: an unchanged or failed reading must not slowly look more favorable.
-  const expected = ((measuredAt - (reset - duration)) / duration) * 100;
+  const start = reset - duration;
+  const share = (time: number) => ((time - start) / duration) * 100;
   const used = window.usedPercent;
-  const unit = window.windowMinutes === 300 || reset - measuredAt < 86_400_000 ? 'hour' : 'day';
-  const remainingUnits = (reset - measuredAt) / (unit === 'hour' ? 3_600_000 : 86_400_000);
+  const left = Math.max(0, 100 - used);
+  const elapsed = share(measuredAt);
   // A projection from the first few moments of a window is too unstable to show.
-  const projected = expected >= 5 ? (used / expected) * 100 : null;
+  const projected = elapsed >= 5 ? (used / elapsed) * 100 : null;
+  if (duration > day) {
+    // The days until the reset, today's included, each ending at the reset's time of day.
+    const days = daysUntil(reset, measuredAt);
+    const until = reset - (days - 1) * day;
+    const guide = {
+      daily: true,
+      from: share(Math.max(start, until - day)),
+      to: share(until),
+      until,
+    };
+    return {
+      ...guidePace(used, guide),
+      expectedPercent: guide.to,
+      guide,
+      projectedPercent: projected,
+      allowance: left / days,
+      allowanceUnit: 'day',
+    };
+  }
+  const guide = { daily: false, from: elapsed, to: elapsed, until: null };
   return {
-    ...guidePace(used, expected),
-    expectedPercent: expected,
+    ...guidePace(used, guide),
+    expectedPercent: elapsed,
+    guide,
     projectedPercent: projected,
-    allowance: Math.max(0, 100 - used) / remainingUnits,
-    allowanceUnit: unit,
+    allowance: left / ((reset - measuredAt) / 3_600_000),
+    allowanceUnit: 'hour',
   };
+}
+
+/**
+ * The days from `time` until `reset`, the one under way included, each ending at the reset's
+ * time of day.
+ */
+export const daysUntil = (reset: number, time: number) =>
+  Math.max(1, Math.ceil((reset - time) / day));
+
+/**
+ * The recommendation a quota bar's hover and value give: by the end of today's share for a
+ * limit shared out by day (`recommended 57.1% by 21:00`), at the reading for a shorter one.
+ */
+export function recommendation(pace: QuotaPace, now: number) {
+  if (pace.expectedPercent == null) return '';
+  const value = `recommended ${percentage(pace.expectedPercent)}`;
+  if (!pace.guide?.until) return value;
+  const date = new Date(pace.guide.until);
+  const clock = date.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  });
+  return date.toDateString() === new Date(now).toDateString()
+    ? `${value} by ${clock}`
+    : `${value} by ${date.toLocaleDateString([], { weekday: 'long' })}, ${clock}`;
+}
+
+/** A quota bar's hover: the share used beside the recommendation, or what keeps it from one. */
+export function recommendationTitle(used: number, pace: QuotaPace, now: number) {
+  if (pace.expectedPercent == null) return pace.detail;
+  const when = pace.guide?.daily ? '' : ' at the time of this reading';
+  return `${percentage(used)} used; ${recommendation(pace, now)}${when}.`;
 }
 
 type Context = ReturnType<typeof contextFor>;

@@ -2,7 +2,12 @@ import { test, expect, type Locator, type Page } from '@playwright/test';
 import { mockDesktop } from './desktop-helper';
 import { chooseTestFolder } from './folder-helper';
 
-type Usage = { '5-hour'?: number | null; Weekly?: number | null };
+type Usage = {
+  '5-hour'?: number | null;
+  Weekly?: number | null;
+  /** Hours until a limit resets, where a test gives them; an hour otherwise, as the mock has it. */
+  resets?: { '5-hour'?: number; Weekly?: number };
+};
 
 // Each account reports the usage a test gives it, read again whenever the app asks.
 async function prepare(page: Page, mode?: string) {
@@ -16,8 +21,11 @@ async function prepare(page: Page, mode?: string) {
         localStorage.getItem(`test-usage-percent-${args?.connectionId}`) ?? 'null',
       );
       if (command === 'read_usage' && own)
-        for (const window of result.windows)
+        for (const window of result.windows) {
           if (window.label in own) window.usedPercent = own[window.label];
+          const hours = own.resets?.[window.label];
+          if (hours != null) window.resetsAt = Math.floor(Date.now() / 1000) + hours * 3600;
+        }
       return result;
     };
   });
@@ -350,6 +358,33 @@ test('accounts without a 5-hour limit are balanced by their weekly one', async (
   await expect(agent(page)).toHaveText(/Codex · Second Codex/);
 });
 
+test('a weekly limit that resets soon takes new chats while it has more for each day', async ({
+  page,
+}) => {
+  await prepare(page);
+  const second = await addAccount(page, 'Codex', 'Second Codex');
+  const login = await connectionOf(page, 'Codex CLI login');
+  // The report of 2026-11-28: 75% of a week used with less than a day to go, beside 40% with
+  // four and a half days left. The first has 25% for today, the second 12% for each of its days.
+  await setUsage(page, login, { '5-hour': null, Weekly: 75, resets: { Weekly: 20 } });
+  await setUsage(page, second, { '5-hour': null, Weekly: 40, resets: { Weekly: 108 } });
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await chooseTestFolder(page);
+  await balance(page);
+  await newChat(page);
+  await expect(agent(page)).toHaveText(/Codex · Codex CLI login/);
+  // Its bars say so: short of the earlier days' shares, with all that is left for today.
+  await agent(page).click();
+  await expect(
+    page.getByRole('option', { name: 'Codex · Codex CLI login', exact: true }),
+  ).toHaveAccessibleDescription('Weekly 75% used Below pace');
+  await page.keyboard.press('Escape');
+  // Nearly used up hours before its reset, it leaves new chats to the other.
+  await setUsage(page, login, { '5-hour': null, Weekly: 98, resets: { Weekly: 3 } });
+  await newChat(page);
+  await expect(agent(page)).toHaveText(/Codex · Second Codex/);
+});
+
 test('an account left out in Settings takes new chats only when chosen', async ({ page }) => {
   await prepare(page);
   const second = await addAccount(page, 'Claude', 'Second Claude');
@@ -525,8 +560,8 @@ test('Settings shows what the accounts balanced on a computer used together', as
   const second = await addAccount(page, 'Claude', 'Second Claude');
   const third = await addAccount(page, 'Claude', 'Third Claude');
   const login = await connectionOf(page, 'Claude CLI login');
-  // The mock reads every limit an hour before its reset: 80% of a 5-hour window has passed, and
-  // 99.4% of a weekly one.
+  // The mock reads every limit an hour before its reset: 80% of a 5-hour window has passed, and a
+  // weekly one is in its last day, whose share takes it to 100%.
   await setUsage(page, login, { '5-hour': 95, Weekly: 50 });
   await setUsage(page, second, { '5-hour': 85, Weekly: 30 });
   await setUsage(page, third, { '5-hour': 60, Weekly: 10 });
@@ -544,7 +579,7 @@ test('Settings shows what the accounts balanced on a computer used together', as
   );
   await expect(used('Weekly')).toHaveAttribute(
     'aria-valuetext',
-    '30% used, recommended 99.4%, average of 3 accounts',
+    '30% used, recommended 100%, average of 3 accounts',
   );
   await expect(accountsOn(page).getByRole('img', { name: 'On track' })).toBeVisible();
   await expect(accountsOn(page).getByRole('img', { name: 'Below pace' })).toBeVisible();
@@ -576,7 +611,7 @@ test('Settings shows what the accounts balanced on a computer used together', as
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await expect(used('Weekly')).toHaveAttribute(
     'aria-valuetext',
-    '50% used, recommended 99.4%, average of 1 account',
+    '50% used, recommended 100%, average of 1 account',
   );
 });
 
@@ -584,7 +619,7 @@ test('Connections shows what an agent’s accounts on a computer used together',
   await prepare(page);
   const second = await addAccount(page, 'Claude', 'Second Claude');
   const login = await connectionOf(page, 'Claude CLI login');
-  // An hour before every reset, as above: the 5-hour guide is 80% and the weekly one 99.4%.
+  // An hour before every reset, as above: the 5-hour guide is 80% and the weekly one 100%.
   await setUsage(page, login, { '5-hour': 95, Weekly: 50 });
   await setUsage(page, second, { '5-hour': 85, Weekly: 30 });
   // Opened again, Connections reads its accounts again.
@@ -604,7 +639,7 @@ test('Connections shows what an agent’s accounts on a computer used together',
   );
   await expect(used('Weekly')).toHaveAttribute(
     'aria-valuetext',
-    '40% used, recommended 99.4%, average of 2 accounts',
+    '40% used, recommended 100%, average of 2 accounts',
   );
   await expect(overall.getByRole('img', { name: 'Ahead of pace' })).toBeVisible();
   await expect(overall.getByRole('img', { name: 'Below pace' })).toBeVisible();

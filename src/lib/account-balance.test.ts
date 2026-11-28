@@ -87,6 +87,87 @@ describe('balancing new chats between accounts', () => {
     ).toBe('b');
   });
 
+  it('counts a weekly limit’s share left for the days until it resets', () => {
+    const week = (used: number, days: number | null) =>
+      reading(
+        [limit(10080, used, days == null ? null : seconds(now + days * 24 * hour))],
+        'codex',
+      );
+    // The report of 2026-11-28: an account at 75% of its week with a day to go took no new chats
+    // from one at 40% with five days left, and lost its 25% at the reset. Spread over the days
+    // left, the first has 25% for today and the second 12%.
+    const report = [account('soon', week(75, 0.8)), account('later', week(40, 4.5))];
+    expect(balancedAccount(report, gpt, now)).toBe('soon');
+    // Chats started one after another before any reading shows them go there more often, the
+    // other taking its turns as the replies running there share what is left with each new chat.
+    const running = { soon: 0, later: 0 };
+    const chosen = Array.from({ length: 6 }, () => {
+      const choice = balancedAccount(
+        [
+          account('soon', week(75, 0.8), { running: running.soon }),
+          account('later', week(40, 4.5), { running: running.later }),
+        ],
+        gpt,
+        now,
+      ) as 'soon' | 'later';
+      running[choice]++;
+      return choice;
+    });
+    expect(chosen).toEqual(['soon', 'later', 'soon', 'soon', 'later', 'soon']);
+    // Resetting together, they compare by their share left, as before.
+    expect(
+      balancedAccount([account('a', week(75, 3)), account('b', week(40, 3))], gpt, now),
+    ).toBe('b');
+    // A share nearly used up hours before its reset is no reason to send a chat there.
+    expect(
+      balancedAccount([account('a', week(98, 0.1)), account('b', week(30, 6))], gpt, now),
+    ).toBe('b');
+    // A week whose reset is not reported, or that began again since its reading, has its seven
+    // days ahead, as one just begun does.
+    const ahead = account('ahead', week(20, 6.5));
+    expect(balancedAccount([ahead, account('unreported', week(0, null))], gpt, now)).toBe(
+      'unreported',
+    );
+    expect(balancedAccount([ahead, account('again', week(10, -0.01))], gpt, now)).toBe('again');
+  });
+
+  it('lets level accounts go to the weekly limit that resets soonest for its share left', () => {
+    const both = (fiveHour: number, weekly: number, days: number) =>
+      reading([limit(300, fiveHour), limit(10080, weekly, seconds(now + days * 24 * hour))]);
+    // Level on the 5-hour limit, the one that would lose more at its weekly reset.
+    expect(
+      balancedAccount(
+        [account('later', both(12, 40, 4.5)), account('soon', both(10, 75, 0.8))],
+        sonnet,
+        now,
+      ),
+    ).toBe('soon');
+    // The 5-hour limit still comes first.
+    expect(
+      balancedAccount(
+        [account('later', both(0, 40, 4.5)), account('soon', both(10, 75, 0.8))],
+        sonnet,
+        now,
+      ),
+    ).toBe('later');
+  });
+
+  it('weighs the tolerance as the room, so a chosen account stays while within 5 points', () => {
+    const week = (used: number, days: number) =>
+      reading([limit(10080, used, seconds(now + days * 24 * hour))], 'codex');
+    // On the last day of its week each point left counts seven times, and so does the
+    // tolerance: 12% left there is within 5 points of the 14.3% that would match a fresh week's
+    // room, 8% is not.
+    const fresh = account('fresh', week(0, 7));
+    const last = (used: number) => account('last', week(used, 0.5));
+    expect(balancedAccount([fresh, last(88)], gpt, now, 'last')).toBe('last');
+    expect(balancedAccount([fresh, last(92)], gpt, now, 'last')).toBe('fresh');
+    // With seven days to go a point is a point.
+    const other = (used: number) => account('other', week(used, 7));
+    expect(balancedAccount([fresh, other(4)], gpt, now, 'other')).toBe('other');
+    expect(balancedAccount([fresh, other(6)], gpt, now, 'other')).toBe('fresh');
+  });
+
   it('shares what is left of an account between the replies running there and the new chat', () => {
     // A reply running on the least used account leaves the new chat half of what is left there.
     expect(
@@ -418,7 +499,8 @@ describe('what the accounts balanced on a computer used together', () => {
         counted: 2,
         unread: 0,
         used: 30,
-        expected: 40,
+        // Each account's shares through the end of its day: 71.4% and 28.6%.
+        expected: 50,
         pace: 'below',
       },
     ]);
@@ -426,7 +508,7 @@ describe('what the accounts balanced on a computer used together', () => {
     expect(weekly.pace).toMatchObject({
       label: 'Below pace',
       tone: 'good',
-      detail: '10.0 percentage points below the even-use guide.',
+      detail: "5.7 percentage points of earlier days' shares unused.",
     });
   });
 
@@ -479,7 +561,8 @@ describe('what the accounts balanced on a computer used together', () => {
         counted: 2,
         unread: 0,
         used: 50,
-        expected: 50,
+        // Halfway through their week, with 3.5 days to go: four days' shares of seven.
+        expected: 57.142857,
         pace: 'on-track',
       },
     ]);
@@ -499,7 +582,7 @@ describe('what the accounts balanced on a computer used together', () => {
         id: 'fable-weekly',
         label: 'Fable weekly',
         used: 70,
-        expected: 40,
+        expected: 50,
         pace: 'ahead',
       }),
     ]);

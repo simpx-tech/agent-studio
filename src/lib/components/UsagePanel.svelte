@@ -8,7 +8,7 @@
   import CompactionControls from './CompactionControls.svelte';
   import { providers, type ChatSettings, type Conversation } from '$lib/domain';
   import type { ModelInfo } from '$lib/models';
-  import { contextPace, quotaPace } from '$lib/pace';
+  import { contextPace, quotaPace, recommendation, recommendationTitle } from '$lib/pace';
   import {
     compactTokens,
     creditReading,
@@ -105,9 +105,7 @@
       window.usedPercent > window.pace.expectedPercent}
     title={window.usedPercent == null
       ? undefined
-      : window.pace.expectedPercent == null
-        ? window.pace.detail
-        : `${percentage(window.usedPercent)} used; recommended ${percentage(window.pace.expectedPercent)} at the time of this reading.`}
+      : recommendationTitle(window.usedPercent, window.pace, now)}
     role={compact ? 'progressbar' : 'meter'}
     aria-label={`${window.label} limit used`}
     aria-valuemin="0"
@@ -115,7 +113,7 @@
     aria-valuenow={window.usedPercent == null ? undefined : clampPercent(window.usedPercent)}
     aria-valuetext={window.usedPercent == null
       ? 'Checking usage'
-      : `${percentage(window.usedPercent)} used${window.pace.expectedPercent == null ? '' : `, recommended ${percentage(window.pace.expectedPercent)}`}${isStale(snapshot, window, now) || error ? ', last reported' : ''}`}
+      : `${percentage(window.usedPercent)} used${window.pace.expectedPercent == null ? '' : `, ${recommendation(window.pace, now)}`}${isStale(snapshot, window, now) || error ? ', last reported' : ''}`}
   >
     {#if window.usedPercent != null}<i
         class={`quota-fill tone-${window.pace.tone}`}

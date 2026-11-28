@@ -850,16 +850,20 @@ test('quota pace explains ahead, below, and on-track budgets and withdraws guida
     'background-color',
     steadyColor,
   );
-  for (const [label, current] of [
-    ['5-hour', 70],
-    ['weekly', 25],
-    ['fable-weekly', 50],
+  // Halfway through each window: the 5-hour guide is 50%, and a week, shared out by day, has the
+  // fourth of its seven days' shares, up to 57.1%, until 12 hours from now.
+  for (const [label, current, recommended] of [
+    ['5-hour', 70, 0.5],
+    ['weekly', 25, 4 / 7],
+    ['fable-weekly', 50, 4 / 7],
   ] as const) {
     const card = page.getByTestId(`limit-${label}`);
     await expect(card).not.toContainText(/Recommended|Guide unavailable/);
     await expect(card.getByRole('meter')).toHaveAttribute(
       'aria-valuetext',
-      `${current}% used, recommended 50%`,
+      label === '5-hour'
+        ? `${current}% used, recommended 50%`
+        : new RegExp(`^${current}% used, recommended 57\\.1% by \\S`),
     );
     const bars = await card.locator('.usage-meter').evaluate((el) => {
       const actual = el.querySelector('.quota-fill')!.getBoundingClientRect();
@@ -874,9 +878,9 @@ test('quota pace explains ahead, below, and on-track budgets and withdraws guida
       };
     });
     expect(bars.actual).toBeCloseTo(current / 100, 2);
-    expect(bars.recommended).toBeCloseTo(0.5, 2);
+    expect(bars.recommended).toBeCloseTo(recommended, 2);
     expect(bars.aligned && bars.sameTrack).toBe(true);
-    await expectVisibleQuotaComparison(card.getByRole('meter'), current > 50);
+    await expectVisibleQuotaComparison(card.getByRole('meter'), current / 100 > recommended);
   }
   await expect(page.locator('.usage-strip .recommended-fill')).toHaveCount(3);
   await expect(page.locator('.usage-strip')).not.toContainText(/Recommended|Guide unavailable/);

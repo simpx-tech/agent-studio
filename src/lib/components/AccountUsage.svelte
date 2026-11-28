@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { LoaderCircle } from '@lucide/svelte';
   import type { ProviderId } from '$lib/domain';
-  import { quotaPace } from '$lib/pace';
+  import { quotaPace, recommendation, recommendationTitle } from '$lib/pace';
   import {
     accountLimits,
     isStale,
@@ -107,12 +107,10 @@
             aria-valuenow={window.usedPercent == null ? undefined : clamp(window.usedPercent)}
             aria-valuetext={window.usedPercent == null
               ? 'Checking usage'
-              : `${percentage(window.usedPercent)} used${window.pace.expectedPercent == null ? '' : `, recommended ${percentage(window.pace.expectedPercent)}`}${stale ? ', last reported' : ''}`}
+              : `${percentage(window.usedPercent)} used${window.pace.expectedPercent == null ? '' : `, ${recommendation(window.pace, now)}`}${stale ? ', last reported' : ''}`}
             title={window.usedPercent == null
               ? undefined
-              : window.pace.expectedPercent == null
-                ? window.pace.detail
-                : `${percentage(window.usedPercent)} used; recommended ${percentage(window.pace.expectedPercent)} at the time of this reading.`}
+              : recommendationTitle(window.usedPercent, window.pace, now)}
           >
             {#if window.usedPercent != null}<i
                 class={`quota-fill tone-${window.pace.tone}`}

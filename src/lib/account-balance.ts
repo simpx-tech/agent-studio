@@ -6,27 +6,32 @@ import {
   type ProviderId,
 } from './domain';
 import { computerViews, type Fleet } from './fleet';
-import { guidePace, quotaPace, type QuotaPace } from './pace';
+import { daysUntil, guidePace, quotaPace, type QuotaPace } from './pace';
 import {
   limitSlot,
   limitSlots,
   resetTime,
   visibleLimits,
   type LimitSlot,
+  type LimitWindow,
   type UsageSnapshot,
 } from './usage';
 
 // Balancing new chats between accounts (Settings → New chats, off unless turned on): a new chat
 // starts on the account of its agent, on its computer, that has the most room for it, so several
-// accounts are used evenly instead of one until its limit. Accounts compare by the share left of
-// their 5-hour limit, or of their weekly limit when they report no 5-hour one, divided between
-// the replies running there and the new chat, since replies running together go on using up the
-// same limit.
+// accounts are used evenly instead of one until its limit. Accounts compare by what they have
+// for each day until their limit resets: the share left of their 5-hour limit, which resets
+// within the day, or, when they report no 5-hour one, the share left of their weekly limit
+// counted for the days until it resets (requested 2026-11-28, after an account at 75% of its
+// week with a day to go took no new chats from one at 40% with five days left). Either is
+// divided between the replies running there and the new chat, since replies running together go
+// on using up the same limit.
 
 /**
- * Accounts whose room differs by no more than this many percentage points count as level, as a
- * limit within 5 points of its even-use guide counts as on track. Level accounts take turns, so
- * chats started together spread over them before their readings show any of it.
+ * Accounts whose room differs by no more than this many percentage points of share left count
+ * as level, as the 5-hour limit's pace counts 5 points either side of even use as on track.
+ * Level accounts take turns, so chats started together spread over them before their readings
+ * show any of it.
  */
 export const levelPoints = 5;
 
@@ -45,15 +50,43 @@ type Standing = BalanceCandidate & {
   /** 0 has room, 1 reports no usage to compare, 2 has used a limit up. */
   group: 0 | 1 | 2;
   /**
-   * The share accounts compare by: what is left of the 5-hour limit, or of the weekly one without
-   * it, for each of the replies running there and the new chat.
+   * The room accounts compare by: what is left of the 5-hour limit, or of the weekly one without
+   * it, counted for the days until it resets, for each of the replies running there and the new
+   * chat.
    */
   room: number;
-  /** The share used of the weekly limit, which decides between level accounts. */
+  /** How far below the most room an account is still level: `levelPoints`, counted as its room. */
+  tolerance: number;
+  /** The room of the weekly limit, which decides between level accounts. */
   weekly: number;
   /** When a limit that is used up begins again. */
   resumes: number;
 };
+
+/**
+ * What a limit has for each day until it resets (requested 2026-11-28: "it should consider the
+ * reset time and the remaining usage"): the share left, times the days of its window, divided by
+ * the days until its reset, today's included. A weekly limit then counts its share left in its
+ * first day and seven times it in its last, so what would be lost at a reset soon outweighs what
+ * a reset days away leaves time for: 25% left a day before its reset is 175, 60% left with five
+ * days to go 84. A limit shorter than a day resets within it and counts its share left, and so
+ * does one whose window has not begun: no reset reported, or one passed since its reading.
+ */
+function limitRoom(window: LimitWindow, now: number) {
+  const reset = resetTime(window.resetsAt);
+  const ended = reset != null && reset <= now;
+  // A window that ended since its reading began again empty.
+  const used = window.usedPercent == null ? null : ended ? 0 : window.usedPercent;
+  const days = Math.max(1, Math.ceil((window.windowMinutes ?? 0) / 1440));
+  const weight = reset == null || ended ? 1 : days / Math.min(days, daysUntil(reset, now));
+  return {
+    minutes: window.windowMinutes,
+    used,
+    reset,
+    weight,
+    room: used == null ? null : Math.max(0, 100 - used) * weight,
+  };
+}
 
 function standing(
   candidate: BalanceCandidate,
@@ -67,19 +100,15 @@ function standing(
     model: chat.model,
     reasoning: '',
     instructions: '',
-  }).map((window) => {
-    const reset = resetTime(window.resetsAt);
-    // A window that ended since its reading began again empty.
-    const used =
-      window.usedPercent == null ? null : reset != null && reset <= now ? 0 : window.usedPercent;
-    return { minutes: window.windowMinutes, used, reset };
-  });
-  const fiveHour = limits.find((limit) => limit.minutes === 300)?.used ?? null;
-  // The weekly limit the chat would run out of first: a Claude Fable chat also has Fable's own.
-  const weeks = limits.flatMap((limit) =>
-    limit.minutes === 10080 && limit.used != null ? [limit.used] : [],
-  );
-  const weekly = weeks.length ? Math.max(...weeks) : null;
+  }).map((window) => limitRoom(window, now));
+  const fiveHour = limits.find((limit) => limit.minutes === 300 && limit.room != null);
+  // The weekly limit the chat has least room on: a Claude Fable chat also has Fable's own.
+  const weekly = limits
+    .filter((limit) => limit.minutes === 10080 && limit.room != null)
+    .reduce<(typeof limits)[number] | undefined>(
+      (least, limit) => (!least || limit.room! < least.room! ? limit : least),
+      undefined,
+    );
   const spent = limits.filter((limit) => limit.used != null && limit.used >= 100);
   // Claude also says so itself when it refuses a reply over an account-wide limit.
   const refused = candidate.snapshot?.live?.limitStatus;
@@ -90,16 +119,17 @@ function standing(
     refused.resetsAt * 1000 > now
       ? refused.resetsAt * 1000
       : null;
-  const used = fiveHour ?? weekly;
+  const compared = fiveHour ?? weekly;
   return {
     ...candidate,
     order,
-    group: spent.length || refusedUntil != null ? 2 : used == null ? 1 : 0,
+    group: spent.length || refusedUntil != null ? 2 : compared == null ? 1 : 0,
     // What is left is shared by the replies already running there and the new chat: with two
     // running on an account that used 30% of its 5-hour limit, the new chat has a third of the
     // 70% left there.
-    room: used == null ? -Infinity : (100 - used) / (candidate.running + 1),
-    weekly: weekly ?? Infinity,
+    room: compared == null ? -Infinity : compared.room! / (candidate.running + 1),
+    tolerance: levelPoints * (compared?.weight ?? 1),
+    weekly: weekly?.room ?? -Infinity,
     resumes: Math.max(refusedUntil ?? 0, ...spent.map((limit) => limit.reset ?? Infinity)),
   };
 }
@@ -120,8 +150,8 @@ function first(standings: Standing[], ...keys: ((standing: Standing) => number)[
  * The account a new chat starts on, of those its agent has on its computer (`candidates`, in the
  * order the Agent picker lists them). Accounts with room come first, then those without a
  * reading, then those with a limit used up. Among accounts with room, those within `levelPoints`
- * of the most room for the new chat are level, and the chat goes to the one with the fewest
- * replies running, then the lowest weekly usage, then the one used longest ago.
+ * of share left of the most room for the new chat are level, and the chat goes to the one with
+ * the fewest replies running, then the most weekly room, then the one used longest ago.
  *
  * Given the account the chat already has (`current`), it keeps that one while no other account
  * is better by more than the tolerance, so a chosen account does not move with every reading.
@@ -137,7 +167,7 @@ export function balancedAccount(
   const group = Math.min(...standings.map((s) => s.group));
   const best = standings.filter((s) => s.group === group);
   const most = Math.max(...best.map((s) => s.room));
-  const level = group === 0 ? best.filter((s) => s.room >= most - levelPoints) : best;
+  const level = group === 0 ? best.filter((s) => s.room >= most - s.tolerance) : best;
   if (current !== undefined && level.some((s) => s.connectionId === current)) return current;
   return (
     group === 2
@@ -145,7 +175,7 @@ export function balancedAccount(
       : first(
           level,
           (s) => s.running,
-          (s) => s.weekly,
+          (s) => -s.weekly,
           (s) => s.lastUsed,
         )
   ).connectionId;
@@ -197,7 +227,10 @@ export type PoolLimit = {
   unread: number;
   /** The average share used, or null while no account has a reading yet. */
   usedPercent: number | null;
-  /** The average share that using each account evenly over its window would have used. */
+  /**
+   * The average share that using each account evenly would have used: by the end of today's
+   * share for a limit shared out by day, by the reading for a shorter one.
+   */
   expectedPercent: number | null;
   pace: Pick<QuotaPace, 'state' | 'label' | 'tone' | 'detail' | 'advice'>;
 };
@@ -223,7 +256,10 @@ export function poolUsage(
   now: number,
 ): PoolLimit[] {
   const settings: ChatSettings = { provider, model: '', reasoning: '', instructions: '' };
-  const tallies = new Map<LimitSlot, { used: number[]; expected: number[]; unread: number }>();
+  const tallies = new Map<
+    LimitSlot,
+    { used: number[]; from: number[]; to: number[]; daily: boolean; unread: number }
+  >();
   // The limits each account whose reading may leave some out reported.
   const incomplete: Set<LimitSlot>[] = [];
   for (const { snapshot, failed } of readings) {
@@ -232,13 +268,16 @@ export function poolUsage(
       const slot = limitSlot(window);
       reported.add(slot);
       let tally = tallies.get(slot);
-      if (!tally) tallies.set(slot, (tally = { used: [], expected: [], unread: 0 }));
+      if (!tally)
+        tallies.set(slot, (tally = { used: [], from: [], to: [], daily: false, unread: 0 }));
       const pace = quotaPace(window, snapshot, now, failed);
-      if (pace.state === 'unknown' || window.usedPercent == null || pace.expectedPercent == null)
-        tally.unread++;
+      if (pace.state === 'unknown' || window.usedPercent == null || !pace.guide) tally.unread++;
       else {
         tally.used.push(window.usedPercent);
-        tally.expected.push(pace.expectedPercent);
+        tally.from.push(pace.guide.from);
+        tally.to.push(pace.guide.to);
+        // A kind of limit has one length, so its accounts share their days or none do.
+        tally.daily = pace.guide.daily;
       }
     }
     if (!snapshot || snapshot.partial) incomplete.push(reported);
@@ -249,7 +288,7 @@ export function poolUsage(
     const tally = tallies.get(slot);
     if (!tally?.used.length) return [];
     const usedPercent = average(tally.used);
-    const expectedPercent = average(tally.expected);
+    const guide = { daily: tally.daily, from: average(tally.from), to: average(tally.to) };
     return [
       {
         id: slot,
@@ -257,8 +296,8 @@ export function poolUsage(
         counted: tally.used.length,
         unread: tally.unread + incomplete.filter((reported) => !reported.has(slot)).length,
         usedPercent,
-        expectedPercent,
-        pace: guidePace(usedPercent, expectedPercent),
+        expectedPercent: guide.to,
+        pace: guidePace(usedPercent, guide),
       },
     ];
   });

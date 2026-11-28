@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { contextPace, forecastWarning, quotaPace } from './pace';
+import {
+  contextPace,
+  forecastWarning,
+  quotaPace,
+  recommendation,
+  recommendationTitle,
+} from './pace';
 import { contextFor, type LimitWindow, type UsageSnapshot } from './usage';
 import { initialWorkspace, settingsFor, type Conversation } from './domain';
 import { automaticModel } from './models';
@@ -85,6 +91,76 @@ describe('quota pace', () => {
       allowanceUnit: 'day',
     });
     expect(quotaPace(week, snapshot, now).projectedPercent).toBeCloseTo(175, 8);
+  });
+  it('shares a limit longer than a day out by day, each ending at its reset’s time of day', () => {
+    const day = 86_400_000;
+    // Halfway through a week: the reset is 3.5 days away, so today is the fourth of seven days
+    // and ends 12 hours from now, when the shares of four days add up to 57.1%.
+    const week = (used: number, resetIn = 3.5 * day): LimitWindow => ({
+      ...window,
+      id: 'week',
+      label: 'Weekly',
+      windowMinutes: 10080,
+      usedPercent: used,
+      resetsAt: (now + resetIn) / 1000,
+    });
+    const pace = quotaPace(week(50), snapshot, now);
+    expect(pace).toMatchObject({
+      state: 'on-track',
+      guide: { daily: true, until: now + 12 * 3_600_000 },
+      allowance: 12.5,
+      allowanceUnit: 'day',
+      detail: "Within today's share.",
+    });
+    expect(pace.guide!.from).toBeCloseTo(300 / 7, 8);
+    expect(pace.expectedPercent).toBeCloseTo(400 / 7, 8);
+    // Anywhere between the earlier days' shares and today's is on track, however little or much
+    // of today has passed.
+    for (const [used, state] of [
+      [42.8, 'below'],
+      [43, 'on-track'],
+      [57, 'on-track'],
+      [57.2, 'ahead'],
+      [100, 'exhausted'],
+    ] as const)
+      expect(quotaPace(week(used), snapshot, now).state).toBe(state);
+    // A night without use costs nothing: ten hours later the same reading still stands where the
+    // day left it, where an even-use guide that never sleeps would have moved 6 points on.
+    const later = now + 10 * 3_600_000;
+    const night = quotaPace(week(57), { ...snapshot, checkedAt: later / 1000 }, later);
+    expect(night.state).toBe('on-track');
+    expect(night.expectedPercent).toBeCloseTo(400 / 7, 8);
+    expect(quotaPace(week(60), snapshot, now).detail).toBe(
+      "2.9 percentage points past today's share.",
+    );
+    // The report of 2026-11-28: 75% used with less than a day to go is short of the earlier
+    // days' shares, and all that is left is today's.
+    const last = quotaPace(week(75, 20 * 3_600_000), snapshot, now);
+    expect(last).toMatchObject({
+      state: 'below',
+      expectedPercent: 100,
+      allowance: 25,
+      allowanceUnit: 'day',
+      detail: "10.7 percentage points of earlier days' shares unused.",
+      guide: { until: now + 20 * 3_600_000 },
+    });
+    // The first day of a week, from its very start.
+    expect(quotaPace(week(10, 7 * day), snapshot, now)).toMatchObject({
+      state: 'on-track',
+      guide: { from: 0 },
+      allowance: 90 / 7,
+    });
+    expect(quotaPace(week(15, 7 * day), snapshot, now).state).toBe('ahead');
+    // The bars name when today's share ends, and a shorter limit keeps the reading's guide.
+    const until = pace.guide!.until!;
+    expect(recommendation(pace, until)).toMatch(/^recommended 57\.1% by [^,]+$/);
+    expect(recommendation(last, last.guide!.until! - 2 * day)).toMatch(
+      /^recommended 100% by \S+, \S/,
+    );
+    expect(recommendationTitle(50, pace, now)).toMatch(/^50% used; recommended 57\.1% by .+\.$/);
+    expect(recommendationTitle(70, quotaPace(window, snapshot, now), now)).toBe(
+      '70% used; recommended 50% at the time of this reading.',
+    );
   });
   it('aligns the comparison to the reading and withholds unstable early projections', () => {
     expect(quotaPace(window, snapshot, now + 120000).expectedPercent).toBe(50);
